@@ -3,10 +3,13 @@ const $ = (id) => document.getElementById(id);
 const LS = localStorage;
 let TOKEN = LS.getItem('cc_token') || '';
 let ws = null;
+// Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
+// chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
-  claude: { model: 'sonnet', effort: 'high' },
+  claude: { model: 'opus', effort: 'xhigh' },
 };
+const AGENT_LABEL = { claude: 'Claude', codex: 'Codex' };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: LS.getItem('box_agent') || 'claude', parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, claude: { ...DEFAULT_SETTINGS.claude } } };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
@@ -818,10 +821,12 @@ How to continue:
 - Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
   enqueueText(cont, { displayText: `↻ Continue ${d.identifier}: ${d.title}` });
-  recordDelegation(d.identifier, { agent: s.agent, kind: 'resume', sessionId: s.id, sessionTitle: s.title });
+  await recordDelegation(d.identifier, { agent: s.agent, kind: 'resume', sessionId: s.id, sessionTitle: s.title });
+  toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
 }
 async function spawnIssueAgent(d, agent) {
   const slug = d.identifier.toLowerCase();
+  const branchPrefix = agent === 'codex' ? 'codex' : 'claude';
   const seed = `Work the Linear issue ${d.identifier}: "${d.title}".
 
 Everything you need about this ticket is below — description, every comment (the context we've already gathered), and the agents that already touched it. Read it before re-deriving anything; don't go re-fetch the Linear ticket.
@@ -830,14 +835,16 @@ ${buildIssueContext(d, curIssueSessions)}
 
 How to work it:
 - Do NOT edit a shared clone — create an isolated git worktree for your branch off the latest default branch:
-  git worktree add ../${slug} -b claude/${slug} && cd ../${slug}
+  git worktree add ../${slug} -b ${branchPrefix}/${slug} && cd ../${slug}
 - Implement + verify it runs, open a PR, and post the PR link as a comment on ${d.identifier}.
 - When done, set ${d.identifier} to In Review (or comment your status / blockers).`;
   const title = `${d.identifier}: ${d.title}`.slice(0, 60);
   setAgent(agent);
   await openChat({ id: null, title, cwd: defaultCwd, agent });
   enqueueText(seed, { displayText: `🤖 Work ${d.identifier}: ${d.title}`, title });
-  recordDelegation(d.identifier, { agent, kind: 'new', sessionTitle: title, key: cur.key });
+  toast(`Dispatching ${AGENT_LABEL[agent]} agent...`);
+  await recordDelegation(d.identifier, { agent, kind: 'new', sessionTitle: title, key: cur.key });
+  toast(`Dispatched ${d.identifier} to ${AGENT_LABEL[agent]}`);
 }
 
 /* ---------- new Linear issue ---------- */
@@ -987,13 +994,17 @@ function resetWsWatchdog() {
     }
   }, 10000);
 }
+function subscribeCurrentWS() {
+  if (!cur.key || !ws || ws.readyState !== 1) return;
+  try { ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); } catch {}
+}
 function connectWS() {
-  if (ws && ws.readyState <= 1) return;
+  if (ws && ws.readyState <= 1) { if (ws.readyState === 1) subscribeCurrentWS(); return; }
   if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
   ws.onmessage = (e) => { resetWsWatchdog(); onServer(JSON.parse(e.data)); };
-  ws.onopen = () => { resetWsWatchdog(); if (cur.key) ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); };
+  ws.onopen = () => { resetWsWatchdog(); subscribeCurrentWS(); };
   ws.onerror = () => { try { ws.close(); } catch {} };
   ws.onclose = () => { if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
 }
@@ -1016,6 +1027,13 @@ async function openChat(s) {
     cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
     for (const m of h.messages) addHistMessage(m);
+    scrollBottom();
+  } else if (s.carry && s.carry.length) {
+    // Agent switch: render the prior transcript inline so it reads as ONE continuous
+    // conversation, capped to the last 40 messages for snappiness (the agent still gets
+    // the fuller context via the seed prompt).
+    for (const m of s.carry.slice(-40)) addHistMessage(m);
+    addSwitchDivider(s.carryFrom || 'previous agent', cur.agent === 'codex' ? 'Codex' : 'Claude');
     scrollBottom();
   } else {
     addNote(cur.parentId ? `Forked from ${cur.parentTitle || cur.parentId.slice(0, 8)}. The first turn includes parent context.` : `New ${cur.agent === 'codex' ? 'Codex' : 'Claude'} chat in ${shortCwd(cur.cwd)} — say anything to begin.`);
@@ -1073,6 +1091,15 @@ function goBackFromChat() {
 $('backBtn').onclick = goBackFromChat;
 
 function addNote(t) { const e = document.createElement('div'); e.className = 'muted'; e.style.textAlign = 'center'; e.style.fontSize = '13px'; e.textContent = t; $('messages').appendChild(e); }
+// Visual seam in a switched chat: everything above came from the previous agent; the
+// new agent picks up below with the full prior context.
+function addSwitchDivider(fromLabel, toLabel) {
+  const e = document.createElement('div');
+  e.className = 'switchDivider';
+  e.innerHTML = `<span></span>`;
+  e.querySelector('span').textContent = `↪ continued in ${toLabel} from ${fromLabel}`;
+  $('messages').appendChild(e);
+}
 function fmtTs(ts) {
   if (!ts) return '';
   const d = new Date(ts), now = Date.now(), diff = now - d.getTime();
@@ -1255,7 +1282,7 @@ function summarize(name, input) {
   return '';
 }
 // Friendly past-tense verb per tool (native-app style: "Read index.mjs", "Ran <desc>").
-const TOOL_VERB = { Read: 'Read', Bash: 'Ran', Edit: 'Edited', MultiEdit: 'Edited', Write: 'Wrote', NotebookEdit: 'Edited', Grep: 'Searched', Glob: 'Searched', Task: 'Delegated', WebFetch: 'Fetched', WebSearch: 'Searched', TodoWrite: 'Updated plan', SlashCommand: 'Ran' };
+const TOOL_VERB = { Read: 'Read', Bash: 'Ran', Edit: 'Edited', MultiEdit: 'Edited', Write: 'Wrote', NotebookEdit: 'Edited', Grep: 'Searched', Glob: 'Searched', Task: 'Delegated', WebFetch: 'Fetched', WebSearch: 'Searched', TodoWrite: 'Updated plan', SlashCommand: 'Ran', ApplyPatch: 'Edited', MCP: 'Tool' };
 const toolVerb = (name) => TOOL_VERB[name] || name;
 
 /* busy / stop / queue state — server is the source of truth */
@@ -1648,14 +1675,18 @@ function setAgent(agent) {
   refreshAgentChip();
 }
 $('agentChip').onclick = () => {
-  if (cur.id) {
-    // agent type is fixed for existing sessions, but model/effort can still be changed
-    openModelSheet(); return;
-  }
-  openSheet('Agent', [
+  const rows = [
     { ic: '⌘', label: 'Claude', sel: cur.agent !== 'codex', desc: 'Remote-control Claude Code', fn: () => setAgent('claude') },
     { ic: '◆', label: 'Codex', sel: cur.agent === 'codex', desc: 'Run Codex on the box', fn: () => setAgent('codex') },
-  ]);
+  ];
+  if (cur.id) {
+    rows[0].desc = cur.agent === 'codex' ? 'Continue this transcript in Claude' : 'Current agent';
+    rows[0].fn = () => (cur.agent === 'codex' ? continueWithAgent('claude') : openModelSheet());
+    rows[1].desc = cur.agent === 'codex' ? 'Current agent' : 'Continue this transcript in Codex';
+    rows[1].fn = () => (cur.agent === 'codex' ? openModelSheet() : continueWithAgent('codex'));
+    rows.push({ ic: '', label: 'Model settings', desc: 'Change options for the active agent', fn: () => openModelSheet() });
+  }
+  openSheet('Agent', rows);
 };
 
 /* ---------- attach files (images + any file type) ---------- */
@@ -1801,9 +1832,9 @@ function messageText(m) {
     return '';
   }).filter(Boolean).join('\n').trim();
 }
-function compactTranscript(messages, maxChars = 14000) {
+function compactTranscript(messages, maxChars = 14000, maxMsgs = 28) {
   const rows = [];
-  for (const m of (messages || []).slice(-28)) {
+  for (const m of (messages || []).slice(-maxMsgs)) {
     let text = messageText(m).replace(/\s+\n/g, '\n').trim();
     if (!text) continue;
     if (text.length > 1800) text = text.slice(0, 900) + '\n[...trimmed...]\n' + text.slice(-700);
@@ -1827,6 +1858,51 @@ Parent transcript:
 ${transcript || '(No parent transcript was available.)'}
 
 For this seed turn, briefly acknowledge that the fork is ready and mention the parent thread title. Wait for the next user instruction.`;
+}
+function buildSwitchPrompt(source, targetAgent, messages) {
+  // Carry the prior conversation at high fidelity (last ~60 turns, ~40k chars) so the
+  // hand-off feels like the SAME session continuing — not a fresh chat with a summary.
+  const transcript = compactTranscript(messages, 40000, 60);
+  const sourceAgent = source.agent === 'codex' ? 'Codex' : 'Claude';
+  const target = targetAgent === 'codex' ? 'Codex' : 'Claude';
+  return `You are continuing a Box mobile conversation in ${target} after switching from ${sourceAgent}.
+
+Source thread: ${source.title}
+Source id: ${source.id}
+Workspace: ${source.cwd}
+
+Use the transcript below as prior context. Continue as the same working conversation, but do not assume future messages in the source thread are visible here unless they are pasted later.
+
+Source transcript:
+${transcript || '(No source transcript was available.)'}
+
+For this first turn, briefly acknowledge that ${target} has the prior context and is ready to continue. Do not run commands or edit files until the next user instruction.`;
+}
+async function continueWithAgent(targetAgent) {
+  targetAgent = targetAgent === 'codex' ? 'codex' : 'claude';
+  if (running) return toast('Wait for the current turn to finish before switching');
+  if (!cur.id) { setAgent(targetAgent); return toast(`${AGENT_LABEL[targetAgent]} selected`); }
+  if (targetAgent === cur.agent) return openModelSheet();
+  let h;
+  try { h = await (await api(`/api/sessions/${cur.id}/history`)).json(); }
+  catch { return toast('Could not load current transcript'); }
+  const source = {
+    id: cur.id,
+    title: cur.title || 'Box chat',
+    cwd: h.cwd || cur.cwd || defaultCwd,
+    agent: cur.agent === 'codex' ? 'codex' : 'claude',
+  };
+  // Don't stack "Codex: Claude: …" titles across repeated switches.
+  const baseTitle = source.title.replace(/^(Claude|Codex):\s*/, '');
+  const title = `${AGENT_LABEL[targetAgent]}: ${baseTitle}`.slice(0, 80);
+  const messages = h.messages || [];
+  const prompt = buildSwitchPrompt(source, targetAgent, messages);
+  // carry = the prior transcript, rendered into the new chat so it reads as ONE continuous
+  // conversation; the target agent also gets it as context via the seed prompt.
+  await openChat({ id: null, title, cwd: source.cwd, agent: targetAgent, settings: normalizeSettings(h.settings || cur.settings), parentId: source.id, parentTitle: source.title, carry: messages, carryFrom: AGENT_LABEL[source.agent] });
+  cur.firstUser = `Continued from ${source.title}`;
+  enqueueText(prompt, { parentId: source.id, parentTitle: source.title, title, displayText: `↪ Continued in ${AGENT_LABEL[targetAgent]} — full prior context carried over` });
+  toast(`Continuing in ${AGENT_LABEL[targetAgent]}`);
 }
 async function forkCurrent() {
   if (cur.agent !== 'codex') return toast('/fork is Codex-only in Box right now');
@@ -1855,6 +1931,12 @@ function openStatusSheet() {
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });
   if (cur.agent === 'codex') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: () => {} });
   else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: () => {} });
+  if (cur.id) rows.push({
+    ic: cur.agent === 'codex' ? '⌘' : '◆',
+    label: `Continue in ${cur.agent === 'codex' ? 'Claude' : 'Codex'}`,
+    desc: 'Translate this transcript into a linked new session',
+    fn: () => continueWithAgent(cur.agent === 'codex' ? 'claude' : 'codex'),
+  });
   if (cur.id && cur.agent !== 'codex') rows.push({ ic: '', label: 'Switch account', desc: 'move this chat to another Claude account', fn: () => openAccountSwitch() });
   openSheet('Status', rows);
 }
