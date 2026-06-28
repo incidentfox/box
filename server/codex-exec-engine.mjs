@@ -80,6 +80,31 @@ export class CodexExecEngine {
         return;
       }
 
+      const tc = o.type === 'token_count' ? o : (o.type === 'event_msg' && o.payload && o.payload.type === 'token_count' ? o.payload : null);
+      if (tc && tc.info) {
+        emit({ type: 'context', info: tc.info });
+        return;
+      }
+
+      // codex 0.135's `exec --json` no longer streams standalone token_count events on
+      // stdout — per-turn token usage now rides on `turn.completed`. Without handling it
+      // here the context meter is frozen at 0 / window for the whole Codex session (the
+      // "0 / 258k" the phone showed). Synthesize the {last_token_usage} shape that
+      // contextFromCodexInfo already understands so the meter just works.
+      if (o.type === 'turn.completed' && o.usage) {
+        emit({ type: 'context', info: { last_token_usage: {
+          input_tokens: Number(o.usage.input_tokens) || 0,
+          output_tokens: Number(o.usage.output_tokens) || 0,
+        } } });
+        return;
+      }
+
+      if (o.type === 'event_msg' && o.payload && o.payload.type === 'agent_message') {
+        const text = String(o.payload.message || '').trim();
+        if (text) emit({ type: 'notice', text });
+        return;
+      }
+
       const item = o.item;
 
       // A tool starts → open its chip immediately so progress is live, not retro.

@@ -204,6 +204,26 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .bar strong { font-size: 17px; font-weight: 700; }
 .ctitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62vw; font-size: 16px; }
 .ghost { padding: 6px 10px; font-size: 19px; border-radius: 10px; color: var(--ink); }
+.contextMeter {
+  position: relative; flex: none; height: 28px; overflow: hidden; cursor: pointer;
+  border-bottom: 1px solid var(--line); background: var(--subtle);
+}
+.contextFill {
+  position: absolute; inset: 0 auto 0 0; width: 0; max-width: 100%;
+  background: color-mix(in srgb, var(--green) 18%, transparent); transition: width .25s ease;
+}
+.contextMeter.warn .contextFill { background: color-mix(in srgb, #b25f00 22%, transparent); }
+.contextMeter.hi .contextFill { background: color-mix(in srgb, #c0392b 24%, transparent); }
+.contextText {
+  position: relative; z-index: 1; height: 100%; display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 0 14px; color: var(--muted); font-size: 11.5px; font-weight: 650; white-space: nowrap;
+}
+.contextText > span:first-child { color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.contextText > span:last-child { flex: none; font-variant-numeric: tabular-nums; }
+.contextEst {
+  display: inline-block; margin-left: 4px; padding: 1px 5px; border-radius: 6px;
+  background: var(--card); border: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.2;
+}
 
 /* sessions list */
 /* sessions header + compose */
