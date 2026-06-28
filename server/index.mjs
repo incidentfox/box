@@ -1929,6 +1929,10 @@ async function runWorker(s) {
   s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; if (s.sessionId) RUNNING.delete(s.sessionId); bcast(s, { type: 'idle' });
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
+// Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
+// 200+ tool calls / many minutes). 12 min would SIGTERM it mid-work and make a
+// hard-working agent look like it stalled — give Codex turns a much longer safety net.
+const CODEX_TURN_TIMEOUT_MS = 45 * 60 * 1000;
 // A turn = inject the message into the session's RC process, then render from the
 // JSONL tail until the turn ends (assistant stop_reason === end_turn). Bash mode
 // stays a local shell. Normal mode goes through `claude --remote-control` so the
@@ -2036,7 +2040,7 @@ function runCodexTurn(s, msg, resolve) {
   s.turnTimer = setTimeout(() => {
     if (s.proc) { try { s.proc.kill('SIGTERM'); } catch {} }
     finish();
-  }, TURN_TIMEOUT_MS);
+  }, CODEX_TURN_TIMEOUT_MS);
   s.proc = codexEngine.run({
     sessionId: s.sessionId,
     cwd: s.cwd,

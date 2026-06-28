@@ -46,6 +46,8 @@ body { position: fixed; inset: 0; overflow: hidden; }
 .hidden { display: none !important; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); font-size: 14px; }
+.switchDivider { display: flex; align-items: center; gap: 10px; margin: 14px 2px; color: var(--accent); font-size: 11.5px; font-weight: 600; letter-spacing: .02em; }
+.switchDivider::before, .switchDivider::after { content: ''; flex: 1; height: 1px; background: linear-gradient(to right, transparent, var(--line), transparent); }
 .err { color: #c0392b; font-size: 14px; min-height: 18px; }
 .notice { color: #8a8f98; font-size: 12.5px; font-style: italic; margin: 2px 0; }
 .blocked { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 12px; padding: 11px 13px; margin: 6px 0; }

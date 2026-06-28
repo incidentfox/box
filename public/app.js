@@ -3,9 +3,11 @@ const $ = (id) => document.getElementById(id);
 const LS = localStorage;
 let TOKEN = LS.getItem('cc_token') || '';
 let ws = null;
+// Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
+// chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
-  claude: { model: 'sonnet', effort: 'high' },
+  claude: { model: 'opus', effort: 'xhigh' },
 };
 const AGENT_LABEL = { claude: 'Claude', codex: 'Codex' };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: LS.getItem('box_agent') || 'claude', parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, claude: { ...DEFAULT_SETTINGS.claude } } };
@@ -1026,6 +1028,13 @@ async function openChat(s) {
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
     for (const m of h.messages) addHistMessage(m);
     scrollBottom();
+  } else if (s.carry && s.carry.length) {
+    // Agent switch: render the prior transcript inline so it reads as ONE continuous
+    // conversation, capped to the last 40 messages for snappiness (the agent still gets
+    // the fuller context via the seed prompt).
+    for (const m of s.carry.slice(-40)) addHistMessage(m);
+    addSwitchDivider(s.carryFrom || 'previous agent', cur.agent === 'codex' ? 'Codex' : 'Claude');
+    scrollBottom();
   } else {
     addNote(cur.parentId ? `Forked from ${cur.parentTitle || cur.parentId.slice(0, 8)}. The first turn includes parent context.` : `New ${cur.agent === 'codex' ? 'Codex' : 'Claude'} chat in ${shortCwd(cur.cwd)} — say anything to begin.`);
   }
@@ -1082,6 +1091,15 @@ function goBackFromChat() {
 $('backBtn').onclick = goBackFromChat;
 
 function addNote(t) { const e = document.createElement('div'); e.className = 'muted'; e.style.textAlign = 'center'; e.style.fontSize = '13px'; e.textContent = t; $('messages').appendChild(e); }
+// Visual seam in a switched chat: everything above came from the previous agent; the
+// new agent picks up below with the full prior context.
+function addSwitchDivider(fromLabel, toLabel) {
+  const e = document.createElement('div');
+  e.className = 'switchDivider';
+  e.innerHTML = `<span></span>`;
+  e.querySelector('span').textContent = `↪ continued in ${toLabel} from ${fromLabel}`;
+  $('messages').appendChild(e);
+}
 function fmtTs(ts) {
   if (!ts) return '';
   const d = new Date(ts), now = Date.now(), diff = now - d.getTime();
@@ -1264,7 +1282,7 @@ function summarize(name, input) {
   return '';
 }
 // Friendly past-tense verb per tool (native-app style: "Read index.mjs", "Ran <desc>").
-const TOOL_VERB = { Read: 'Read', Bash: 'Ran', Edit: 'Edited', MultiEdit: 'Edited', Write: 'Wrote', NotebookEdit: 'Edited', Grep: 'Searched', Glob: 'Searched', Task: 'Delegated', WebFetch: 'Fetched', WebSearch: 'Searched', TodoWrite: 'Updated plan', SlashCommand: 'Ran' };
+const TOOL_VERB = { Read: 'Read', Bash: 'Ran', Edit: 'Edited', MultiEdit: 'Edited', Write: 'Wrote', NotebookEdit: 'Edited', Grep: 'Searched', Glob: 'Searched', Task: 'Delegated', WebFetch: 'Fetched', WebSearch: 'Searched', TodoWrite: 'Updated plan', SlashCommand: 'Ran', ApplyPatch: 'Edited', MCP: 'Tool' };
 const toolVerb = (name) => TOOL_VERB[name] || name;
 
 /* busy / stop / queue state — server is the source of truth */
@@ -1814,9 +1832,9 @@ function messageText(m) {
     return '';
   }).filter(Boolean).join('\n').trim();
 }
-function compactTranscript(messages, maxChars = 14000) {
+function compactTranscript(messages, maxChars = 14000, maxMsgs = 28) {
   const rows = [];
-  for (const m of (messages || []).slice(-28)) {
+  for (const m of (messages || []).slice(-maxMsgs)) {
     let text = messageText(m).replace(/\s+\n/g, '\n').trim();
     if (!text) continue;
     if (text.length > 1800) text = text.slice(0, 900) + '\n[...trimmed...]\n' + text.slice(-700);
@@ -1842,7 +1860,9 @@ ${transcript || '(No parent transcript was available.)'}
 For this seed turn, briefly acknowledge that the fork is ready and mention the parent thread title. Wait for the next user instruction.`;
 }
 function buildSwitchPrompt(source, targetAgent, messages) {
-  const transcript = compactTranscript(messages, 18000);
+  // Carry the prior conversation at high fidelity (last ~60 turns, ~40k chars) so the
+  // hand-off feels like the SAME session continuing — not a fresh chat with a summary.
+  const transcript = compactTranscript(messages, 40000, 60);
   const sourceAgent = source.agent === 'codex' ? 'Codex' : 'Claude';
   const target = targetAgent === 'codex' ? 'Codex' : 'Claude';
   return `You are continuing a Box mobile conversation in ${target} after switching from ${sourceAgent}.
@@ -1872,11 +1892,16 @@ async function continueWithAgent(targetAgent) {
     cwd: h.cwd || cur.cwd || defaultCwd,
     agent: cur.agent === 'codex' ? 'codex' : 'claude',
   };
-  const title = `${AGENT_LABEL[targetAgent]}: ${source.title}`.slice(0, 80);
-  const prompt = buildSwitchPrompt(source, targetAgent, h.messages || []);
-  await openChat({ id: null, title, cwd: source.cwd, agent: targetAgent, settings: normalizeSettings(h.settings || cur.settings), parentId: source.id, parentTitle: source.title });
+  // Don't stack "Codex: Claude: …" titles across repeated switches.
+  const baseTitle = source.title.replace(/^(Claude|Codex):\s*/, '');
+  const title = `${AGENT_LABEL[targetAgent]}: ${baseTitle}`.slice(0, 80);
+  const messages = h.messages || [];
+  const prompt = buildSwitchPrompt(source, targetAgent, messages);
+  // carry = the prior transcript, rendered into the new chat so it reads as ONE continuous
+  // conversation; the target agent also gets it as context via the seed prompt.
+  await openChat({ id: null, title, cwd: source.cwd, agent: targetAgent, settings: normalizeSettings(h.settings || cur.settings), parentId: source.id, parentTitle: source.title, carry: messages, carryFrom: AGENT_LABEL[source.agent] });
   cur.firstUser = `Continued from ${source.title}`;
-  enqueueText(prompt, { parentId: source.id, parentTitle: source.title, title, displayText: `Continue in ${AGENT_LABEL[targetAgent]} from ${source.title}` });
+  enqueueText(prompt, { parentId: source.id, parentTitle: source.title, title, displayText: `↪ Continued in ${AGENT_LABEL[targetAgent]} — full prior context carried over` });
   toast(`Continuing in ${AGENT_LABEL[targetAgent]}`);
 }
 async function forkCurrent() {

@@ -9,6 +9,35 @@ function summarizeCommand(command) {
   return String(command || '').replace(/\s+/g, ' ').slice(0, 120);
 }
 
+const basename = (p) => String(p || '').split('/').filter(Boolean).pop() || String(p || '');
+
+// Codex `exec --json` reports work as `item` events. Map the tool-bearing ones to the
+// box's neutral tool-chip shape ({name,input,detail}) so the phone SEES what Codex is
+// doing. Return null for non-tool items (text/reasoning/errors handled separately).
+// Without file_change here, every code edit Codex makes is invisible — which made a
+// hard-working delegated Codex agent look like it "did nothing".
+function toolFromItem(item) {
+  switch (item && item.type) {
+    case 'command_execution':
+      return { name: 'Bash', input: summarizeCommand(item.command), detail: { command: item.command || '' } };
+    case 'file_change': {
+      const changes = Array.isArray(item.changes) ? item.changes : [];
+      const paths = changes.map((c) => c && c.path).filter(Boolean);
+      const label = paths.length
+        ? basename(paths[0]) + (paths.length > 1 ? ` +${paths.length - 1}` : '')
+        : 'files';
+      return { name: 'ApplyPatch', input: label, detail: { files: paths, changes } };
+    }
+    case 'mcp_tool_call':
+      return { name: 'MCP', input: [item.server, item.tool].filter(Boolean).join('.') || item.name || 'tool', detail: item };
+    case 'web_search':
+      return { name: 'WebSearch', input: item.query || '', detail: item };
+    default:
+      return null;
+  }
+}
+const TOOL_ITEMS = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
+
 export class CodexExecEngine {
   run({ sessionId, cwd, prompt, images = [], settings = {}, onEvent }) {
     const imageArgs = (images || []).flatMap((image) => ['-i', image]);
@@ -51,38 +80,42 @@ export class CodexExecEngine {
         return;
       }
 
-      if (o.type === 'item.started' && o.item && o.item.type === 'command_execution') {
-        const id = o.item.id || `cmd-${seenTools.size + 1}`;
+      const item = o.item;
+
+      // A tool starts → open its chip immediately so progress is live, not retro.
+      if (o.type === 'item.started' && item && TOOL_ITEMS.has(item.type)) {
+        const t = toolFromItem(item);
+        if (!t) return;
+        const id = item.id || `tool-${seenTools.size + 1}`;
         seenTools.add(id);
-        emit({
-          type: 'tool',
-          id,
-          name: 'Bash',
-          input: summarizeCommand(o.item.command),
-          detail: { command: o.item.command || '' },
-        });
+        emit({ type: 'tool', id, name: t.name, input: t.input, detail: t.detail });
         return;
       }
 
-      if (o.type === 'item.completed' && o.item) {
-        const item = o.item;
-        if (item.type === 'agent_message' && item.text) {
-          emit({ type: 'text', delta: item.text });
-        } else if (item.type === 'command_execution') {
-          const id = item.id || `cmd-${seenTools.size || 1}`;
+      if (o.type === 'item.completed' && item) {
+        if (item.type === 'agent_message') {
+          if (item.text) emit({ type: 'text', delta: item.text });
+          return;
+        }
+        if (item.type === 'error') {
+          if (item.message && !/dangerously-bypass-hook-trust/.test(item.message)) emit({ type: 'notice', text: item.message });
+          return;
+        }
+        if (TOOL_ITEMS.has(item.type)) {
+          const t = toolFromItem(item);
+          if (!t) return;
+          const id = item.id || `tool-${seenTools.size || 1}`;
+          // Items that never emitted item.started (or that we only see on completion) still
+          // need their chip before the result lands.
           if (!seenTools.has(id)) {
             seenTools.add(id);
-            emit({
-              type: 'tool',
-              id,
-              name: 'Bash',
-              input: summarizeCommand(item.command),
-              detail: { command: item.command || '' },
-            });
+            emit({ type: 'tool', id, name: t.name, input: t.input, detail: t.detail });
           }
-          emit({ type: 'tool_result', id, content: item.aggregated_output || '' });
-        } else if (item.type === 'error' && item.message && !/dangerously-bypass-hook-trust/.test(item.message)) {
-          emit({ type: 'notice', text: item.message });
+          const result = item.aggregated_output != null
+            ? item.aggregated_output
+            : (item.status ? `(${item.status})` : '');
+          emit({ type: 'tool_result', id, content: result });
+          return;
         }
         return;
       }
