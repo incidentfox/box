@@ -1062,41 +1062,65 @@ app.get('/api/linear/:id', requireAuth, async (req, res) => {
 // ordered Backlog → Todo → In Progress → In Review → Done. GLOBAL (not per-cwd),
 // so it reflects real current status regardless of which dir the session runs in.
 const BOARD_TEAM = LINEAR_TEAM_ID;
-const BOARD_FIELDS = 'identifier title url priority updatedAt state { name type position } labels { nodes { name } } assignee { displayName }';
+// sortOrder drives the manual drag-reorder within a column (and across columns).
+const BOARD_FIELDS = 'identifier title url priority sortOrder updatedAt state { id name type position } labels { nodes { name } } assignee { displayName }';
 const BOARD_RANK = { triage: 0, backlog: 1, unstarted: 2, started: 3, completed: 4 };
+// Tiny in-memory cache so rapid re-opens / multiple phone clients don't each re-hit Linear.
+// Invalidated immediately by any board-mutating endpoint (move/state/done/create/delegate);
+// the refresh button bypasses it with ?fresh=1.
+let _boardCache = null;            // { at: ms, payload }
+const BOARD_TTL = 8000;
+const invalidateBoard = () => { _boardCache = null; };
 app.get('/api/linear-board', requireAuth, async (req, res) => {
   if (!LINEAR_KEY) return res.status(500).json({ error: 'no LINEAR_API_KEY' });
+  const fresh = req.query.fresh === '1' || req.query.fresh === 'true';
+  if (!fresh && _boardCache && (Date.now() - _boardCache.at) < BOARD_TTL) {
+    return res.json({ ..._boardCache.payload, cached: true });
+  }
   try {
-    const sd = await linearGql(`{ team(id:"${BOARD_TEAM}"){ states{ nodes{ name type position } } } }`);
-    const states = ((sd.team && sd.team.states && sd.team.states.nodes) || [])
+    // ONE round-trip instead of three: states + active + recent-done, aliased in a single
+    // GraphQL query. Cuts board load latency ~3x (was three sequential awaits to Linear).
+    const d = await linearGql(`{
+      team(id:"${BOARD_TEAM}"){ states{ nodes{ id name type position } } }
+      active: issues(first: 250, orderBy: updatedAt, filter: {
+        team: { id: { eq: "${BOARD_TEAM}" } }, state: { type: { in: ["triage","backlog","unstarted","started"] } }
+      }) { nodes { ${BOARD_FIELDS} } }
+      recentDone: issues(first: 30, orderBy: updatedAt, filter: {
+        team: { id: { eq: "${BOARD_TEAM}" } }, state: { type: { eq: "completed" } }
+      }) { nodes { ${BOARD_FIELDS} } }
+    }`);
+    const states = ((d.team && d.team.states && d.team.states.nodes) || [])
       .filter((s) => s.type in BOARD_RANK)                       // drop canceled/duplicate
       .sort((a, b) => (BOARD_RANK[a.type] - BOARD_RANK[b.type]) || (a.position - b.position));
-    const active = await linearGql(`{ issues(first: 250, orderBy: updatedAt, filter: {
-      team: { id: { eq: "${BOARD_TEAM}" } }, state: { type: { in: ["triage","backlog","unstarted","started"] } }
-    }) { nodes { ${BOARD_FIELDS} } } }`);
-    const done = await linearGql(`{ issues(first: 30, orderBy: updatedAt, filter: {
-      team: { id: { eq: "${BOARD_TEAM}" } }, state: { type: { eq: "completed" } }
-    }) { nodes { ${BOARD_FIELDS} } } }`);
-    const activeNodes = (active.issues && active.issues.nodes) || [];
+    const activeNodes = (d.active && d.active.nodes) || [];
+    const doneNodes = (d.recentDone && d.recentDone.nodes) || [];
     const delg = loadDelegations();           // box-local delegation ledger → board badge
     const byState = new Map();
-    for (const n of [...activeNodes, ...((done.issues && done.issues.nodes) || [])]) {
+    for (const n of [...activeNodes, ...doneNodes]) {
       if (!byState.has(n.state.name)) byState.set(n.state.name, []);
       const dl = latestDelegation(delg[n.identifier]);
       byState.get(n.state.name).push({
         id: n.identifier, title: n.title, url: n.url, priority: n.priority || 0,
+        sortOrder: (n.sortOrder == null ? 0 : n.sortOrder), stateId: n.state.id,
         updatedAt: n.updatedAt, labels: ((n.labels && n.labels.nodes) || []).map((l) => l.name),
         assignee: (n.assignee && n.assignee.displayName) || null,
         delegation: dl ? { sessionId: dl.sessionId, sessionTitle: dl.sessionTitle, agent: dl.agent, kind: dl.kind, ts: dl.ts } : null,
       });
     }
+    // Order each column by Linear's manual sortOrder (ascending = top) so drag-reorder
+    // persists; tie-break by most-recently-updated.
+    for (const arr of byState.values()) {
+      arr.sort((a, b) => (a.sortOrder - b.sortOrder) || (Date.parse(b.updatedAt) - Date.parse(a.updatedAt)));
+    }
     // Seed a column per workflow state (in order) so empty columns still show the
     // board's structure. Done is labeled "recent" (capped) — it isn't "open" work.
     const columns = states.map((s) => ({
-      name: s.name, type: s.type, recent: s.type === 'completed',
+      name: s.name, type: s.type, stateId: s.id, recent: s.type === 'completed',
       issues: byState.get(s.name) || [], count: (byState.get(s.name) || []).length,
     }));
-    res.json({ columns, total: activeNodes.length, generatedAt: new Date().toISOString() });
+    const payload = { columns, total: activeNodes.length, generatedAt: new Date().toISOString() };
+    _boardCache = { at: Date.now(), payload };
+    res.json(payload);
   } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
 app.post('/api/linear/:id/done', requireAuth, async (req, res) => {
@@ -1105,6 +1129,7 @@ app.post('/api/linear/:id/done', requireAuth, async (req, res) => {
     const ws = await linearGql(`{ team(id:"${it.teamId}"){ states{ nodes{ id name type } } } }`);
     const done = ws.team.states.nodes.find((s) => s.type === 'completed');
     await linearGql(`mutation{ issueUpdate(id:"${it.id}", input:{ stateId:"${done.id}" }){ success } }`);
+    invalidateBoard();
     res.json({ ok: true, state: done.name });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -1186,6 +1211,7 @@ app.post('/api/linear/issue', requireAuth, async (req, res) => {
     if (Array.isArray(labelIds) && labelIds.length) input.labelIds = labelIds;
     const d = await linearGql(`mutation Create($input: IssueCreateInput!){ issueCreate(input:$input){ success issue{ identifier url } } }`, { input });
     const issue = d.issueCreate && d.issueCreate.issue;
+    invalidateBoard();
     res.json({ ok: !!(d.issueCreate && d.issueCreate.success), identifier: issue && issue.identifier, url: issue && issue.url });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -1277,6 +1303,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
       }
     } catch {}
   }
+  if (claimed) invalidateBoard();   // the claim moved state + added a label → board changed
   res.json({ ok: true, claimed, commented });
 });
 // Set an issue's workflow state (generalizes /done — dismiss=Canceled, close=Done, etc.).
@@ -1287,8 +1314,50 @@ app.post('/api/linear/:id/state', requireAuth, async (req, res) => {
   try {
     const gid = await linearGid(req.params.id); if (!gid) return res.status(404).json({ error: 'not found' });
     const d = await linearGql(`mutation SetState($id: String!, $stateId: String!){ issueUpdate(id:$id, input:{ stateId:$stateId }){ success issue{ state{ name } } } }`, { id: gid, stateId });
+    invalidateBoard();
     res.json({ ok: !!(d.issueUpdate && d.issueUpdate.success), state: d.issueUpdate && d.issueUpdate.issue && d.issueUpdate.issue.state && d.issueUpdate.issue.state.name });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+// Board drag-and-drop: move an issue to a column (stateId) and/or reposition it within a
+// column (sortOrder), in a single issueUpdate. Both fields are optional but at least one is
+// required. sortOrder is a float; the client picks the midpoint of the drop neighbours.
+app.post('/api/linear/:id/move', requireAuth, async (req, res) => {
+  if (!LINEAR_KEY) return res.status(500).json({ error: 'no LINEAR_API_KEY' });
+  const b = req.body || {};
+  const input = {};
+  if (b.stateId) input.stateId = String(b.stateId);
+  if (b.sortOrder != null && b.sortOrder !== '' && Number.isFinite(Number(b.sortOrder))) input.sortOrder = Number(b.sortOrder);
+  if (!Object.keys(input).length) return res.status(400).json({ error: 'stateId or sortOrder required' });
+  try {
+    const gid = await linearGid(req.params.id); if (!gid) return res.status(404).json({ error: 'not found' });
+    const d = await linearGql(`mutation Move($id: String!, $input: IssueUpdateInput!){ issueUpdate(id:$id, input:$input){ success issue{ state{ name } sortOrder } } }`, { id: gid, input });
+    invalidateBoard();
+    const iss = d.issueUpdate && d.issueUpdate.issue;
+    res.json({ ok: !!(d.issueUpdate && d.issueUpdate.success), state: iss && iss.state && iss.state.name, sortOrder: iss && iss.sortOrder });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+// Search the team's issues (all states, incl. closed/old that aren't on the board) by title
+// or issue number. Powers the board search box's "found in Linear" results beyond what's
+// already loaded on the board.
+app.get('/api/linear-search', requireAuth, async (req, res) => {
+  if (!LINEAR_KEY) return res.status(500).json({ error: 'no LINEAR_API_KEY' });
+  const q = String(req.query.q || '').trim();
+  if (q.length < 2) return res.json({ issues: [] });
+  try {
+    const num = q.replace(/[^0-9]/g, '');
+    const ors = [`{ title: { containsIgnoreCase: ${JSON.stringify(q)} } }`];
+    if (num) ors.push(`{ number: { eq: ${num} } }`);
+    const d = await linearGql(`{ issues(first: 25, orderBy: updatedAt, filter: {
+      team: { id: { eq: "${BOARD_TEAM}" } }, or: [ ${ors.join(', ')} ]
+    }) { nodes { identifier title url priority updatedAt state { name type } labels { nodes { name } } assignee { displayName } } } }`);
+    const nodes = (d.issues && d.issues.nodes) || [];
+    res.json({ issues: nodes.map((n) => ({
+      id: n.identifier, title: n.title, url: n.url, priority: n.priority || 0, updatedAt: n.updatedAt,
+      state: n.state ? n.state.name : '', type: n.state ? n.state.type : '',
+      labels: ((n.labels && n.labels.nodes) || []).map((l) => l.name),
+      assignee: (n.assignee && n.assignee.displayName) || null,
+    })) });
+  } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
 // Sessions whose transcript references this issue — i.e. the chat(s) that filed or
 // worked on the ticket, so the user can jump back in / resume the original context.
