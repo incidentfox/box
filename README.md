@@ -2,12 +2,13 @@
 
 # 📦 Box
 
-**Your own always-on Claude Code, in your pocket.**
+**Coding agents that keep working after you close your laptop.**
 
-Box is a self-hosted web app that runs **real Claude Code (and Codex) sessions on your own
-server** and lets you drive them from your phone as a clean, native chat UI — with voice,
-file attach, `/skills`, a session list, and a task board. Fire off *"work this task
-autonomously"* from a coffee shop; come back to a finished result you can ship.
+Box is a self-hosted phone UI for **real Claude Code and Codex sessions running on a
+machine you control**: a cheap VPS, a home server, or any always-on computer. SSH into it
+from your laptop when a terminal is easy; open Box from your phone when SSH is painful.
+New chats start in your normal workspace and can move across your filesystem, not inside a
+managed one-repo sandbox.
 
 <br>
 
@@ -26,20 +27,53 @@ autonomously"* from a coffee shop; come back to a finished result you can ship.
 
 ---
 
-## Why it's good
+## Why this exists
 
-- **Real sessions, not a toy.** Every chat is a genuine `claude --remote-control` session on
-  your machine — the same session is live on your desktop and in the official app at once.
-- **Made for phones.** Chat bubbles, streaming, voice input, image attach, `@file` and
-  `/skill` pickers, a composer that behaves above the keyboard. Add it to your home screen
-  and it's an app (PWA).
-- **Always on.** A keeper process + a Cloudflare tunnel keep it reachable with **no open
-  ports and no domain required** — you get a public `https://…trycloudflare.com` URL for free.
-- **Codex too.** If the `codex` CLI is installed, Codex chats show up alongside Claude.
-- **The harness is the magic.** Optional hooks + an operating-pattern `CLAUDE.md` make
-  hands-off *"work this ticket → merge & deploy → file the leftovers"* sessions actually work.
-- **Optional task board.** Plug in a free Linear account to get an in-app kanban board and a
-  *"needs you"* inbox for the decisions only you can make.
+Laptop-hosted agents are great until the laptop goes to sleep. Official mobile remote
+control is useful, but if the bridge lives on your laptop, closing the lid ends the work.
+Managed cloud agents solve the uptime problem by giving you a new environment to set up,
+usually starting from "pick a repo." That is not how a lot of real work happens.
+
+Box takes the simpler route: rent or run a server, install the coding CLIs there, keep the
+filesystem there, and put a good phone UI on top.
+
+- **The box stays awake.** Long Claude Code and Codex runs can keep working overnight while
+  your laptop is closed. A keeper process, `dtach`, and an optional Cloudflare tunnel keep
+  the app reachable without opening ports.
+- **It is your machine.** You can SSH in, install tools, keep local credentials in the usual
+  places, run background jobs, inspect logs, and fix things directly. There is no hidden
+  hosted sandbox between you and the agent.
+- **No repo picker.** New chats start in `CC_WORKSPACE` (or your home directory) and can look
+  across multiple repos, old projects, scratch folders, generated files, and local notes.
+  If a task spans three codebases, the agent can just `cd`, `rg`, and read the filesystem.
+- **Real session history.** Claude sessions live in `~/.claude`; Codex sessions live in the
+  Box state store and Codex history. Box reads those histories instead of treating each chat
+  as disposable, so you can search, resume, fork, copy, or reopen work later.
+- **The phone UI is for long prompts.** The composer stays above the keyboard, supports
+  image/file attach, has a copy button for the current prompt, and can use bilingual voice
+  input through Deepgram or ElevenLabs. If you dictate a huge messy prompt, it is not trapped
+  in a fragile mobile textbox.
+- **Claude and Codex side by side.** Claude Code runs through `claude --remote-control`;
+  Codex runs through `codex exec --json`. They appear in the same session list with the
+  same phone-first controls.
+- **Issues become the coordination layer.** With Linear configured, Box gives you an in-app
+  board, issue detail view, related session history, and delegation buttons so one agent can
+  file a follow-up and another agent can pick it up with the right context.
+- **Context can arrive while agents work.** The harness can surface "needs you" decisions,
+  per-session status docs, recent meetings/emails from a brain folder, pipeline events, and
+  other activity into the place you actually check: the Box app.
+
+## The loop
+
+Start a chat from your phone and say: "work this autonomously; I'll check back tomorrow."
+The session keeps running on the server. When it finds a real follow-up, it can file a
+ticket instead of burying the question in a 200-turn transcript. Later, open the board,
+tap the issue, see which sessions touched it, and delegate it to a fresh Claude or Codex
+session. Repeat until the board is clean.
+
+This is the core opinion behind Box: a fleet of coding agents works better when it shares
+a durable machine, a normal filesystem, local session logs, a ticket board, and a small
+event stream.
 
 ## Set it up
 
@@ -120,16 +154,21 @@ respawns it):
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
 | `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). |
 | `LINEAR_API_KEY` + `LINEAR_TEAM_ID` + `LINEAR_TEAM_KEY` + `NEEDS_LABEL` | Enable the Board + "needs you" inbox (optional). |
+| `OPENAI_API_KEY` + `OPENAI_ENDPOINT` | Enable cheap per-session attention/status summaries (optional). |
+| `BRAIN_DIR` | Surface recent meetings, emails/signals, and durable notes from a local brain folder (optional). |
+| `DREAM_LOG` | Surface decisions from an external scheduled-agent / issue-filing loop (optional). |
 
 When an integration isn't configured, its UI hides itself — Box stays a clean chat app.
 
 ## The harness (optional, recommended)
 
-`install.sh` (unless `--no-harness`) sets up the bits that make autonomous work shine:
+`install.sh` (unless `--no-harness`) sets up the bits that make autonomous work survivable:
 
 - **Hooks** (`~/.claude/hooks/`): inject the current time into every turn, and surface your
   open *"needs you"* items at the start of each session.
 - **`needs-me.mjs`**: a tiny Linear-backed inbox CLI for "only the human can decide this."
+- **Per-session attention docs**: with `OPENAI_API_KEY`, Box keeps a small status doc for each
+  long chat: what needs input, what is in progress, and what finished recently.
 - **[`harness/CLAUDE.md`](harness/CLAUDE.md)**: the operating pattern — copy it into your
   code directory as `CLAUDE.md` so your agents work the right way: do the whole task, verify,
   report, keep durable state in tickets/memory, isolate code in git worktrees, escalate
@@ -147,8 +186,14 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
   computer-use agent, in [`concierge/50-power-ups.md`](concierge/50-power-ups.md)).
 - **Email yourself** — once Google access is on, a long autonomous run can `google gmail send
   you@example.com "done" "..."` to ping you when it finishes.
-- **A "brain"** — point `BRAIN_DIR` at a notes/markdown folder; agents read it for context and
-  append durable facts so the whole fleet remembers.
+- **A "brain"** — point `BRAIN_DIR` at a notes/markdown folder; agents read it for context,
+  append durable facts, and let Box surface recent meetings / email signals beside the chats.
+- **An activity feed** — scheduled jobs can write events, lock state, and issue-filing
+  decisions into local files; Box surfaces them so parallel agents and the human can stay
+  oriented without reading every transcript.
+- **Laptop/server sync** — not required, but Box pairs well with Mutagen, Syncthing, rsync, or
+  any Dropbox-style sync for workspaces and CLI history. The useful pattern is simple:
+  laptop when you want local work, box when you want always-on work, same files underneath.
 
 Agents are told about these in `harness/CLAUDE.md`, so they'll use them when it helps.
 
@@ -165,6 +210,7 @@ keys; Box does the rest.
 ```
  Phone PWA ──HTTPS/WSS──► Cloudflare tunnel ──► your box: node server (:7321)
   chat / voice / files       (no open ports)        │  each turn spawns / resumes:
+  board / events / brain                             │
                                                      ▼
                           claude --remote-control …   (persisted in dtach)
                           codex exec --json …
