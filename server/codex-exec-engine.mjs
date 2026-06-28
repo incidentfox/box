@@ -38,21 +38,33 @@ function toolFromItem(item) {
 }
 const TOOL_ITEMS = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
 
+// Build the `codex` argv for one turn. Pure (no spawn) so it's unit-testable.
+//
+// CRITICAL ordering rule: the variadic `-i, --image <FILE>...` option goes LAST, after the
+// positional prompt (and the session id, for resume). Codex's `-i` greedily consumes every
+// following arg as another image path, so if images come before the prompt the final `-i`
+// swallows the prompt (and, on resume, the session id). Codex then sees NO prompt → "Reading
+// prompt from stdin... No prompt provided via stdin", exits before emitting `thread.started`,
+// and the box never learns the session id — so an image message silently disappears from the
+// chat list. Positionals first, variadic `-i …` last (end-of-args terminates the list).
+export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings = {} } = {}) {
+  const imageArgs = (images || []).flatMap((image) => ['-i', image]);
+  const cfgArgs = [];
+  if (settings.model) cfgArgs.push('--model', settings.model);
+  if (settings.reasoningEffort) cfgArgs.push('-c', `model_reasoning_effort="${settings.reasoningEffort}"`);
+  // Full-access, no-prompt mode (the `codex exec` equivalent of `--yolo`). The box is itself the
+  // trust boundary, so we skip Codex's own sandbox — its bubblewrap sandbox can't set up loopback
+  // networking here (bwrap: loopback Failed RTM_NEWADDR) and blocks EVERY command otherwise.
+  // Applied to BOTH new and resume turns (resume previously inherited no bypass → stayed sandboxed).
+  const BYPASS = ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
+  return sessionId
+    ? ['exec', 'resume', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', sessionId, prompt || '', ...imageArgs]
+    : ['exec', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', '-C', cwd || process.cwd(), prompt || '', ...imageArgs];
+}
+
 export class CodexExecEngine {
   run({ sessionId, cwd, prompt, images = [], settings = {}, onEvent }) {
-    const imageArgs = (images || []).flatMap((image) => ['-i', image]);
-    const cfgArgs = [];
-    if (settings.model) cfgArgs.push('--model', settings.model);
-    if (settings.reasoningEffort) cfgArgs.push('-c', `model_reasoning_effort="${settings.reasoningEffort}"`);
-    // Full-access, no-prompt mode (the `codex exec` equivalent of `--yolo`). The
-    // box is itself the trust boundary, so we skip Codex's own sandbox — its
-    // bubblewrap sandbox can't set up loopback networking here (bwrap: loopback
-    // Failed RTM_NEWADDR) and blocks EVERY command otherwise. Applied to BOTH new
-    // and resume turns (resume previously inherited no bypass → stayed sandboxed).
-    const BYPASS = ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
-    const args = sessionId
-      ? ['exec', 'resume', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', ...imageArgs, sessionId, prompt || '']
-      : ['exec', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', '-C', cwd || process.cwd(), ...imageArgs, prompt || ''];
+    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
 
     // Optionally source an env file before codex (set CODEX_ENV_FILE); otherwise just run codex.
     const envFile = process.env.CODEX_ENV_FILE;
