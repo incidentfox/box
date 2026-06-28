@@ -1774,7 +1774,26 @@ function ensureTail(s, fromLine) {
 }
 function stopTail(s) {
   if (s._tailWait) { clearInterval(s._tailWait); s._tailWait = null; }
+  if (s._promptRetry) { clearTimeout(s._promptRetry); s._promptRetry = null; }
   if (s.tailStop) { try { s.tailStop(); } catch {} s.tailStop = null; }
+}
+// A freshly-spawned claude TUI can silently DROP the first injected prompt if it's still
+// settling when sendRecord pastes (observed reliably for new chats in ~/ — claude is loading
+// home-dir context, so the input box isn't live yet even though PTY output has gone quiet).
+// The box would then wait forever for a turn that never starts. claude writes the user turn to
+// its JSONL the instant it RECEIVES the prompt, so if no transcript appears within a few
+// seconds the paste was dropped → re-inject. A dropped paste leaves NO entry, so re-injecting
+// can't double-submit (verified). Stops as soon as the transcript exists. New chats only —
+// existing sessions are already booted and land reliably.
+function ensureFirstPromptLanded(s, rec, prompt, attempt = 0) {
+  if (attempt >= 4 || !s || !s.sessionId) return;
+  s._promptRetry = setTimeout(() => {
+    s._promptRetry = null;
+    if (s.canceled || !s.sessionId || s.agent === 'codex') return;
+    if (findSessionFile(s.sessionId)) return;            // claude received it (transcript created)
+    rcEngine.sendRecord(rec, prompt).catch(() => {});    // dropped by a settling TUI → re-inject
+    ensureFirstPromptLanded(s, rec, prompt, attempt + 1);
+  }, 4500);
 }
 
 // Watch for any subscribed session being parked on an interactive prompt (AskUserQuestion /
@@ -1961,6 +1980,7 @@ function runTurn(s, msg) {
           if (s.title) stampTitleWhenReady(s.sessionId, s.title);
           bcast(s, { type: 'session', id: s.sessionId });
           ensureTail(s, 0);                    // backfill from the start (no prior history loaded)
+          ensureFirstPromptLanded(s, rec, prompt); // re-inject if a still-settling TUI dropped the first paste
         }
       } catch (e) {
         bcast(s, { type: 'error', msg: String(e && e.message || e).slice(-400) });
