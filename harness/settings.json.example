@@ -1,0 +1,26 @@
+{
+  "_comment": "Box harness defaults for Claude Code. install.sh merges this into ~/.claude/settings.json. Review before applying — bypassPermissions lets agents act without per-action prompts (needed for hands-off / remote-controlled work). Drop it to 'acceptEdits' or 'default' if you want more friction.",
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "remoteControlAtStartup": true,
+  "agentPushNotifEnabled": true,
+  "theme": "auto",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash ~/.claude/hooks/inject-time.sh" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bash ~/.claude/hooks/surface-attention.sh" }
+        ]
+      }
+    ]
+  }
+}

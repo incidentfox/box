@@ -1,0 +1,10 @@
+# Box cron lines — `install.sh` adds the keeper line for you. The RC supervisor is optional
+# (keeps remote-controlled sessions alive across reboots / reconnects dropped bridges).
+# Edit paths to match where you cloned Box, then add with `crontab -e`.
+
+# Always-on: start the Box server + tunnel at boot, and resurrect them if they die.
+@reboot $HOME/development/box/scripts/keeper.sh >> $HOME/.cc-mobile/keeper.log 2>&1
+
+# Optional: keep remote-controlled Claude sessions alive + reconnect dropped bridges.
+# */2 * * * * $HOME/development/box/harness/scripts/cc-rc-supervisor.sh >/dev/null 2>&1
+# @reboot sleep 30 && $HOME/development/box/harness/scripts/cc-rc-supervisor.sh >/dev/null 2>&1

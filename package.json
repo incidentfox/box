@@ -1,0 +1,21 @@
+{
+  "name": "box",
+  "version": "1.0.0",
+  "description": "Box — a self-hosted mobile web app that runs real Claude Code (and Codex) sessions on your own server, from your phone. Native chat UI, voice, files, skills, always-on.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "node server/index.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cookie": "^1.0.2",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  }
+}

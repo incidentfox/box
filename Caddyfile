@@ -1,0 +1,6 @@
+# OPTIONAL — only if you'd rather front Box with your own reverse proxy + your own TLS
+# instead of the built-in Cloudflare tunnel. Set TUNNEL_MODE=none in .env, point this at
+# your domain, and run `caddy run`. (Most people should just use the tunnel — ignore this.)
+box.example.com {
+	reverse_proxy localhost:7321
+}

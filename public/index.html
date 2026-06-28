@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Box" />
+<meta name="theme-color" content="#faf9f7" />
+<title>Box</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<link rel="stylesheet" href="/fonts/inter.css" />
+<link rel="stylesheet" href="/vendor/hljs-light.css" />
+<link rel="stylesheet" href="/style.css" />
+<script src="/vendor/highlight.min.js" defer></script>
+</head>
+<body>
+
+<!-- LOGIN -->
+<section id="login" class="screen center">
+  <img class="logo" src="/icons/icon-192.png" alt="Box" />
+  <h1>Box</h1>
+  <p class="muted">Enter your access token</p>
+  <input id="tokenInput" type="password" placeholder="access token" autocomplete="off" />
+  <button id="loginBtn" class="primary">Connect</button>
+  <p id="loginErr" class="err"></p>
+</section>
+
+<!-- SESSIONS -->
+<section id="sessions" class="screen hidden">
+  <header class="bar sbar">
+    <strong class="apptitle">Box</strong><span class="ver" id="ver"></span>
+    <div class="spacer"></div>
+    <button id="themeBtn" class="iconbtn ghost" title="theme" data-icon="moon"></button>
+    <button id="boardBtn" class="iconbtn ghost" title="Linear board" data-icon="board"></button>
+    <button id="pipesBtn" class="iconbtn ghost" title="pipelines" data-icon="pulse"></button>
+    <button id="newBtn" class="compose" title="new chat" data-icon="plus"></button>
+  </header>
+  <div id="tabs" class="tabs"></div>
+  <div id="subtabs" class="tabs subtabs hidden"></div>
+  <div id="sessionList" class="list"></div>
+</section>
+
+<section id="pipelines" class="screen hidden">
+  <header class="bar">
+    <button id="pipesBack" class="iconbtn ghost" data-icon="back"></button>
+    <strong class="ctitle">Pipelines</strong>
+    <div class="spacer"></div>
+    <button id="pipesRefresh" class="iconbtn ghost" title="refresh" data-icon="arrow-down"></button>
+  </header>
+  <div id="pipesBody" class="list"></div>
+</section>
+
+<section id="board" class="screen hidden">
+  <header class="bar">
+    <button id="boardBack" class="iconbtn ghost" data-icon="back"></button>
+    <strong class="ctitle">Board</strong>
+    <span id="boardMeta" class="boardMeta"></span>
+    <div class="spacer"></div>
+    <button id="boardNew" class="iconbtn ghost" title="new issue" data-icon="plus"></button>
+    <button id="boardRefresh" class="iconbtn ghost" title="refresh" data-icon="arrow-down"></button>
+  </header>
+  <div id="boardBody" class="boardWrap"></div>
+</section>
+
+<!-- LINEAR ISSUE DETAIL -->
+<section id="issue" class="screen hidden">
+  <header class="bar">
+    <button id="issueBack" class="iconbtn ghost" data-icon="back"></button>
+    <strong id="issueId" class="ctitle">Issue</strong>
+    <div class="spacer"></div>
+    <button id="issueLinear" class="iconbtn ghost" title="open in Linear" data-icon="at"></button>
+  </header>
+  <div id="issueScroll" class="issueScroll"></div>
+  <div id="issueBar" class="issueBar"></div>
+  <div id="issueCompose" class="issueCompose">
+    <input id="issueComment" class="issueCommentInput" placeholder="Add a comment…" autocomplete="off">
+    <button id="issueCommentSend" class="iconbtn send" data-icon="send"></button>
+  </div>
+</section>
+
+<!-- NEW LINEAR ISSUE -->
+<section id="issueNew" class="screen hidden">
+  <header class="bar">
+    <button id="icrBack" class="iconbtn ghost" data-icon="back"></button>
+    <strong class="ctitle">New issue</strong>
+    <div class="spacer"></div>
+    <button id="icrCreate" class="chip small">Create</button>
+  </header>
+  <div class="icrForm">
+    <input id="icrTitle" class="icrInput" placeholder="Title" autocomplete="off">
+    <textarea id="icrDesc" class="icrText" placeholder="Description (optional, markdown)"></textarea>
+    <div class="icrLabel">Priority</div>
+    <div id="icrPrio" class="icrChips"></div>
+    <div class="icrLabel">Status</div>
+    <div id="icrState" class="icrChips"></div>
+  </div>
+</section>
+
+<!-- CHAT -->
+<section id="chat" class="screen hidden">
+  <header class="bar">
+    <button id="backBtn" class="iconbtn ghost" data-icon="back"></button>
+    <strong id="chatTitle" class="ctitle">New chat</strong>
+    <div class="spacer"></div>
+    <button id="filesBtn" class="iconbtn ghost" title="files" data-icon="folder"></button>
+    <button id="renameBtn" class="iconbtn ghost" title="rename" data-icon="pencil"></button>
+    <button id="myMsgsBtn" class="iconbtn ghost" title="my messages" data-icon="list"></button>
+    <button id="copyChatBtn" class="iconbtn ghost" title="copy last 10 turns" data-icon="copy"></button>
+    <button id="clearBtn" class="iconbtn ghost" title="/clear — reset this session's context" data-icon="trash"></button>
+    <button id="attnBtn" class="iconbtn ghost" title="needs attention" style="position:relative"><span id="attnBadge" class="attnBadge hidden"></span></button>
+  </header>
+
+  <div id="linearBar" class="linearBar hidden"></div>
+  <div id="messages" class="messages"></div>
+
+  <!-- Needs-attention page: takes the messages area's place (so the real composer below — with
+       its voice button — handles the reply); back returns to the chat. -->
+  <div id="attnPanel" class="messages hidden">
+    <div class="attnBar">
+      <div class="attnSeg">
+        <button id="attnTabInput" class="attnSegBtn active">Needs input</button>
+        <button id="attnTabStatus" class="attnSegBtn">Status</button>
+        <button id="attnTabLinear" class="attnSegBtn">Linear</button>
+      </div>
+    </div>
+    <div id="attnList"></div>
+  </div>
+
+  <div id="composer" class="composer">
+    <button id="toBottom" class="tobottom hidden" title="scroll to latest" data-icon="arrow-down"></button>
+    <div id="suggest" class="suggest hidden"></div>
+    <div id="queueArea" class="queueArea hidden"></div>
+    <div id="attachRow" class="attachRow hidden"></div>
+    <!-- Shown only on the needs-attention page: makes the composer feel like a dedicated, safe
+         reply box. The send button never becomes "stop" in this mode, so a reply can never
+         interrupt the running session — it just gets delivered to it. -->
+    <div id="attnComposeHint" class="attnComposeHint hidden">↩ Reply — delivered to your session, never stops it</div>
+    <div id="inputWrap" class="inputWrap">
+      <textarea id="input" rows="1" placeholder="Message…" enterkeyhint="enter"></textarea>
+      <div class="toolsRow">
+	        <button id="modeChip" class="chip"><span data-icon="code"></span><span id="modeLabel">normal</span></button>
+	        <button id="agentChip" class="chip agent"><span id="agentDot"></span><span id="agentLabel">Claude</span></button>
+	        <div class="spacer"></div>
+        <button id="copyInputBtn" class="iconbtn" title="copy message" data-icon="clipboard"></button>
+        <button id="attachBtn" class="iconbtn" title="attach" data-icon="paperclip"></button>
+        <button id="micBtn" class="iconbtn" title="voice" data-icon="mic"></button>
+        <button id="stopBtn" class="iconbtn stopbtn hidden" title="stop" data-icon="stop"></button>
+        <button id="sendBtn" class="iconbtn send" title="send" disabled data-icon="send"></button>
+      </div>
+    </div>
+    <div id="recorder" class="recorder hidden">
+      <button id="recCancel" class="iconbtn" data-icon="close"></button>
+      <span class="recdot"></span>
+      <div id="recText" class="recText">listening…</div>
+      <span id="recTime" class="recTime">0:00</span>
+      <button id="recConfirm" class="iconbtn send" data-icon="check"></button>
+    </div>
+  </div>
+</section>
+
+<!-- FILE EXPLORER -->
+<div id="explorer" class="explorer hidden">
+  <header class="bar">
+    <button id="expClose" class="iconbtn ghost" data-icon="back"></button>
+    <strong id="expPath" class="ctitle">~</strong>
+    <div class="spacer"></div>
+    <button id="expUp" class="iconbtn ghost" title="up" data-icon="arrow-up-dir"></button>
+  </header>
+  <div id="expList" class="list"></div>
+  <div id="expReader" class="reader hidden">
+    <div class="readerBar"><button id="readerBack" class="iconbtn ghost" data-icon="back"></button><strong id="readerName"></strong><div class="spacer"></div><button id="readerAt" class="chip small"><span data-icon="at"></span>insert</button></div>
+    <div id="readerBody"></div>
+  </div>
+</div>
+
+<!-- sheets / inputs -->
+<div id="sheet" class="sheet hidden"><div class="sheetInner" id="sheetInner"></div></div>
+<input id="fileInput" type="file" accept="image/*" multiple class="hidden" />
+<input id="camInput" type="file" accept="image/*" capture="environment" class="hidden" />
+<div id="toast" class="toast hidden"></div>
+
+<!-- image lightbox / gallery -->
+<div id="lightbox" class="lightbox hidden">
+  <div id="lbTrack" class="lbTrack"></div>
+  <div id="lbCount" class="lbCount"></div>
+  <button id="lbDownload" class="lbDownload" data-icon="arrow-down" title="download"></button>
+  <button id="lbClose" class="lbClose" data-icon="close"></button>
+</div>
+
+<!-- MY MESSAGES overlay -->
+<div id="myMsgsOverlay" class="explorer hidden">
+  <header class="bar">
+    <button id="myMsgsClose" class="iconbtn ghost" data-icon="back"></button>
+    <strong class="ctitle">My messages</strong>
+    <div class="spacer"></div>
+    <button id="myMsgsCopyAll" class="chip small">Copy all</button>
+    <button id="myMsgsDownload" class="iconbtn ghost" title="download full conversation" data-icon="arrow-down"></button>
+  </header>
+  <div id="myMsgsList" class="list myMsgsList"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
