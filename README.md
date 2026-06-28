@@ -56,9 +56,11 @@ filesystem there, and put a good phone UI on top.
 - **Claude and Codex side by side.** Claude Code runs through `claude --remote-control`;
   Codex runs through `codex exec --json`. They appear in the same session list with the
   same phone-first controls.
-- **Issues become the coordination layer.** With Linear configured, Box gives you an in-app
-  board, issue detail view, related session history, and delegation buttons so one agent can
-  file a follow-up and another agent can pick it up with the right context.
+- **Issues become the coordination layer.** Box gives you an in-app board, issue detail view,
+  related session history, and delegation buttons so one agent can file a follow-up and another
+  can pick it up with the right context. **No Linear account needed** — by default Box runs a
+  built-in, local clone of Linear backed by a SQLite file; connect a real Linear later (and
+  `node bin/linear-lite.mjs import` your history up) if you ever want to.
 - **Context can arrive while agents work.** The harness can surface "needs you" decisions,
   per-session status docs, recent meetings/emails from a brain folder, pipeline events, and
   other activity into the place you actually check: the Box app.
@@ -153,7 +155,8 @@ respawns it):
 | `OWNER_NAME` | Your name, used in the per-session morning brief. |
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
 | `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). |
-| `LINEAR_API_KEY` + `LINEAR_TEAM_ID` + `LINEAR_TEAM_KEY` + `NEEDS_LABEL` | Enable the Board + "needs you" inbox (optional). |
+| `LINEAR_TEAM_KEY` + `NEEDS_LABEL` | Name the local Board's tickets + the "needs you" label. The Board works with no Linear account (local SQLite clone) by default. |
+| `LINEAR_API_KEY` + `LINEAR_TEAM_ID` | Drive a REAL Linear workspace instead of the local clone (optional). `LINEAR_LOCAL=off` disables the Board entirely. |
 | `OPENAI_API_KEY` + `OPENAI_ENDPOINT` | Enable cheap per-session attention/status summaries (optional). |
 | `BRAIN_DIR` | Surface recent meetings, emails/signals, and durable notes from a local brain folder (optional). |
 | `DREAM_LOG` | Surface decisions from an external scheduled-agent / issue-filing loop (optional). |

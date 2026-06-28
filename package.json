@@ -6,14 +6,17 @@
   "private": true,
   "license": "GPL-3.0-or-later",
   "scripts": {
-    "start": "node server/index.mjs"
+    "start": "node server/index.mjs",
+    "test:linear-lite": "node lib/linear-lite/test.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "better-sqlite3": "^11.10.0",
     "cookie": "^1.0.2",
     "express": "^4.21.2",
+    "graphql": "^16.14.2",
     "multer": "^1.4.5-lts.1",
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"

@@ -194,12 +194,18 @@ else
     fi
     EL="$(ask '  ElevenLabs API key for voice (optional, Enter to skip): ' '')"
     [ -n "$EL" ] && { sed -i.bak "s|^# ELEVENLABS_API_KEY=.*|ELEVENLABS_API_KEY=$EL|" .env; grep -q '^ELEVENLABS_API_KEY=' .env || echo "ELEVENLABS_API_KEY=$EL" >> .env; rm -f .env.bak; }
-    LK="$(ask '  Linear API key for Board + needs-you inbox (optional, Enter to skip): ' '')"
+    # The Board + "needs you" inbox work with NO Linear account — the box runs a local,
+    # SQLite-backed clone of Linear by default. A real key is purely optional.
+    info "Board + needs-you inbox: works out of the box (local clone). A Linear key is optional."
+    LK="$(ask '  Linear API key to use a REAL Linear instead (optional, Enter to skip): ' '')"
     if [ -n "$LK" ]; then
-      grep -q '^LINEAR_API_KEY=' .env && sed -i.bak "s|^LINEAR_API_KEY=.*|LINEAR_API_KEY=$LK|" .env || echo "LINEAR_API_KEY=$LK" >> .env
+      grep -q '^LINEAR_API_KEY=' .env && sed -i.bak "s|^# *LINEAR_API_KEY=.*|LINEAR_API_KEY=$LK|" .env || echo "LINEAR_API_KEY=$LK" >> .env
+      grep -q '^LINEAR_API_KEY=' .env || echo "LINEAR_API_KEY=$LK" >> .env
       TK="$(ask '  Linear team key (e.g. ENG): ' '')"; [ -n "$TK" ] && echo "LINEAR_TEAM_KEY=$TK" >> .env
       warn "Set LINEAR_TEAM_ID in .env too (the team UUID) — see concierge/30-linear.md"
       rm -f .env.bak
+    else
+      ok "using the local Linear clone (no account needed) — import to real Linear later: node bin/linear-lite.mjs import"
     fi
   fi
   ok ".env created (token generated)"
