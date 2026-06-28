@@ -1684,6 +1684,7 @@ const BUILTIN_CMDS = {
   claude: [
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
+    { name: 'switch', desc: 'Move THIS chat to another Claude account', action: 'switch-account' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Claude model', action: 'model' },
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
@@ -1809,6 +1810,7 @@ function runSlashCommand(cmd, tok) {
   removeToken(tok);
   $('input').blur();
   if (cmd.action === 'accounts') return openAccounts();
+  if (cmd.action === 'switch-account') return openAccountSwitch();
   if (cmd.action === 'model') return openModelSheet();
   if (cmd.action === 'theme') return openThemeSheet();
   if (cmd.action === 'approvals') return openApprovalsSheet();
