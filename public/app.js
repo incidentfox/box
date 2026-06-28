@@ -219,14 +219,8 @@ function applyTheme(theme = LS.getItem(THEME_KEY) || 'auto') {
   if (btn) { btn.dataset.icon = resolved === 'dark' ? 'sun' : 'moon'; btn._painted = 0; btn.innerHTML = ''; paintIcons(btn.parentElement || document); }
 }
 function setTheme(theme) { LS.setItem(THEME_KEY, theme); applyTheme(theme); toast(`Theme: ${theme}`); }
-function openThemeSheet() {
-  const curTheme = LS.getItem(THEME_KEY) || 'auto';
-  openSheet('Theme', [
-    { ic: curTheme === 'auto' ? '✓' : '', label: 'Auto', desc: 'Follow system appearance', sel: curTheme === 'auto', fn: () => setTheme('auto') },
-    { ic: curTheme === 'light' ? '✓' : '', label: 'Light', desc: 'Use the light Box theme', sel: curTheme === 'light', fn: () => setTheme('light') },
-    { ic: curTheme === 'dark' ? '✓' : '', label: 'Dark', desc: 'Use the dark Box theme', sel: curTheme === 'dark', fn: () => setTheme('dark') },
-  ]);
-}
+// One tap flips straight between light and dark off whatever's currently showing — no sheet, no Auto.
+function toggleTheme() { setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); }
 if (themeMq) {
   const syncTheme = () => { if ((LS.getItem(THEME_KEY) || 'auto') === 'auto') applyTheme('auto'); };
   if (themeMq.addEventListener) themeMq.addEventListener('change', syncTheme);
@@ -504,7 +498,7 @@ $('newBtn').onclick = () => openSheet('New chat', [
   { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
   { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
 ]);
-$('themeBtn').onclick = openThemeSheet;
+$('themeBtn').onclick = toggleTheme;
 
 /* ---------- pipelines health panel ---------- */
 $('pipesBtn').onclick = openPipelines;
@@ -2225,7 +2219,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'accounts') return openAccounts();
   if (cmd.action === 'switch-account') return openAccountSwitch();
   if (cmd.action === 'model') return openModelSheet();
-  if (cmd.action === 'theme') return openThemeSheet();
+  if (cmd.action === 'theme') return toggleTheme();
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
   if (cmd.action === 'fork') return forkCurrent();
