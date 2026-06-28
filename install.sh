@@ -18,7 +18,7 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP_DIR"
 
 # ---- args -------------------------------------------------------------------
-ASSUME_YES=0; DO_HARNESS=1; DO_CRON=1; DO_START=1; PORT_OVERRIDE=""
+ASSUME_YES=0; DO_HARNESS=1; DO_CRON=1; DO_START=1; PORT_OVERRIDE=""; NEED_CLAUDE_LOGIN=0
 while [ $# -gt 0 ]; do case "$1" in
   --yes|-y) ASSUME_YES=1 ;;
   --no-harness) DO_HARNESS=0 ;;
@@ -93,19 +93,24 @@ if [ "$OS" = "Linux" ]; then
   esac
 fi
 
-# claude CLI — required; we can't reliably auto-install/login, so guide instead.
+# claude CLI — required; Box drives the user's logged-in CLI. Auto-install if missing.
+if ! command -v claude >/dev/null 2>&1; then
+  warn "claude CLI not found — installing (@anthropic-ai/claude-code)"
+  npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || $SUDO npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+  hash -r 2>/dev/null || true
+fi
 if command -v claude >/dev/null 2>&1; then
   ok "claude CLI present ($(claude --version 2>/dev/null | head -1))"
   # Logged in? Box drives the user's logged-in CLI (no API key needed on a subscription).
   if [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     ok "claude appears logged in"
   else
-    warn "claude is installed but NOT logged in — run 'claude' once and complete the login"
-    info "(a computer-use agent can finish the browser OAuth; otherwise the user must)"
+    warn "claude is installed but NOT logged in"
+    NEED_CLAUDE_LOGIN=1
   fi
 else
-  warn "claude CLI not found — Box drives it, so install + log in:"
-  info "npm install -g @anthropic-ai/claude-code   # then run:  claude   (and log in)"
+  warn "couldn't auto-install claude — run: npm install -g @anthropic-ai/claude-code"
+  NEED_CLAUDE_LOGIN=1
 fi
 
 # codex CLI — optional
@@ -223,6 +228,7 @@ if [ "$DO_START" = 1 ]; then
   echo  "│   URL:   $URL"
   echo  "│   Token: $TOKEN_VAL"
   echo  "│   → Open the URL on your phone, enter the token, then Share → Add to Home Screen."
+  [ "$NEED_CLAUDE_LOGIN" = 1 ] && bold "│   ⚠ LAST STEP: run 'claude' on this machine and log in (one-time browser sign-in)."
   echo "└──────────────────────────────────────────────────────────────"
   info "Voice + a Linear board are optional — add keys to .env and restart (pkill -f 'node server/index.mjs') to enable."
 else

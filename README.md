@@ -9,6 +9,19 @@ server** and lets you drive them from your phone as a clean, native chat UI — 
 file attach, `/skills`, a session list, and a task board. Fire off *"work this task
 autonomously"* from a coffee shop; come back to a finished result you can ship.
 
+<br>
+
+<img src="docs/demo.gif" alt="Box on a phone — browse sessions, open a chat, type" width="280">
+
+<br>
+
+<table>
+<tr>
+<td><img src="docs/sessions.png" alt="Session list" width="280"></td>
+<td><img src="docs/chat.png" alt="Chat with tool chips" width="280"></td>
+</tr>
+</table>
+
 </div>
 
 ---
@@ -28,37 +41,58 @@ autonomously"* from a coffee shop; come back to a finished result you can ship.
 - **Optional task board.** Plug in a free Linear account to get an in-app kanban board and a
   *"needs you"* inbox for the decisions only you can make.
 
-## Install it in one move
+## Set it up
 
-Clone the repo, start an agent inside it, and tell it to install:
+Box runs on a machine that's on when you want to reach it. Pick your situation:
+
+### 🅰 You already have a server (you can SSH into it)
+
+SSH in, then either **let an agent do it** — clone, start an agent in the repo, say *"install this"*:
 
 ```bash
-git clone https://github.com/incidentfox/box.git
-cd box
-claude        # or: codex
+git clone https://github.com/incidentfox/box.git && cd box
+claude          # or: codex
 ```
-then say:
 > **install this**
 
-The agent reads [`INSTALL.md`](INSTALL.md), asks you the handful of things only you can
-decide (your name, whether you want voice / a task board), collects any API keys, and sets
-everything up — printing your phone URL and access token at the end.
-
-> 🤖 **Don't even have a server?** Open a *computer-use* agent and paste
-> [`concierge/00-install-this.md`](concierge/00-install-this.md) — it'll rent a cheap VPS,
-> install Box there, log in, and hand you the link. (Agents: `AGENTS.md` + `CLAUDE.md` are
-> auto-loaded and point you at `INSTALL.md`.)
-
-### …or just run the installer
+…or **run the installer yourself**:
 
 ```bash
-./install.sh
+git clone https://github.com/incidentfox/box.git && cd box && ./install.sh
 ```
 
-It checks prerequisites (and installs what it can), runs `npm install`, generates an access
-token, starts the server behind a Cloudflare quick-tunnel, and prints your URL + token. Safe
-to re-run. Flags: `--yes` (non-interactive), `--no-harness`, `--no-cron`, `--no-start`,
-`--port N`.
+Either way you get: prerequisites installed, an access token generated, the server started
+behind a free Cloudflare tunnel, and your **phone URL + token** printed. One manual step
+remains — run `claude` once to log in (Box drives your logged-in CLI; no API key needed on a
+subscription).
+
+Even shorter — turn a **fresh** server into a Box without cloning first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/incidentfox/box/main/bootstrap.sh | bash
+```
+
+### 🅱 You're on your laptop and need a server
+
+- **Easiest:** open a **computer-use agent** (Claude with computer use, or the ChatGPT / Codex
+  desktop app) and paste [`concierge/00-install-this.md`](concierge/00-install-this.md). It
+  rents a cheap VPS (with your OK), installs Box there, logs in, and hands you the link.
+- **Have SSH to a box already?** Provision it from your laptop in one shot:
+  ```bash
+  ./provision.sh user@your-server
+  ```
+- **DIY:** rent any small Linux VPS (see [`concierge/10-provision-server.md`](concierge/10-provision-server.md)),
+  then follow 🅰 on it.
+
+The agent path reads [`INSTALL.md`](INSTALL.md) (and the auto-loaded `AGENTS.md` / `CLAUDE.md`),
+asks the few things only you can decide (name, voice?, task board?), collects any API keys, and
+sets everything up.
+
+<details><summary><code>install.sh</code> flags</summary>
+
+`--yes` (non-interactive), `--no-harness`, `--no-cron`, `--no-start`, `--port N`. Idempotent —
+safe to re-run.
+</details>
 
 ## Requirements
 
