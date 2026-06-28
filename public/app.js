@@ -510,8 +510,8 @@ async function doArchive(s, on) {
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
 $('newBtn').onclick = () => openSheet('New chat', [
-  { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
   { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
+  { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
 ]);
 $('themeBtn').onclick = toggleTheme;
 
@@ -1347,6 +1347,7 @@ async function openChat(s) {
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), firstUser: null, hadHistory: !!s.id };
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
+  restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   $('chatTitle').textContent = cur.title;
   $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
@@ -1640,6 +1641,14 @@ function refreshButton() {
 }
 function updateSend() { refreshButton(); }
 
+/* Per-chat composer drafts. Unsent text is scoped to its chat (keyed by cur.key) and
+   persisted to localStorage, so it survives switching chats AND reloading the app — but
+   does NOT bleed across chats the way a single shared <input> value did. */
+const draftKey = (k) => 'box_draft:' + (k || '');
+function loadDraft(k) { try { return LS.getItem(draftKey(k)) || ''; } catch { return ''; } }
+function saveDraft(k, text) { try { if (text && text.trim()) LS.setItem(draftKey(k), text); else LS.removeItem(draftKey(k)); } catch {} }
+function restoreDraft() { const inp = $('input'); inp.value = loadDraft(cur.key); autoGrow(); updateSend(); }
+
 /* queued (pending) messages shown above the composer, each removable / tap-to-edit */
 function renderQueue(items) {
   const area = $('queueArea'); area.innerHTML = '';
@@ -1655,12 +1664,18 @@ function renderQueue(items) {
     if (q.running) {
       x.style.opacity = '0'; x.style.pointerEvents = 'none';
     } else {
+      el.title = 'Tap to edit · ✕ to remove';
       x.onclick = (e) => { e.stopPropagation(); try { ws.send(JSON.stringify({ type: 'dequeue', key: cur.key, qid: q.qid })); } catch {} };
-      // tap chip body → put text in composer and dequeue (for editing)
+      // tap chip body → pull it back into the composer (and remove from the queue) for editing.
+      // Don't clobber half-typed text: if the box already has content, append on a new line.
       el.addEventListener('click', (e) => {
         if (e.target.closest('.qx')) return;
+        if (!q.text) { try { ws.send(JSON.stringify({ type: 'dequeue', key: cur.key, qid: q.qid })); } catch {} return; }
         const inp = $('input');
-        if (q.text) { inp.value = q.text; autoGrow(); updateSend(); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+        const existing = inp.value.trim();
+        inp.value = existing ? existing + '\n' + q.text : q.text;
+        saveDraft(cur.key, inp.value);
+        autoGrow(); updateSend(); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length);
         try { ws.send(JSON.stringify({ type: 'dequeue', key: cur.key, qid: q.qid })); } catch {}
       });
     }
@@ -1686,7 +1701,13 @@ function killGhostIndicators() { $('messages').querySelectorAll('.cursor').forEa
 const imgUrl = (p) => '/api/img?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
 // For arbitrary filesystem paths (e.g. tool Read on an image), use /api/raw which has no dir restriction
 const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
+// Remember the last user bubble we drew, so a re-echoed copy of the SAME message (e.g. the
+// server's own injected-echo suppression desyncing on a force-queue + Stop, which leaks the
+// echo back as a `remote_user`) can be dropped instead of rendering the message twice.
+let lastUserRender = { text: '', at: 0 };
+function isRecentDupUser(text) { return (text || '') === lastUserRender.text && (Date.now() - lastUserRender.at) < 15000; }
 function addUser(text, images) {
+  lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   const body = document.createElement('div'); body.className = 'body';
@@ -1717,8 +1738,10 @@ function onServer(o) {
   // !cur.hadHistory) → the message renders twice. Marking it now suppresses that re-add.
   if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; $('chatTitle').textContent = o.title; } return; }
   if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); return; }
-  // a user message typed from ANOTHER device (desktop / official app) — sync it in
-  if (o.type === 'remote_user') { if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', []); return; }
+  // a user message typed from ANOTHER device (desktop / official app) — sync it in.
+  // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
+  // force-queue + Stop), so the message doesn't render twice.
+  if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', []); return; }
   if (o.type === 'queue') return renderQueue(o.queue);
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
   if (o.type === 'turn_start') return beginTurn(o.text, o.images);
@@ -1746,7 +1769,11 @@ function onServer(o) {
 function onSync(o) {
   // restore in-flight turn + pending queue after a (re)connect
   if (o.sessionId) cur.id = o.sessionId;
-  if (o.agent) setAgent(o.agent);
+  // Only let the server's agent win for a REAL, already-created session. A brand-new chat
+  // has no server-side session yet, so subscribe returns the default agent ('claude') — applying
+  // it here would clobber the agent the user just picked (e.g. Codex), making the menu flip back
+  // to Claude a tick after opening. The local pick stays authoritative until the session exists.
+  if (o.agent && o.sessionId) setAgent(o.agent);
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
   if (o.title && cur.title === 'New chat') { cur.title = o.title; $('chatTitle').textContent = o.title; }
@@ -1768,7 +1795,7 @@ function onSync(o) {
       kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
       if (lastUser >= 0) for (let i = kids.length - 1; i > lastUser; i--) kids[i].remove();
     }
-    if (!cur.hadHistory && (o.curUser || (o.curUserImages || []).length)) addUser(o.curUser, o.curUserImages);  // existing sessions already have it in history
+    if (!cur.hadHistory && (o.curUser || (o.curUserImages || []).length) && !isRecentDupUser(o.curUser || '')) addUser(o.curUser, o.curUserImages);  // existing sessions already have it in history; skip if we just drew it
     startAssistant();
     if (Array.isArray(o.curParts) && o.curParts.length) {
       // Rebuild the in-flight turn in its REAL order — interleaved tool chips and
@@ -1866,7 +1893,7 @@ function submit() {
       toast('Tap an option above, or answer on desktop'); return;
     }
     const ft = waitingState.freeTextIndex; const hadMenu = waitingState.hasOptions; waitingState = null;   // optimistic
-    $('input').value = ''; autoGrow(); addUser(text, []);
+    $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); addUser(text, []);
     const sel = (hadMenu && ft >= 1) ? { text, freeTextIndex: ft } : { text };
     try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel })); } catch {}
     document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
@@ -1875,7 +1902,7 @@ function submit() {
   }
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
-  $('input').value = ''; autoGrow(); images = []; renderAttach();
+  $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); images = []; renderAttach();
   enqueueText(text, { images: imgPaths });
   // If they were answering on the needs-attention page, drop back to the chat to watch it land.
   if (!$('attnPanel').classList.contains('hidden')) closeAttention();
@@ -1985,7 +2012,7 @@ $('input').addEventListener('keydown', (e) => {
 
 /* textarea autogrow + @// triggers */
 function autoGrow() { const t = $('input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.38) + 'px'; }
-$('input').addEventListener('input', () => { autoGrow(); onType(); updateSend(); });
+$('input').addEventListener('input', () => { autoGrow(); onType(); updateSend(); saveDraft(cur.key, $('input').value); });
 
 /* ---------- mode (normal / bash) ---------- */
 function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
