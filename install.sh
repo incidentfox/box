@@ -153,6 +153,16 @@ else
   if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
     NAME="$(ask '  Your name (for the morning brief) [you]: ' 'you')"
     [ -n "$NAME" ] && sed -i.bak "s|^OWNER_NAME=.*|OWNER_NAME=$NAME|" .env && rm -f .env.bak
+    # Where new chats open. Defaulting to $HOME works but is a poor place to code in
+    # (claude shows a "launched in your home directory" notice and is slower to settle);
+    # pointing it at your main code dir gives new chats a sensible cwd. Suggest a common one.
+    WS_DEF="$HOME"; for d in "$HOME/development" "$HOME/code" "$HOME/src" "$HOME/projects"; do [ -d "$d" ] && { WS_DEF="$d"; break; }; done
+    WS="$(ask "  Main code directory new chats open in [$WS_DEF]: " "$WS_DEF")"
+    if [ -n "$WS" ] && [ "$WS" != "$HOME" ]; then
+      sed -i.bak "s|^# *CC_WORKSPACE=.*|CC_WORKSPACE=$WS|" .env
+      grep -q '^CC_WORKSPACE=' .env || echo "CC_WORKSPACE=$WS" >> .env
+      rm -f .env.bak; ok "new chats will open in $WS"
+    fi
     EL="$(ask '  ElevenLabs API key for voice (optional, Enter to skip): ' '')"
     [ -n "$EL" ] && { sed -i.bak "s|^# ELEVENLABS_API_KEY=.*|ELEVENLABS_API_KEY=$EL|" .env; grep -q '^ELEVENLABS_API_KEY=' .env || echo "ELEVENLABS_API_KEY=$EL" >> .env; rm -f .env.bak; }
     LK="$(ask '  Linear API key for Board + needs-you inbox (optional, Enter to skip): ' '')"
