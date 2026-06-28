@@ -5,10 +5,10 @@
 import express from 'express';
 import { WebSocketServer, WebSocket as WSClient } from 'ws';
 import { createServer } from 'node:http';
-import { spawn, execSync } from 'node:child_process';
+import { spawn, execSync, execFile } from 'node:child_process';
 import {
   readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, unlinkSync,
-  openSync, readSync, closeSync,
+  openSync, readSync, closeSync, renameSync,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
@@ -373,9 +373,50 @@ function tailInfo(file) {
 // session ids with a currently-running worker turn (set maintained by runWorker)
 const RUNNING = new Set();
 
+// Atomic JSON write: write a temp file then rename over the target, so a concurrent reader
+// always sees either the old or the new COMPLETE file — never a half-written (torn) one.
+// Without this, two box processes writing the same state file (e.g. an overlapping keeper
+// restart) could let a reader catch a truncated file → JSON.parse throws → the loader's
+// catch returns empty → the next save persists that emptiness and wipes the state.
+function writeJsonAtomic(file, data) {
+  const tmp = `${file}.tmp.${process.pid}`;
+  try { writeFileSync(tmp, JSON.stringify(data)); renameSync(tmp, file); }
+  catch { try { writeFileSync(file, JSON.stringify(data)); } catch {} try { unlinkSync(tmp); } catch {} }
+}
 const ARCH_FILE = join(STATE_DIR, 'archived.json');
+// archived.json stays a bare ARRAY of ids (membership) — never change its shape, so the
+// `pickup` CLI and any older box build keep reading it. Archive *timestamps* live in a
+// separate sidecar so the Archived view can sort most-recently-archived first.
 const loadArchived = () => { try { return new Set(JSON.parse(readFileSync(ARCH_FILE, 'utf8'))); } catch { return new Set(); } };
-const saveArchived = (set) => { try { writeFileSync(ARCH_FILE, JSON.stringify([...set])); } catch {} };
+const saveArchived = (set) => writeJsonAtomic(ARCH_FILE, [...set]);
+const ARCH_AT_FILE = join(STATE_DIR, 'archived-at.json');   // { sessionId: archivedAtMs } — additive sidecar
+const loadArchivedAt = () => { try { const o = JSON.parse(readFileSync(ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
+const saveArchivedAt = (m) => writeJsonAtomic(ARCH_AT_FILE, m);
+
+// ---- full-text session search via the `sessiongrep` CLI (Rust). It self-reindexes
+// incrementally before each search, so results stay fresh. We parse its text output and
+// only surface sessions THIS box can actually open (claude jsonl on disk / known codex).
+const SESSIONGREP_BIN = (() => {
+  const c = cfg('SESSIONGREP_BIN'); if (c) return c;
+  const cargo = join(HOME, '.cargo', 'bin', 'sessiongrep');
+  return existsSync(cargo) ? cargo : 'sessiongrep';
+})();
+const SG_UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const SG_HDR = new RegExp(`^(.+?)\\s+(claude|codex|cursor|antigravity|pi)\\s+(${SG_UUID})\\s+(.*?)\\s+match=(\\S+)\\s+score=(\\d+)\\s*$`, 'i');
+const sgStrip = (s) => String(s || '').replace(/\[\[|\]\]/g, '');   // sessiongrep marks matched terms with [[ ]]
+function parseSessiongrep(out) {
+  const results = []; let cur = null;
+  for (const line of String(out || '').split('\n')) {
+    const h = line.match(SG_HDR);
+    if (h) { cur = { age: h[1].trim(), provider: h[2].toLowerCase(), id: h[3], title: sgStrip(h[4]).trim(), match: h[5], score: +h[6], cwd: '', preview: '', snippet: '' }; results.push(cur); continue; }
+    if (!cur) continue;
+    const cw = line.match(/^\s+cwd=(.*?)\s+preview=(.*)$/);
+    if (cw) { cur.cwd = cw[1].trim(); cur.preview = sgStrip(cw[2]).trim(); continue; }
+    const hit = line.match(/^\s+hit\[[^\]]*\]:\s*(.*)$/);
+    if (hit) { cur.snippet = sgStrip(hit[1]).trim(); continue; }
+  }
+  return results;
+}
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
 const saveCodex = (state) => { try { writeFileSync(CODEX_FILE, JSON.stringify(state, null, 2)); } catch {} };
@@ -512,6 +553,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const rc = readRcRegistry();
   const names = loadNames();
   const archived = loadArchived();
+  const archivedAt = loadArchivedAt();
   const files = [];
   const seenIds = new Set();
   for (const dir of eachProjectDir()) {
@@ -593,10 +635,15 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : 'main',
       subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
       pinned: (!!r || !!lb) && !archived.has(s.id), mtime: s.mtime, renamed: !!(tm.custom || names[s.id]),
+      archivedAt: archivedAt[s.id] || 0,
       hasAttention,
     };
   });
-  out.sort((a, b) => (b.pinned - a.pinned) || (b.mtime - a.mtime));
+  // Archived view sorts most-recently-archived first (so a chat you JUST archived is
+  // right at the top), falling back to last-activity for legacy archives with no
+  // recorded archive time. Every other view keeps live-pinned-then-recent order.
+  if (filter === 'archived') out.sort((a, b) => (b.archivedAt - a.archivedAt) || (b.mtime - a.mtime));
+  else out.sort((a, b) => (b.pinned - a.pinned) || (b.mtime - a.mtime));
   counts.autoSub = autoSub;
   return { sessions: out, counts };
 }
@@ -743,9 +790,37 @@ app.post('/api/login', (req, res) =>
 
 app.get('/api/sessions', requireAuth, (req, res) => { const r = listSessions({ filter: req.query.filter || 'all' }); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD }); });
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
-  const set = loadArchived(); const on = !(req.body && req.body.archived === false);
-  if (on) set.add(req.params.id); else set.delete(req.params.id);
-  saveArchived(set); res.json({ ok: true, archived: on });
+  const set = loadArchived(); const at = loadArchivedAt();
+  const id = req.params.id; const on = !(req.body && req.body.archived === false);
+  if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
+  saveArchived(set); saveArchivedAt(at);
+  res.json({ ok: true, archived: on });
+});
+// Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
+app.get('/api/session-search', requireAuth, (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (q.length < 2) return res.json({ results: [] });
+  execFile(SESSIONGREP_BIN, ['search', q, '--limit', '40'], { timeout: 9000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+    if (err && !stdout) return res.json({ results: [], error: 'search unavailable' });
+    const codexIds = new Set(Object.values(loadCodex().sessions || {}).map((s) => s.id));
+    const archived = loadArchived();
+    const seen = new Set(); const results = [];
+    for (const r of parseSessiongrep(stdout)) {
+      if (r.provider !== 'claude' && r.provider !== 'codex') continue;   // box can only open these
+      if (seen.has(r.id)) continue;
+      const openable = r.provider === 'codex' ? codexIds.has(r.id) : !!findSessionFile(r.id);
+      if (!openable) continue;                                           // skip laptop-only / unindexed hits
+      seen.add(r.id);
+      results.push({
+        id: r.id, agent: r.provider,
+        title: r.title || r.snippet || r.preview || 'session',
+        cwd: r.cwd, preview: r.snippet || r.preview, age: r.age,
+        match: r.match, archived: archived.has(r.id),
+      });
+      if (results.length >= 30) break;
+    }
+    res.json({ results });
+  });
 });
 app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   const before = req.query.before != null ? parseInt(req.query.before, 10) : null;

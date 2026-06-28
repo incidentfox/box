@@ -35,14 +35,21 @@
   <header class="bar sbar">
     <strong class="apptitle">Box</strong><span class="ver" id="ver"></span>
     <div class="spacer"></div>
+    <button id="sessSearchBtn" class="iconbtn ghost" title="search chats" data-icon="search"></button>
     <button id="themeBtn" class="iconbtn ghost" title="theme" data-icon="moon"></button>
     <button id="boardBtn" class="iconbtn ghost" title="Linear board" data-icon="board"></button>
     <button id="pipesBtn" class="iconbtn ghost" title="pipelines" data-icon="pulse"></button>
     <button id="newBtn" class="compose" title="new chat" data-icon="plus"></button>
   </header>
+  <div id="sessSearch" class="boardSearch hidden">
+    <span class="boardSearchIc" data-icon="search"></span>
+    <input id="sessSearchInput" class="boardSearchInput" placeholder="Search all chats…" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="sessSearchClear" class="iconbtn ghost" title="clear" data-icon="close"></button>
+  </div>
   <div id="tabs" class="tabs"></div>
   <div id="subtabs" class="tabs subtabs hidden"></div>
   <div id="sessionList" class="list"></div>
+  <div id="sessResults" class="list sessResults hidden"></div>
 </section>
 
 <section id="pipelines" class="screen hidden">

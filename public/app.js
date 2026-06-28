@@ -89,7 +89,16 @@ function renderRoute(s) {
   } finally { navSuppress = false; }
 }
 window.addEventListener('popstate', (e) => renderRoute(e.state));
-function toast(m, ms = 2200) { const t = $('toast'); t.textContent = m; t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms); }
+function toast(m, ms = 2200, action) {
+  const t = $('toast'); t.innerHTML = '';
+  const label = document.createElement('span'); label.textContent = m; t.appendChild(label);
+  if (action && action.label && action.fn) {
+    const b = document.createElement('button'); b.className = 'toastAct'; b.type = 'button'; b.textContent = action.label;
+    b.onclick = (e) => { e.stopPropagation(); clearTimeout(t._t); t.classList.add('hidden'); action.fn(); };
+    t.appendChild(b);
+  }
+  t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms);
+}
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
@@ -376,6 +385,10 @@ function relTime(ms) {
   if (s < 86400) return Math.floor(s / 3600) + 'h'; if (s < 7 * 86400) return Math.floor(s / 86400) + 'd';
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
+// In the Archived view, sort/group/label by WHEN it was archived (so a chat you just
+// archived shows up at the very top under "Today"), falling back to last-activity for
+// legacy archives. Everywhere else, last-activity time.
+const cardTime = (s) => (curFilter === 'archived' && s.archivedAt ? s.archivedAt : s.mtime);
 function renderSessionList() {
   const list = $('sessionList'); list.innerHTML = '';
   const items = allSessions;   // server already filtered by curFilter
@@ -386,7 +399,7 @@ function renderSessionList() {
     // one "Live" header instead of letting them fall into time buckets — otherwise a
     // pinned "Today" item and a non-pinned "Today" item each emit their own header,
     // duplicating Today/This week/Earlier down the list (the reported bug).
-    const g = s.pinned ? 'Live' : timeGroup(s.mtime);
+    const g = s.pinned ? 'Live' : timeGroup(cardTime(s));
     if (g !== group) { group = g; const h = document.createElement('div'); h.className = 'grouphd'; h.textContent = g; list.appendChild(h); }
     list.appendChild(sessionCard(s));
   }
@@ -406,7 +419,7 @@ function sessionCard(s) {
        <div class="srow">
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
-	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent === 'codex' ? '<span class="agentTag codex">Codex</span>' : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(s.mtime)}</span><button class="sMore" type="button" title="More actions (rename / archive)" aria-label="More actions">⋯</button></div>
+	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent === 'codex' ? '<span class="agentTag codex">Codex</span>' : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sMore" type="button" title="More actions (rename / archive)" aria-label="More actions">⋯</button></div>
            <div class="sl"></div>
          </div>
        </div>
@@ -476,8 +489,8 @@ function attachSwipeActions(card, front, s) {
   return { close, isOpen: () => open };
 }
 function confirmArchive(s) {
-  if (s.archived) return doArchive(s, false);   // unarchive is reversible — no prompt
-  if (confirm(`Archive "${s.title}"?\n\nIt'll be hidden from your list (and from pickup). Find it later under the Archived filter.`)) doArchive(s, true);
+  // No confirm dialog (it got annoying) — archive immediately; the Undo toast is the safety net.
+  doArchive(s, !s.archived);
 }
 function openArchiveSheet(s) {
   openSheet(s.title, [
@@ -489,7 +502,9 @@ function openArchiveSheet(s) {
 }
 async function doArchive(s, on) {
   try { await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) }); } catch {}
-  toast(on ? '🗄 Archived' : 'Unarchived');
+  s.archived = on;
+  if (on) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
+  else toast('📤 Unarchived');
   fetchSessions(curFilter);
 }
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
@@ -499,6 +514,67 @@ $('newBtn').onclick = () => openSheet('New chat', [
   { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
 ]);
 $('themeBtn').onclick = toggleTheme;
+
+/* ---------- session search — full-text across ALL chats (title/summary/cwd/transcript)
+   via the sessiongrep CLI on the server. Only surfaces chats this box can actually open. */
+let sessQuery = '', sessSearchDeb = null, sessSearchSeq = 0;
+$('sessSearchBtn').onclick = sessSearchToggle;
+$('sessSearchClear').onclick = () => { $('sessSearchInput').value = ''; setSessQuery(''); $('sessSearchInput').focus(); };
+$('sessSearchInput').addEventListener('input', (e) => {
+  clearTimeout(sessSearchDeb); const v = e.target.value;
+  sessSearchDeb = setTimeout(() => setSessQuery(v), 220);
+});
+$('sessSearchInput').addEventListener('keydown', (e) => { if (e.key === 'Escape') sessSearchClose(); });
+function sessSearchToggle() {
+  const bar = $('sessSearch');
+  if (bar.classList.contains('hidden')) { bar.classList.remove('hidden'); paintIcons(bar); $('sessSearchInput').focus(); }
+  else sessSearchClose();
+}
+function sessSearchClose() {
+  $('sessSearch').classList.add('hidden');
+  $('sessSearchInput').value = '';
+  if (sessQuery) setSessQuery('');
+}
+function setSessQuery(q) {
+  q = (q || '').trim(); sessQuery = q;
+  const results = $('sessResults'), list = $('sessionList');
+  if (!q) {
+    results.classList.add('hidden'); results.innerHTML = '';
+    list.classList.remove('hidden'); renderTabs();   // restores #tabs/#subtabs for the current filter
+    return;
+  }
+  $('tabs').classList.add('hidden'); $('subtabs').classList.add('hidden'); list.classList.add('hidden');
+  results.classList.remove('hidden');
+  runSessSearch();
+}
+async function runSessSearch() {
+  const q = sessQuery; if (!q) return;
+  const seq = ++sessSearchSeq;
+  const box = $('sessResults'); box.innerHTML = '<p class="empty">Searching…</p>';
+  let results = [];
+  try { results = (await (await api('/api/session-search?q=' + encodeURIComponent(q))).json()).results || []; } catch {}
+  if (seq !== sessSearchSeq || sessQuery !== q) return;   // a newer query already fired
+  box.innerHTML = '';
+  if (!results.length) { box.innerHTML = `<p class="empty">No chats match “${esc(q)}”.</p>`; return; }
+  for (const s of results) box.appendChild(sessResultRow(s));
+}
+function sessResultRow(s) {
+  const row = document.createElement('div'); row.className = 'sres';
+  const agent = s.agent || 'claude';
+  row.innerHTML =
+    `<div class="sresTop"><span class="sresTitle"></span>`
+    + `${agent === 'codex' ? '<span class="agentTag codex">Codex</span>' : ''}`
+    + `${s.archived ? '<span class="agentTag arch">Archived</span>' : ''}`
+    + `<span class="sresAge"></span></div>`
+    + `<div class="sresMeta"></div>`
+    + (s.preview ? `<div class="sresSnip"></div>` : '');
+  row.querySelector('.sresTitle').textContent = s.title || 'session';
+  row.querySelector('.sresAge').textContent = s.age || '';
+  row.querySelector('.sresMeta').textContent = shortCwd(s.cwd);
+  if (s.preview) row.querySelector('.sresSnip').textContent = stripMd(s.preview);
+  row.onclick = () => { sessSearchClose(); openChat({ id: s.id, title: s.title, agent, cwd: s.cwd }); };
+  return row;
+}
 
 /* ---------- pipelines health panel ---------- */
 $('pipesBtn').onclick = openPipelines;
@@ -2411,9 +2487,10 @@ $('myMsgsBtn').onclick = async () => {
 $('attnBtn').insertAdjacentHTML('afterbegin', ICONS.bell);
 $('archiveBtn').onclick = async () => {
   if (!cur.id) return toast('Nothing to archive yet');
-  if (!confirm(`Archive "${cur.title || 'this chat'}"?\n\nIt'll be hidden from your list (and from pickup). Find it later under the Archived filter.`)) return;
-  try { await api(`/api/sessions/${cur.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-  toast('🗄 Archived'); if (ws) ws.close(); openSessions();
+  const sid = cur.id;   // no confirm — archive now, offer Undo via toast
+  try { await api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
+  toast('🗄 Archived', 6000, { label: 'Undo', fn: () => { api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: false }) }).catch(() => {}); if (curFilter) fetchSessions(curFilter); } });
+  if (ws) ws.close(); openSessions();
 };
 $('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key }); showAttention(); };
 $('copyChatBtn').onclick = () => {

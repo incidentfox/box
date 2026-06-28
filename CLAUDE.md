@@ -18,5 +18,13 @@ This is just the app source — see `README.md` (backend `server/index.mjs`, fro
 supervisor `scripts/keeper.sh`, optional harness in `harness/`). Keys live only in `.env`
 (gitignored) — never commit or echo them.
 
+> ⚠️ **Never boot a second server against the live `STATE_DIR` (`~/.cc-mobile`).** It's hard-coded
+> (not env-overridable), so a throwaway instance shares the SAME state files as the running app.
+> Two processes doing read-modify-write on e.g. `archived.json` can tear a non-atomic write and
+> wipe it (this happened once — 350 archived ids → 6). State writes are now atomic (`writeJsonAtomic`),
+> but still: to test locally, point `HOME` at an isolated dir (symlink in `.claude`/`.cargo`, fresh
+> `.cc-mobile`) and use an alt `PORT`, and never fire write endpoints (`POST /archive`, rename, etc.)
+> from a test instance.
+
 > Don't confuse this file with `harness/CLAUDE.md`: that one is the *operating-pattern* guide
 > meant to be copied into the **user's own** working directory, not this repo.
