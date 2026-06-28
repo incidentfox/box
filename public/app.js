@@ -25,6 +25,59 @@ applyVV();
 
 /* ---------- helpers ---------- */
 function show(id) { ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
+
+/* ---------- history-synced navigation (browser Back / Forward) ---------- */
+// The app is one page that toggles top-level <section> "screens" (plus the chat's
+// attention overlay). Without this, the browser Back button left the app entirely
+// instead of stepping back a screen. We mirror every FORWARD navigation into the
+// History API and re-render the previous screen on `popstate`, so the browser
+// Back/Forward buttons, the in-app back arrows, and swipe-back all walk one stack.
+let navSuppress = false;   // true while restoring a popped route, so the render itself doesn't re-push
+const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || ''].join('|') : '');
+function navTo(state, { replace = false } = {}) {
+  if (navSuppress) return;                       // we're rendering a popped route — don't push
+  const prev = history.state;
+  // Replace (don't grow the stack) for: first entry, an explicit replace, the same
+  // screen re-rendering (e.g. re-filtering the list / refresh), or stepping off the
+  // login screen — so Back from the list leaves the app instead of flashing login.
+  if (!prev || replace || routeKey(prev) === routeKey(state) || prev.view === 'login') {
+    try { history.replaceState(state, ''); } catch {}
+    return;
+  }
+  try { history.pushState(state, ''); } catch {}
+}
+function renderRoute(s) {
+  navSuppress = true;
+  try {
+    if (!TOKEN) { show('login'); return; }
+    // leaving the chat → drop the live socket (matches the old goBackFromChat)
+    if (s && s.view !== 'chat' && s.view !== 'chatAttn' && ws) { try { ws.close(); } catch {} }
+    const chatVisible = () => !$('chat').classList.contains('hidden');
+    switch (s && s.view) {
+      case 'login':     show('login'); break;
+      case 'pipelines': openPipelines(); break;
+      case 'board':     openBoard(); break;
+      case 'issue':     openIssue(s.id); break;
+      case 'issueNew':  openIssueNew(); break;
+      case 'chat':
+        if (s.id && cur.id === s.id && chatVisible()) { if (attnMode) closeAttention(); break; } // just closing the overlay
+        if (attnMode) closeAttention();
+        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent });
+        else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
+        else openSessions();
+        break;
+      case 'chatAttn':
+        if (s.id && cur.id === s.id && chatVisible()) { if (!attnMode) showAttention(); }
+        else if (s.id) { openChat({ id: s.id, title: s.title, agent: s.agent }).then(() => showAttention()); }
+        else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); if (!attnMode) showAttention(); }
+        else openSessions();
+        break;
+      case 'sessions':
+      default:          openSessions((s && s.filter) || 'all'); break;
+    }
+  } finally { navSuppress = false; }
+}
+window.addEventListener('popstate', (e) => renderRoute(e.state));
 function toast(m, ms = 2200) { const t = $('toast'); t.textContent = m; t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms); }
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 async function api(path, opts = {}) {
@@ -84,7 +137,7 @@ $('toBottom').onclick = () => scrollBottom(true);
     if (!tracking) return; tracking = false;
     const dx = ((e.changedTouches[0] || {}).clientX || sx) - sx;
     reset();
-    if (horiz && dx > 70) { if (attnMode) closeAttention(); else goBackFromChat(); }
+    if (horiz && dx > 70) goBackFromChat();   // handles the attention overlay + history itself
   };
   el.addEventListener('touchend', end, { passive: true });
   el.addEventListener('touchcancel', end, { passive: true });
@@ -105,7 +158,7 @@ $('toBottom').onclick = () => scrollBottom(true);
     const dx = e.changedTouches[0].clientX - sx;
     el.style.transition = 'transform .18s ease'; el.style.transform = '';
     setTimeout(() => { el.style.transition = ''; }, 200);
-    if (dx > 75) { if (pipeView === 'detail') openPipelines(); else show('sessions'); }
+    if (dx > 75) { if (pipeView === 'detail') openPipelines(); else history.back(); }
   }, { passive: true });
 })();
 
@@ -249,7 +302,7 @@ async function login() {
   if (!r.ok) { $('loginErr').textContent = 'Wrong token'; return; }
   TOKEN = token; LS.setItem('cc_token', token); loadConfig(); openSessions();
 }
-function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); show('login'); }
+function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); navTo({ view: 'login' }, { replace: true }); show('login'); }
 
 /* ---------- sessions ---------- */
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
@@ -259,7 +312,7 @@ const STATUS_TABS = [['all', 'All'], ['needs_input', 'Needs input'], ['working',
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
 
-async function openSessions(filter = 'all') { show('sessions'); await fetchSessions(filter); }
+async function openSessions(filter = 'all') { navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter); }
 async function fetchSessions(filter) {
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + curFilter)).json();
@@ -444,9 +497,10 @@ $('themeBtn').onclick = openThemeSheet;
 
 /* ---------- pipelines health panel ---------- */
 $('pipesBtn').onclick = openPipelines;
-$('pipesBack').onclick = () => show('sessions');
+$('pipesBack').onclick = () => history.back();
 $('pipesRefresh').onclick = openPipelines;
 async function openPipelines() {
+  navTo({ view: 'pipelines' });
   show('pipelines'); paintIcons($('pipelines')); pipeView = 'list';
   const body = $('pipesBody'); body.innerHTML = '<p class="empty">Loading…</p>';
   let d;
@@ -471,10 +525,11 @@ async function openPipelines() {
 // A GLOBAL view of every open ticket grouped by workflow state — unlike the
 // per-cwd ATTENTION.md, it's the same regardless of which dir the session runs in.
 $('boardBtn').onclick = openBoard;
-$('boardBack').onclick = () => show('sessions');
+$('boardBack').onclick = () => history.back();
 $('boardRefresh').onclick = openBoard;
 const PRIO = { 1: ['urgent', '#e0533a'], 2: ['high', '#e08a1e'], 3: ['med', '#3b82c4'], 4: ['low', '#9aa0a6'] };
 async function openBoard() {
+  navTo({ view: 'board' });
   show('board'); paintIcons($('board'));
   const body = $('boardBody'); body.innerHTML = '<p class="empty">Loading board…</p>';
   $('boardMeta').textContent = '';
@@ -540,21 +595,16 @@ async function loadLinearMeta() {
   try { linearMeta = await (await api('/api/linear-meta')).json(); } catch { linearMeta = { states: [], labels: [] }; }
   return linearMeta;
 }
-$('issueBack').onclick = () => {
-  // Return to wherever the issue was opened FROM: the chat (via its bell Linear tab)
-  // or the board. Opened from a chat → go back to that chat, not the board.
-  if (issueOrigin && issueOrigin.kind === 'chat' && issueOrigin.chat) {
-    const c = issueOrigin.chat; issueOrigin = null;
-    if (cur && cur.id === c.id) { show('chat'); closeAttention(); } else openChat(c);
-    return;
-  }
-  if (boardDirty) { boardDirty = false; openBoard(); } else show('board');
-};
+// Step the history stack back — it naturally returns to wherever the issue was
+// opened from (the board, or the chat's bell Linear tab), since that screen is the
+// previous history entry. Returning to the board re-renders it (always fresh).
+$('issueBack').onclick = () => history.back();
 $('issueLinear').onclick = () => { if (curIssue && curIssue.url) window.open(curIssue.url, '_blank'); };
 $('issueCommentSend').onclick = sendIssueComment;
 $('issueComment').onkeydown = (e) => { if (e.key === 'Enter') sendIssueComment(); };
 
 async function openIssue(id) {
+  navTo({ view: 'issue', id });
   show('issue'); paintIcons($('issue'));
   $('issueId').textContent = id; $('issueScroll').innerHTML = '<p class="empty">Loading…</p>';
   $('issueBar').innerHTML = ''; $('issueComment').value = '';
@@ -795,9 +845,10 @@ How to work it:
 const PRIO_OPTS = [[0, 'None'], [1, 'Urgent'], [2, 'High'], [3, 'Medium'], [4, 'Low']];
 let icrPrio = 0, icrStateId = '';
 $('boardNew').onclick = openIssueNew;
-$('icrBack').onclick = () => show('board');
+$('icrBack').onclick = () => history.back();
 $('icrCreate').onclick = createIssue;
 async function openIssueNew() {
+  navTo({ view: 'issueNew' });
   show('issueNew'); paintIcons($('issueNew'));
   $('icrTitle').value = ''; $('icrDesc').value = ''; icrPrio = 0; icrStateId = '';
   const pr = $('icrPrio'); pr.innerHTML = '';
@@ -950,6 +1001,7 @@ function connectWS() {
 async function openChat(s) {
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), firstUser: null, hadHistory: !!s.id };
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   $('chatTitle').textContent = cur.title;
   $('messages').innerHTML = ''; live = null; running = false;
@@ -1009,12 +1061,17 @@ async function renderLinearBar(inc, sessionId) {
   });
   bar.appendChild(actions);
 }
-async function goBackFromChat() {
-  if (ws) ws.close();
+// Back from the chat, kept in lock-step with the browser history stack: the
+// attention overlay and (for a fork) the parent chat are their own entries /
+// forward jumps; everything else just steps history back — so the browser Back
+// button, this arrow, and swipe-back all do the same thing. (ws is closed by
+// renderRoute when the popped route leaves the chat.)
+function goBackFromChat() {
+  if (attnMode) return history.back();   // pops the chatAttn entry → renderRoute closes the overlay
   if (cur.parentId) return openChat({ id: cur.parentId, title: cur.parentTitle || 'Parent chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings });
-  return openSessions();
+  return history.back();                  // step back to the previous screen (usually the list)
 }
-$('backBtn').onclick = () => attnMode ? closeAttention() : goBackFromChat();
+$('backBtn').onclick = goBackFromChat;
 
 function addNote(t) { const e = document.createElement('div'); e.className = 'muted'; e.style.textAlign = 'center'; e.style.fontSize = '13px'; e.textContent = t; $('messages').appendChild(e); }
 function fmtTs(ts) {
@@ -2002,7 +2059,7 @@ $('archiveBtn').onclick = async () => {
   try { await api(`/api/sessions/${cur.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
   toast('🗄 Archived'); if (ws) ws.close(); openSessions();
 };
-$('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; showAttention(); };
+$('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key }); showAttention(); };
 $('copyChatBtn').onclick = () => {
   const TURNS = 10;
   const msgs = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')];
@@ -2280,6 +2337,46 @@ function openSheet(title, rows) {
 }
 function closeSheet() { $('sheet').classList.add('hidden'); }
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
+// Desktop convenience: Escape dismisses the topmost transient surface (bottom sheet
+// or the accounts overlay). The image lightbox owns its own Escape; the chat's
+// attention overlay closes with Back (it's a history entry), so it's not handled here.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('sheet').classList.contains('hidden')) { e.preventDefault(); closeSheet(); return; }
+  if ($('accountsOverlay') && !$('accountsOverlay').classList.contains('hidden')) { e.preventDefault(); closeAccounts(); return; }
+});
+
+/* ---------- desktop keyboard shortcuts ---------- */
+// Only fire when you're NOT typing in a field and no modal is up. j/k (or ↑/↓) move
+// through the session list, Enter opens the highlighted chat, "/" jumps to the chat
+// composer, "?" shows the list. No-ops on touch devices (they never emit these keys).
+let kbSel = -1;
+const kbCards = () => [...$('sessionList').querySelectorAll('.sCard')];
+function kbHighlight() {
+  const cards = kbCards();
+  cards.forEach((c, i) => c.classList.toggle('kbsel', i === kbSel));
+  if (cards[kbSel]) cards[kbSel].scrollIntoView({ block: 'nearest' });
+}
+function kbMove(d) {
+  const cards = kbCards(); if (!cards.length) return;
+  kbSel = kbSel < 0 ? (d > 0 ? 0 : cards.length - 1) : Math.max(0, Math.min(cards.length - 1, kbSel + d));
+  kbHighlight();
+}
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  if ((t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) || e.metaKey || e.ctrlKey || e.altKey) return;
+  // don't hijack keys while a modal/overlay owns the screen
+  if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden') ||
+      ($('accountsOverlay') && !$('accountsOverlay').classList.contains('hidden'))) return;
+  const onList = !$('sessions').classList.contains('hidden');
+  const onChat = !$('chat').classList.contains('hidden');
+  if (e.key === '/') { if (onChat && !attnMode) { e.preventDefault(); $('input').focus(); } return; }
+  if (e.key === '?') { toast('Shortcuts: j/k move · Enter opens · / composer · Esc closes', 3200); return; }
+  if (!onList) return;
+  if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); kbMove(1); }
+  else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); kbMove(-1); }
+  else if (e.key === 'Enter') { const c = kbCards()[kbSel]; if (c) { e.preventDefault(); c.querySelector('.sCardFront').click(); } }
+});
 
 /* ---------- Claude accounts (login / pool / failover) ---------- */
 function closeAccounts() { $('accountsOverlay').classList.add('hidden'); }
@@ -2704,4 +2801,5 @@ fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
 }).catch(() => {});
 paintIcons();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-if (TOKEN) { loadConfig(); openSessions().catch(() => show('login')); } else show('login');
+if (TOKEN) { navTo({ view: 'sessions', filter: 'all' }, { replace: true }); loadConfig(); openSessions().catch(() => show('login')); }
+else { navTo({ view: 'login' }, { replace: true }); show('login'); }

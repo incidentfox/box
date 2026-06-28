@@ -649,3 +649,26 @@ textarea.acctInput { resize: vertical; }
 .acctBarFill.hi { background: #c0392b; }
 .acctUsageMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 11.5px; color: var(--muted); }
 .acctUsageLink { font-size: 11.5px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+
+/* ============================================================
+   Desktop / wide-screen polish. Mobile (< 820px) is unchanged.
+   The app is mobile-first: each .screen is a full-viewport flex
+   column. On a wide browser we center it as a fixed-width panel
+   with neutral gutters, turn the bottom sheet into a centered
+   modal, and center the accounts overlay to match the column.
+   ============================================================ */
+@media (min-width: 820px) {
+  body { background: var(--subtle); }
+  .screen {
+    max-width: 768px; margin: 0 auto; background: var(--bg);
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    box-shadow: 0 0 60px var(--shadow);
+  }
+  /* bottom sheet → centered modal dialog */
+  .sheet { align-items: center; justify-content: center; }
+  .sheetInner { max-width: 440px; margin: 0 16px; border-radius: 18px; max-height: min(80vh, calc(var(--app-h) - 80px)); }
+  /* accounts overlay → centered panel matching the column width */
+  .explorer { width: min(768px, 100vw); left: 50%; right: auto; transform: translateX(-50%); border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+}
+/* keyboard-selected session row (j/k navigation, desktop) */
+.sCard.kbsel .sCardFront { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 14px; }
