@@ -96,6 +96,13 @@ fi
 # claude CLI — required; we can't reliably auto-install/login, so guide instead.
 if command -v claude >/dev/null 2>&1; then
   ok "claude CLI present ($(claude --version 2>/dev/null | head -1))"
+  # Logged in? Box drives the user's logged-in CLI (no API key needed on a subscription).
+  if [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    ok "claude appears logged in"
+  else
+    warn "claude is installed but NOT logged in — run 'claude' once and complete the login"
+    info "(a computer-use agent can finish the browser OAuth; otherwise the user must)"
+  fi
 else
   warn "claude CLI not found — Box drives it, so install + log in:"
   info "npm install -g @anthropic-ai/claude-code   # then run:  claude   (and log in)"
@@ -208,13 +215,16 @@ if [ "$DO_START" = 1 ]; then
   URL_FILE="$HOME/.cc-mobile/url.txt"; URL=""
   for _ in $(seq 1 20); do [ -s "$URL_FILE" ] && { URL="$(cat "$URL_FILE")"; break; }; sleep 1; done
   echo
-  bold "✅ Box is up."
   TOKEN_VAL="$(grep '^CC_AUTH_TOKEN=' .env | cut -d= -f2-)"
-  if [ -n "$URL" ]; then echo "   URL:   $URL"; else echo "   URL:   (tunnel still starting — check ~/.cc-mobile/url.txt)"; fi
-  echo "   Token: $TOKEN_VAL"
-  echo
-  info "Open the URL on your phone, enter the token, and Add to Home Screen for the app experience."
-  [ "$(grep -c '^# ELEVENLABS_API_KEY' .env)" -gt 0 ] && info "Voice/Linear are optional — add keys to .env and restart the keeper to enable."
+  [ -n "$URL" ] || URL="(tunnel still starting — re-check ~/.cc-mobile/url.txt in a few seconds)"
+  # Crisp, unmistakable hand-off block — an installing agent should relay this verbatim.
+  echo "┌──────────────────────────────────────────────────────────────"
+  bold "│ ✅ Box is up — REPORT THIS TO THE USER:"
+  echo  "│   URL:   $URL"
+  echo  "│   Token: $TOKEN_VAL"
+  echo  "│   → Open the URL on your phone, enter the token, then Share → Add to Home Screen."
+  echo "└──────────────────────────────────────────────────────────────"
+  info "Voice + a Linear board are optional — add keys to .env and restart (pkill -f 'node server/index.mjs') to enable."
 else
   bold "✅ Setup complete (not started)."
   echo "   Start it with:  ./scripts/keeper.sh &   (or reboot — the @reboot cron will)."

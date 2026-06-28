@@ -12,10 +12,14 @@ driven from a phone as a native chat UI. See `README.md` for the product overvie
 ---
 
 ## Step 0 — Confirm context
-Verify you're in the Box repo (this file, `install.sh`, `server/index.mjs`, `package.json`
-all exist) and that you're on the machine that will HOST Box (a server/VPS/always-on box,
-or the user's own machine for local use). If the user wants Box on a *different* server they
-haven't shelled into, tell them to run you there, or see `concierge/10-provision-server.md`.
+- **Are you in the repo?** Verify this file, `install.sh`, `server/index.mjs`, and
+  `package.json` exist in the current directory. If not — the repo isn't cloned yet — clone it
+  and enter it: `git clone https://github.com/incidentfox/box.git && cd box`.
+- **Are you on the host?** Box must be installed on the machine that will RUN it (a
+  server / VPS / always-on box, or the user's own machine for local use). If the user wants Box
+  on a server they haven't shelled into yet, connect there first; if there's no server at all
+  and you have computer use, provision one via `concierge/10-provision-server.md` (get the
+  user's OK before paying), then come back here.
 
 ## Step 1 — Ask the user the few things that matter
 Ask concisely (one round). Defaults in brackets:
@@ -38,8 +42,13 @@ Two paths — let the user pick:
   `concierge/20-api-keys.md` (keys), `concierge/30-linear.md` (Linear key + team id),
   `concierge/10-provision-server.md` (rent a VPS), `concierge/40-stable-url.md` (custom domain).
 
-The Anthropic login for the `claude` CLI is **interactive** — you cannot do it for them.
-If `claude` isn't logged in, tell the user to run `claude` once and log in (see Step 5).
+The `claude` CLI login is **interactive (a browser OAuth page)**. Box drives the user's
+logged-in CLI, so it needs no Anthropic API key on a Claude subscription.
+- If you're a **computer-use agent**, you can complete this login yourself: run `claude`, open
+  the OAuth URL it prints, and finish the sign-in in the browser.
+- If you're a **terminal-only agent**, you can't click the browser — ask the user to run
+  `claude` once and log in (see Step 5). Check the state with: `ls ~/.claude/.credentials.json`
+  (present ⇒ logged in) or `claude -p "say OK"` (works ⇒ logged in).
 
 Write whatever keys you collected into `.env` (copy from `.env.example` first if `.env`
 doesn't exist). Required: `CC_AUTH_TOKEN` (let `install.sh` generate it if blank). For

@@ -33,7 +33,7 @@ autonomously"* from a coffee shop; come back to a finished result you can ship.
 Clone the repo, start an agent inside it, and tell it to install:
 
 ```bash
-git clone https://github.com/<you>/box.git
+git clone https://github.com/incidentfox/box.git
 cd box
 claude        # or: codex
 ```
@@ -43,6 +43,11 @@ then say:
 The agent reads [`INSTALL.md`](INSTALL.md), asks you the handful of things only you can
 decide (your name, whether you want voice / a task board), collects any API keys, and sets
 everything up — printing your phone URL and access token at the end.
+
+> 🤖 **Don't even have a server?** Open a *computer-use* agent and paste
+> [`concierge/00-install-this.md`](concierge/00-install-this.md) — it'll rent a cheap VPS,
+> install Box there, log in, and hand you the link. (Agents: `AGENTS.md` + `CLAUDE.md` are
+> auto-loaded and point you at `INSTALL.md`.)
 
 ### …or just run the installer
 

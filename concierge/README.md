@@ -12,6 +12,7 @@ that matters.
 
 | File | What the agent does for you |
 |---|---|
+| [`00-install-this.md`](00-install-this.md) | **The all-in-one prompt** — does the whole setup end to end (pick a host, provision if needed, clone, install, hand you the URL + token). Start here if you have nothing yet. |
 | [`10-provision-server.md`](10-provision-server.md) | Rent a small always-on Linux VPS and give you SSH access. |
 | [`20-api-keys.md`](20-api-keys.md) | Sign you in / up and fetch the optional API keys (ElevenLabs for voice, etc.). |
 | [`30-linear.md`](30-linear.md) | Get a Linear API key + your team's UUID for the Board + "needs you" inbox. |
