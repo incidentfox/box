@@ -1366,7 +1366,17 @@ app.get('/api/pipelines', requireAuth, (req, res) => res.json(readPipelines()));
 // In local mode there's no API key, but the feature is on — use a sentinel so the many
 // `if (!LINEAR_KEY) return 500` guards below still pass; linearGql() routes to the clone.
 const LINEAR_KEY = LINEAR_KEY_RAW || (linearLite ? 'local' : '');
-const GH_TOKEN = cfg('GITHUB_TOKEN');
+// GitHub token: explicit env/.env first, else fall back to the authenticated `gh` CLI
+// (the box logs into GitHub via `gh`, so a bare GITHUB_TOKEN is usually unset). Lazy + cached
+// so we don't shell out on every request.
+let _ghToken;
+function ghToken() {
+  if (_ghToken !== undefined) return _ghToken;
+  let t = cfg('GITHUB_TOKEN') || cfg('GH_TOKEN');
+  if (!t) { try { t = execSync('gh auth token', { encoding: 'utf8', timeout: 4000 }).trim(); } catch {} }
+  _ghToken = t || '';
+  return _ghToken;
+}
 // OpenAI — used (optionally) for the cheap per-session morning-brief refresh.
 const OPENAI_KEY = cfg('OPENAI_API_KEY');
 const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).replace(/\/$/, '');
@@ -1414,8 +1424,8 @@ async function fetchLinearIssue(id) {
   const it = (d.issues.nodes || [])[0]; if (!it) return null;
   let pr = (it.attachments.nodes || []).map((a) => prFromText(a.url)).find(Boolean)
     || (it.comments.nodes || []).map((c) => prFromText(c.body)).find(Boolean);
-  if (pr && GH_TOKEN) {
-    try { const r = await fetch(`https://api.github.com/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`, { headers: { Authorization: `token ${GH_TOKEN}`, Accept: 'application/vnd.github+json' } }); if (r.ok) { const p = await r.json(); pr.state = p.merged ? 'merged' : p.state; pr.title = p.title; pr.mergeable = p.mergeable; } } catch {}
+  if (pr && ghToken()) {
+    try { const r = await fetch(`https://api.github.com/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`, { headers: { Authorization: `token ${ghToken()}`, Accept: 'application/vnd.github+json' } }); if (r.ok) { const p = await r.json(); pr.state = p.merged ? 'merged' : p.state; pr.title = p.title; pr.mergeable = p.mergeable; } } catch {}
   }
   return { id: it.id, identifier: it.identifier, title: it.title, url: it.url, state: it.state, teamId: it.team.id, pr };
 }
@@ -1500,11 +1510,11 @@ app.post('/api/linear/:id/done', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 app.post('/api/linear/:id/merge', requireAuth, async (req, res) => {
-  if (!GH_TOKEN) return res.status(500).json({ error: 'no GITHUB_TOKEN' });
+  if (!ghToken()) return res.status(500).json({ error: 'no GitHub auth — set GITHUB_TOKEN or run `gh auth login`' });
   try {
     const it = await fetchLinearIssue(req.params.id); if (!it || !it.pr) return res.status(404).json({ error: 'no PR linked' });
     const { owner, repo, number } = it.pr;
-    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}/merge`, { method: 'PUT', headers: { Authorization: `token ${GH_TOKEN}`, Accept: 'application/vnd.github+json' }, body: JSON.stringify({ merge_method: 'squash' }) });
+    const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${number}/merge`, { method: 'PUT', headers: { Authorization: `token ${ghToken()}`, Accept: 'application/vnd.github+json' }, body: JSON.stringify({ merge_method: 'squash' }) });
     const j = await r.json();
     if (!r.ok) return res.status(400).json({ error: j.message || 'merge failed' });
     res.json({ ok: true, merged: j.merged, sha: j.sha });
@@ -1532,8 +1542,8 @@ app.get('/api/linear/:id/detail', requireAuth, async (req, res) => {
     if (!it) return res.status(404).json({ error: 'not found' });
     let pr = (it.attachments.nodes || []).map((a) => prFromText(a.url)).find(Boolean)
       || (it.comments.nodes || []).map((c) => prFromText(c.body)).find(Boolean);
-    if (pr && GH_TOKEN) {
-      try { const r = await fetch(`https://api.github.com/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`, { headers: { Authorization: `token ${GH_TOKEN}`, Accept: 'application/vnd.github+json' } }); if (r.ok) { const p = await r.json(); pr.state = p.merged ? 'merged' : p.state; pr.title = p.title; } } catch {}
+    if (pr && ghToken()) {
+      try { const r = await fetch(`https://api.github.com/repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`, { headers: { Authorization: `token ${ghToken()}`, Accept: 'application/vnd.github+json' } }); if (r.ok) { const p = await r.json(); pr.state = p.merged ? 'merged' : p.state; pr.title = p.title; } } catch {}
     }
     res.json({
       id: it.id, identifier: it.identifier, title: it.title, description: it.description || '',
