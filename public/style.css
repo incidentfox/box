@@ -41,8 +41,19 @@ html, body {
   font-family: -apple-system, "Inter", system-ui, "Segoe UI", Roboto, sans-serif;
   letter-spacing: -0.01em;
   overscroll-behavior: none; -webkit-text-size-adjust: 100%; overflow-x: hidden;
+  /* Native-app feel: no double-tap-to-zoom + no tap delay (pinch-zoom is killed in JS) */
+  touch-action: manipulation;
+  /* App chrome shouldn't be selectable or pop the iOS long-press callout — content opts back in below */
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
 }
 body { position: fixed; inset: 0; overflow: hidden; }
+
+/* Re-enable text selection + the long-press menu on actual CONTENT (so messages, code,
+   docs, and inputs stay copyable/editable) while UI chrome stays inert like a native app. */
+input, textarea, .selectable,
+.msg .body, .mdview, .pipeDoc, .readerBody, .issueDesc, .issueCmtBody, .issueTitle {
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
 .hidden { display: none !important; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); font-size: 14px; }
@@ -103,12 +114,12 @@ body { position: fixed; inset: 0; overflow: hidden; }
 .iAct.primary { background: var(--accent); color: #fff; border-color: transparent; }
 .iAct.danger { color: #c0392b; }
 .issueCompose { flex: none; display: flex; gap: 8px; align-items: center; padding: 8px 12px calc(8px + var(--safe-b)); border-top: 1px solid var(--line); }
-.issueCommentInput { flex: 1; font-size: 14px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 22px; background: var(--subtle); color: var(--ink); outline: none; }
+.issueCommentInput { flex: 1; font-size: 16px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 22px; background: var(--subtle); color: var(--ink); outline: none; }
 .issueCommentInput:focus { border-color: var(--accent); }
 /* new issue form */
 .icrForm { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px calc(14px + var(--safe-b)); }
 .icrInput { font-size: 17px; font-weight: 600; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--subtle); color: var(--ink); outline: none; }
-.icrText { min-height: 140px; font-size: 14px; line-height: 1.5; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--subtle); color: var(--ink); outline: none; resize: vertical; font-family: inherit; }
+.icrText { min-height: 140px; font-size: 16px; line-height: 1.5; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--subtle); color: var(--ink); outline: none; resize: vertical; font-family: inherit; }
 .icrInput:focus, .icrText:focus { border-color: var(--accent); }
 .icrLabel { font-size: 12px; font-weight: 700; color: var(--muted); margin: 2px 2px -4px; }
 .icrChips { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -631,7 +642,7 @@ html[data-theme="dark"] .lbState { background: var(--subtle-2); color: var(--mut
 .acctTab { flex: 1; font-size: 13.5px; font-weight: 600; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 9px 0; }
 .acctTab.sel { color: #fff; background: var(--accent); border-color: var(--accent); }
 .acctLbl { display: block; font-size: 12.5px; font-weight: 600; color: var(--muted); margin: 12px 2px 5px; }
-.acctInput { width: 100%; box-sizing: border-box; font-size: 15px; font-family: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 5px; }
+.acctInput { width: 100%; box-sizing: border-box; font-size: 16px; font-family: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 5px; }
 .acctInput:focus { outline: none; border-color: var(--accent); }
 textarea.acctInput { resize: vertical; }
 .btn.primary { display: block; width: 100%; box-sizing: border-box; margin-top: 14px; font-size: 15px; font-weight: 650; color: #fff; background: var(--accent); border: none; border-radius: 11px; padding: 12px 0; }
