@@ -17,7 +17,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import multer from 'multer';
-import { RCEngine, tail as tailJsonl, readAll as readJsonl } from './rc-engine.mjs';
+import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases } from './rc-engine.mjs';
 import * as accounts from './accounts.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
@@ -32,8 +32,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const PUBLIC = join(ROOT, 'public');
 const HOME = homedir();
-const PROJECTS = join(HOME, '.claude', 'projects');
+const PROJECTS = join(HOME, '.claude', 'projects'); // primary; for fallbacks only — scans must use eachProjectDir()
 const RC_REGISTRY = join(HOME, '.config', 'cc-rc-sessions.tsv');
+
+// Account-aware session discovery: the cc-account-broker routes a session to a
+// pooled account (CLAUDE_CONFIG_DIR=~/.claude-<id>), so its JSONL lives under
+// ~/.claude-<id>/projects, not just ~/.claude/projects. projectsBases() (from
+// rc-engine) enumerates every config dir's projects base; these helpers fan the
+// box's session scans across ALL of them so pooled sessions aren't invisible.
+function eachProjectDir() {
+  const dirs = [];
+  for (const base of projectsBases()) {
+    try { for (const d of readdirSync(base, { withFileTypes: true })) if (d.isDirectory()) dirs.push(join(base, d.name)); } catch {}
+  }
+  return dirs;
+}
+function findSessionFile(id) {
+  for (const dir of eachProjectDir()) { const c = join(dir, id + '.jsonl'); if (existsSync(c)) return c; }
+  return null;
+}
 const STATE_DIR = join(HOME, '.cc-mobile');
 const NAMES_FILE = join(STATE_DIR, 'names.json');
 const UPLOAD_DIR = join(STATE_DIR, 'uploads');
@@ -496,10 +513,8 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const names = loadNames();
   const archived = loadArchived();
   const files = [];
-  let dirs = [];
-  try { dirs = readdirSync(PROJECTS, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch {}
-  for (const d of dirs) {
-    const dir = join(PROJECTS, d.name);
+  const seenIds = new Set();
+  for (const dir of eachProjectDir()) {
     let entries = [];
     try { entries = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch {}
     for (const f of entries) {
@@ -507,7 +522,10 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       let mtime = 0, size = 0;
       try { const st = statSync(full); mtime = st.mtimeMs; size = st.size; } catch { continue; }
       if (size < 200) continue; // skip empty/stub sessions
-      files.push({ id: f.replace(/\.jsonl$/, ''), file: full, mtime });
+      const id = f.replace(/\.jsonl$/, '');
+      if (seenIds.has(id)) continue; // a session id is unique across accounts; keep the first seen
+      seenIds.add(id);
+      files.push({ id, file: full, mtime });
     }
   }
   const codexSessions = Object.values(loadCodex().sessions || {}).map((s) => ({
@@ -638,13 +656,7 @@ function readJsonlChunk(file, endOffset) {
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) return { messages: (codex.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '' };
-  let file = null;
-  try {
-    for (const d of readdirSync(PROJECTS)) {
-      const cand = join(PROJECTS, d, id + '.jsonl');
-      if (existsSync(cand)) { file = cand; break; }
-    }
-  } catch {}
+  const file = findSessionFile(id);
   if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD };
   const { raw, startOffset } = readJsonlChunk(file, before);
   const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
@@ -741,13 +753,7 @@ app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  let file = null;
-  try {
-    for (const d of readdirSync(PROJECTS)) {
-      const cand = join(PROJECTS, d, req.params.id + '.jsonl');
-      if (existsSync(cand)) { file = cand; break; }
-    }
-  } catch {}
+  const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
   const messages = [];
   try {
@@ -773,13 +779,7 @@ app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
 });
 // Export full conversation as markdown (up to 50MB of JSONL)
 app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
-  let file = null;
-  try {
-    for (const d of readdirSync(PROJECTS)) {
-      const cand = join(PROJECTS, d, req.params.id + '.jsonl');
-      if (existsSync(cand)) { file = cand; break; }
-    }
-  } catch {}
+  const file = findSessionFile(req.params.id);
   if (!file) return res.status(404).end();
   try {
     const MAX = 50 * 1024 * 1024;
@@ -1278,7 +1278,9 @@ app.get('/api/linear/:id/sessions', requireAuth, (req, res) => {
   // claude transcripts (one JSONL per session). -c gives "path:count" per matching file;
   // word-bounded fixed match avoids INC-86 matching INC-864.
   try {
-    const out = execSync(`rg -cwF --no-messages -- ${JSON.stringify(id)} ${PROJECTS}/*/*.jsonl 2>/dev/null || true`,
+    // search every account's projects base (broker-pooled sessions live under ~/.claude-<id>)
+    const globs = projectsBases().map((b) => `${JSON.stringify(b)}/*/*.jsonl`).join(' ');
+    const out = execSync(`rg -cwF --no-messages -- ${JSON.stringify(id)} ${globs} 2>/dev/null || true`,
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell: '/bin/bash' });
     for (const line of out.split('\n')) {
       const m = line.trim().match(/\/([^/]+)\.jsonl:(\d+)$/);
@@ -1566,8 +1568,7 @@ const queueView = (s) => s.queue.map((q, i) => ({ qid: q.qid, text: q.displayTex
 
 // locate a session's jsonl across project dirs (sessions can live under any cwd)
 function jsonlPath(id) {
-  try { for (const d of readdirSync(PROJECTS)) { const c = join(PROJECTS, d, id + '.jsonl'); if (existsSync(c)) return c; } } catch {}
-  return join(PROJECTS, '-home-factory-development', id + '.jsonl');
+  return findSessionFile(id) || join(PROJECTS, '-home-factory-development', id + '.jsonl');
 }
 // The name we pass to `claude --remote-control <name>` IS the session's display name
 // in the official Claude app/CLI — it's sticky for the life of the bridge and an
@@ -2157,17 +2158,16 @@ for (const sig of ["SIGTERM","SIGINT"]) process.on(sig, () => { killAllProcs(); 
 setInterval(() => {
   const cutoff = Date.now() - 4 * 60 * 60 * 1000;
   const active = [];
-  try {
-    for (const d of readdirSync(PROJECTS, { withFileTypes: true })) {
-      if (!d.isDirectory()) continue;
-      const dir = join(PROJECTS, d.name);
-      try {
-        for (const f of readdirSync(dir).filter((f) => f.endsWith('.jsonl'))) {
-          try { const st = statSync(join(dir, f)); if (st.mtimeMs > cutoff && st.size > 1000) active.push(f.replace(/\.jsonl$/, '')); } catch {}
-        }
-      } catch {}
-    }
-  } catch {}
+  const seen = new Set();
+  for (const dir of eachProjectDir()) {
+    try {
+      for (const f of readdirSync(dir).filter((f) => f.endsWith('.jsonl'))) {
+        const id = f.replace(/\.jsonl$/, '');
+        if (seen.has(id)) continue;
+        try { const st = statSync(join(dir, f)); if (st.mtimeMs > cutoff && st.size > 1000) { seen.add(id); active.push(id); } } catch {}
+      }
+    } catch {}
+  }
   active.slice(0, 6).forEach((id, i) => setTimeout(() => triggerAttentionUpdate(rt(id)), i * 8000));
 }, 15 * 60 * 1000);
 
