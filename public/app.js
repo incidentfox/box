@@ -26,6 +26,14 @@ function applyVV() {
 if (vv) { vv.addEventListener('resize', applyVV); vv.addEventListener('scroll', applyVV); }
 applyVV();
 
+/* ---------- native feel: kill whole-app pinch-zoom ----------
+   iOS Safari ignores `user-scalable=no` in the viewport tag, so the shell can still be
+   pinch-zoomed into a half-scrolled mess. These cancel the pinch gesture itself (double-tap
+   zoom + tap delay are handled by `touch-action: manipulation` in CSS). The image lightbox
+   does its own JS pan/zoom, so nothing user-facing loses zoom. */
+['gesturestart', 'gesturechange', 'gestureend'].forEach((ev) =>
+  document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
+
 /* ---------- helpers ---------- */
 function show(id) { ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
 
