@@ -38,6 +38,29 @@ const SESSIONS_DIR = path.join(HOME, '.claude', 'sessions');
 const IDLE_MS = 30 * 60 * 1000;
 const RECENT_MS = 90 * 1000;    // a session JSONL written this recently is presumed LIVE elsewhere
 
+// --- Account-aware config-dir discovery ------------------------------------
+// The cc-account-broker (installed as /usr/bin/claude) routes a session to a
+// pooled account by running claude with CLAUDE_CONFIG_DIR=~/.claude-<id>. That
+// session's JSONL + per-process state then live under ~/.claude-<id>/{projects,
+// sessions}, NOT the primary ~/.claude. So every lookup must scan ALL config
+// dirs, or pooled sessions are invisible — the box renders no output and just
+// looks silent. We glob ~/.claude and ~/.claude-* (primary first, stable order).
+export function claudeConfigDirs() {
+  const primary = path.join(HOME, '.claude');
+  const out = [];
+  try {
+    for (const name of fs.readdirSync(HOME)) {
+      if (name !== '.claude' && !name.startsWith('.claude-')) continue;
+      const dir = path.join(HOME, name);
+      try { if (fs.statSync(dir).isDirectory()) out.push(dir); } catch {}
+    }
+  } catch {}
+  if (!out.includes(primary)) out.unshift(primary);
+  return out.sort((a, b) => (a === primary ? -1 : b === primary ? 1 : a.localeCompare(b)));
+}
+export const projectsBases = () => claudeConfigDirs().map((d) => path.join(d, 'projects'));
+export const sessionsDirs = () => claudeConfigDirs().map((d) => path.join(d, 'sessions'));
+
 // Dtach socket for the RC bridge — survives server restarts and SSH disconnects.
 // SSH attach: dtach -a /tmp/cc-box-<id>.dtach
 const rcSockPath = (sessionId, name) => {
@@ -48,13 +71,15 @@ const rcSockPath = (sessionId, name) => {
 // Search all project dirs for a session's JSONL (sessions live under their
 // start cwd, which may differ from PROJ_DIR for cross-project sessions).
 function findJsonl(sessionId) {
-  try {
-    for (const d of fs.readdirSync(PROJECTS_BASE)) {
-      const cand = path.join(PROJECTS_BASE, d, sessionId + '.jsonl');
-      if (fs.existsSync(cand)) return cand;
-    }
-  } catch {}
-  return path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback
+  for (const base of projectsBases()) {
+    try {
+      for (const d of fs.readdirSync(base)) {
+        const cand = path.join(base, d, sessionId + '.jsonl');
+        if (fs.existsSync(cand)) return cand;
+      }
+    } catch {}
+  }
+  return path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback (primary)
 }
 
 function childEnv() {
@@ -78,12 +103,14 @@ const bracketedPaste = (t) => '\x1b[200~' + t + '\x1b[201~';
 
 function listJsonl() {
   const out = new Set();
-  try {
-    for (const d of fs.readdirSync(PROJECTS_BASE)) {
-      const dir = path.join(PROJECTS_BASE, d);
-      for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl')) out.add(path.join(dir, f));
-    }
-  } catch {}
+  for (const base of projectsBases()) {
+    try {
+      for (const d of fs.readdirSync(base)) {
+        const dir = path.join(base, d);
+        try { for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl')) out.add(path.join(dir, f)); } catch {}
+      }
+    } catch {}
+  }
   return out;
 }
 
@@ -105,15 +132,17 @@ export class RCEngine extends EventEmitter {
   // only the first signal; classifyOwner() refines it.
   jsonlRecentlyTouched(sessionId) {
     if (!sessionId) return false;
-    try {
-      for (const d of fs.readdirSync(PROJECTS_BASE)) {
-        const cand = path.join(PROJECTS_BASE, d, sessionId + '.jsonl');
-        try {
-          const st = fs.statSync(cand);
-          if ((Date.now() - st.mtimeMs) < RECENT_MS) return true;
-        } catch {}
-      }
-    } catch {}
+    for (const base of projectsBases()) {
+      try {
+        for (const d of fs.readdirSync(base)) {
+          const cand = path.join(base, d, sessionId + '.jsonl');
+          try {
+            const st = fs.statSync(cand);
+            if ((Date.now() - st.mtimeMs) < RECENT_MS) return true;
+          } catch {}
+        }
+      } catch {}
+    }
     return false;
   }
 
@@ -298,18 +327,24 @@ export class RCEngine extends EventEmitter {
     s.session_p = new Promise((res) => { s._sessRes = res; });
     if (effId) { this.sessions.set(effId, s); s._sessRes(s); }
 
-    // Boot is "done" when the TUI has stopped repainting. We require a floor of
-    // 3s (the input box isn't interactive instantly), then fire once output has
-    // been quiet for 1s, with an 8s hard cap. Firing too early drops keystrokes.
+    // Boot is "done" when the TUI has actually painted and then stopped repainting.
+    // We require a floor of 3s (the input box isn't interactive instantly), then fire
+    // once output has been quiet for ~1.2s. CRITICAL: the quiet countdown only starts
+    // AFTER the first real output (see term.onData) — never on a pre-output tick.
+    // The cc-account-broker wrapper (/usr/bin/claude) is SILENT for a beat while it
+    // picks an account before exec'ing claude; the old code armed the timer at spawn
+    // and marked "booted" at 3s during that silence, so sendRecord pasted the first
+    // prompt into a not-yet-live TUI and the keystrokes were dropped (→ no response).
+    // The 20s hard cap is a backstop for a session that never paints (e.g. a reattach
+    // with no repaint, or a very slow account pick).
     const spawnedAt = Date.now();
     const markBooted = () => { if (!s.booted) { s.booted = true; clearTimeout(s._quietT); clearTimeout(s._capT); s._bootRes(s); this.emit('booted', s.sessionId); } };
-    s._capT = setTimeout(markBooted, 8000);
+    s._capT = setTimeout(markBooted, 20000);
     const scheduleQuiet = () => {
       clearTimeout(s._quietT);
-      const wait = Math.max(1000, 3000 - (Date.now() - spawnedAt));
+      const wait = Math.max(1200, 3000 - (Date.now() - spawnedAt));
       s._quietT = setTimeout(markBooted, wait);
     };
-    scheduleQuiet();
     let boot = '';
     const detectSession = () => {
       // For a new chat, find the JSONL that appeared after spawn (post first send).
@@ -411,12 +446,14 @@ export class RCEngine extends EventEmitter {
   // sessionId across ~/.claude/sessions/<pid>.json. Cheap; safe to poll. Returns null if absent.
   sessionState(sessionId) {
     if (!sessionId) return null;
-    try {
-      for (const f of fs.readdirSync(SESSIONS_DIR)) {
-        if (!f.endsWith('.json')) continue;
-        try { const o = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8')); if (o.sessionId === sessionId) return o; } catch {}
-      }
-    } catch {}
+    for (const sdir of sessionsDirs()) {
+      try {
+        for (const f of fs.readdirSync(sdir)) {
+          if (!f.endsWith('.json')) continue;
+          try { const o = JSON.parse(fs.readFileSync(path.join(sdir, f), 'utf8')); if (o.sessionId === sessionId) return o; } catch {}
+        }
+      } catch {}
+    }
     return null;
   }
 
