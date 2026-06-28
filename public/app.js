@@ -1003,7 +1003,7 @@ async function openChat(s) {
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   $('chatTitle').textContent = cur.title;
-  $('messages').innerHTML = ''; live = null; running = false;
+  $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
   // Linear-agent session → show an approval bar (merge PR / mark done / archive)
@@ -1496,10 +1496,18 @@ function submit() {
   // A pending question/plan is up → a typed reply is a free-text ("Other") answer to it.
   if (waitingState && waitingState.answerable) {
     if (!text) return;
-    if (!(waitingState.freeTextIndex >= 1)) { toast('Tap an option above, or answer on desktop'); return; }
-    const ft = waitingState.freeTextIndex; waitingState = null;   // optimistic
+    // A MENU is up (AskUserQuestion / plan): a typed reply only maps to its free-text ("Other")
+    // option — if the menu has none, the user must tap a button. But a permission / generic
+    // "Claude is waiting for your input" prompt has NO menu (hasOptions=false); there the typed
+    // reply IS the answer and must go straight through. (This case used to be wrongly blocked,
+    // so you could never answer a permission prompt from the phone.)
+    if (waitingState.hasOptions && !(waitingState.freeTextIndex >= 1)) {
+      toast('Tap an option above, or answer on desktop'); return;
+    }
+    const ft = waitingState.freeTextIndex; const hadMenu = waitingState.hasOptions; waitingState = null;   // optimistic
     $('input').value = ''; autoGrow(); addUser(text, []);
-    try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: { text, freeTextIndex: ft } })); } catch {}
+    const sel = (hadMenu && ft >= 1) ? { text, freeTextIndex: ft } : { text };
+    try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel })); } catch {}
     document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
     refreshButton(); scrollBottom();
     return;
@@ -1542,10 +1550,11 @@ function renderWaiting(o) {
   clearWaitingCard();                 // never stack two cards
   if (!live) startAssistant();
   clearLoading(); running = false; killGhostIndicators();
-  waitingState = { answerable: !!o.answerable, freeTextIndex: null };
+  waitingState = { answerable: !!o.answerable, freeTextIndex: null, hasOptions: false };
   const card = document.createElement('div'); card.className = 'waitingCard';
   const p = o.prompt;
   if (p && Array.isArray(p.options) && p.options.length) {
+    waitingState.hasOptions = true;
     if (p.header) { const h = document.createElement('div'); h.className = 'waitHeader'; h.textContent = p.header; card.appendChild(h); }
     const q = document.createElement('div'); q.className = 'waitQuestion';
     q.textContent = p.title || (p.kind === 'plan' ? 'Review the plan and choose how to proceed' : 'Claude is asking a question');
@@ -1567,7 +1576,9 @@ function renderWaiting(o) {
     q.textContent = '⏸ Claude is waiting for your input' + (o.waitingFor ? ` (${o.waitingFor})` : '') + '.';
     card.appendChild(q);
     const hint = document.createElement('div'); hint.className = 'waitHint';
-    hint.textContent = o.answerable ? 'Type a reply below to continue.' : 'Open this chat on desktop to answer.';
+    hint.textContent = o.answerable
+      ? 'Type a reply below to continue — for a yes/no or numbered menu, type the option number (e.g. 1).'
+      : 'Open this chat on desktop to answer.';
     card.appendChild(hint);
   }
   live.body.appendChild(card); maybeScroll();

@@ -499,6 +499,15 @@ export class RCEngine extends EventEmitter {
       s.pty.write('\r');
       return true;
     }
+    // Plain free reply: no menu to navigate — a generic "waiting for input" state, or a
+    // permission/other prompt the box couldn't parse into options. Type PLAIN chars (NOT
+    // bracketed paste, whose leading ESC a still-open menu would read as cancel) then Enter,
+    // exactly like a desktop user would. Lets the phone answer permission/free-text prompts.
+    if (sel.text != null) {
+      s.pty.write(String(sel.text)); await sleep(150);
+      s.pty.write('\r');
+      return true;
+    }
     return false;
   }
 
