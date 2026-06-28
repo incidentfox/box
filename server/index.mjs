@@ -2365,11 +2365,19 @@ function runCodexTurn(s, msg, resolve) {
   s.proc.on('close', finish);
   s.proc.on('error', (e) => { bcast(s, { type: 'error', msg: String(e.message || e) }); finish(); });
 }
-// resume persisted, non-empty queues on startup (after a restart)
+// resume persisted, non-empty queues on startup (after a restart) so a queued message is never
+// lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
+// message was queued before its session was created (keyed by the filename, e.g. `new-abc123`) —
+// the latter would otherwise be stranded across a restart.
 (function resumePersisted() {
   let files = []; try { files = readdirSync(QDIR).filter((f) => f.endsWith('.json')); } catch {}
   for (const f of files) {
-    try { const p = JSON.parse(readFileSync(join(QDIR, f), 'utf8')); if (p.queue && p.queue.length && p.sessionId) runWorker(rt(p.sessionId)); } catch {}
+    try {
+      const p = JSON.parse(readFileSync(join(QDIR, f), 'utf8'));
+      if (!(p.queue && p.queue.length)) continue;
+      const key = p.sessionId || f.replace(/\.json$/, '');
+      runWorker(rt(key));
+    } catch {}
   }
 })();
 
