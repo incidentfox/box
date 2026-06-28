@@ -132,4 +132,4 @@ remote-control bridge and Codex over `codex exec`, and serves the plain-JS front
 
 ## License
 
-MIT. Built on top of [Claude Code](https://claude.com/claude-code).
+[GPL-3.0-or-later](LICENSE). Built on top of [Claude Code](https://claude.com/claude-code).
