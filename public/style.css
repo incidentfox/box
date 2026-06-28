@@ -13,6 +13,9 @@
   --pre-bg: #f3f0eb;
   --pre-line: #e7e3dd;
   --shadow: rgba(40,30,20,.16);
+  /* Toast = inverse surface so it always contrasts with the app bg (dark pill on the light app). */
+  --toast-bg: #2b2622;
+  --toast-ink: #fbf9f6;
   --safe-b: env(safe-area-inset-bottom, 0px);
   --safe-t: env(safe-area-inset-top, 0px);
   --app-h: 100dvh;
@@ -33,6 +36,9 @@ html[data-theme="dark"] {
   --pre-bg: #15181c;
   --pre-line: #303640;
   --shadow: rgba(0,0,0,.38);
+  /* Inverse on dark: a near-white pill on the dark app so it can't blend in. */
+  --toast-bg: #f4f1ea;
+  --toast-ink: #1b1a17;
   color-scheme: dark;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -489,9 +495,28 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
 .row .at { color: var(--accent); padding: 6px; }
 
-.toast { position: fixed; bottom: calc(96px + var(--safe-b)); left: 50%; transform: translateX(-50%); background: #1a1a1a; color: #fff; padding: 9px 12px 9px 16px; border-radius: 12px; font-size: 14px; z-index: 90; max-width: 86%; display: flex; align-items: center; justify-content: center; gap: 14px; }
-.toastAct { flex: none; background: transparent; border: none; color: #ff9e7a; font: inherit; font-size: 14px; font-weight: 700; padding: 2px 6px; margin: -2px 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.toastAct:active { opacity: .55; }
+.toast {
+  position: fixed; bottom: calc(96px + var(--safe-b)); left: 50%;
+  background: var(--toast-bg); color: var(--toast-ink);
+  padding: 13px 13px 13px 18px; border-radius: 14px; font-size: 15px; font-weight: 600; line-height: 1.3;
+  z-index: 90; max-width: 92%; min-height: 26px;
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  box-shadow: 0 14px 40px rgba(0,0,0,.5), 0 3px 12px rgba(0,0,0,.35);
+  transform: translateX(-50%);
+  animation: toastPop .24s cubic-bezier(.2,.85,.25,1);
+}
+@keyframes toastPop {
+  from { opacity: 0; transform: translate(-50%, 22px) scale(.96); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+/* Undo etc. — a filled, unmistakable button (not faint text). High contrast on both toast surfaces. */
+.toastAct {
+  flex: none; background: #e2552a; color: #fff; border: none;
+  font: inherit; font-size: 13.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  padding: 9px 17px; border-radius: 10px; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 2px 6px rgba(0,0,0,.28);
+}
+.toastAct:active { transform: scale(.94); filter: brightness(1.08); }
 
 /* session search results (full-text across all chats) */
 .sres { background: var(--card); border-radius: 12px; padding: 11px 13px; margin: 7px 0; box-shadow: 0 1px 2px rgba(40,30,20,.05); cursor: pointer; }
