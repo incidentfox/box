@@ -105,20 +105,19 @@ function updateToBottom() { const b = $('toBottom'); if (b) b.classList.toggle('
 $('messages').addEventListener('scroll', updateToBottom);
 $('toBottom').onclick = () => scrollBottom(true);
 
-// Swipe right to go back from the chat (iOS-style). Generous left zone (~left third,
-// min 70px) so it's easy to start — the old 30px edge was nearly impossible to hit,
-// and a PWA's OS often owns the very edge. Engages only on a clearly RIGHTWARD,
-// horizontal-dominant drag, and never on code blocks / inputs (so their scroll/typing
-// still works) or vertical scrolls. Mirrors the top-left back button: closes the bell
-// panel if open, else returns to the session list.
+// Swipe right to go back from the chat — iOS-native: only from the LEFT EDGE
+// (a ~36px band, like the system interactive-pop gesture), not the left third.
+// Engages only on a clearly RIGHTWARD, horizontal-dominant drag, and never on code
+// blocks / inputs (so their scroll/typing still works) or vertical scrolls. Mirrors
+// the top-left back button: closes the bell panel if open, else returns to the list.
 (function swipeBack() {
   const el = $('chat'); let sx = 0, sy = 0, tracking = false, decided = false, horiz = false;
-  const zone = () => Math.max(70, window.innerWidth * 0.30);
+  const EDGE = 36;   // left-edge band (CSS px) ≈ iOS edge-pan; not a third of the screen
   const reset = () => { el.style.transition = 'transform .18s ease'; el.style.transform = ''; setTimeout(() => { el.style.transition = ''; }, 200); };
   el.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) { tracking = false; return; }
     const t = e.touches[0];
-    tracking = t.clientX < zone() && !(e.target.closest && e.target.closest('pre, code, textarea, input, select, .hljs'));
+    tracking = t.clientX < EDGE && !(e.target.closest && e.target.closest('pre, code, textarea, input, select, .hljs'));
     sx = t.clientX; sy = t.clientY; decided = false; horiz = false;
   }, { passive: true });
   el.addEventListener('touchmove', (e) => {
@@ -2501,12 +2500,14 @@ function renderAddAccount() {
         <div class="acctNote">1. Open the link and sign in <b>as that account</b> — use a private/incognito window if you're already logged in as someone else.<br>2. Authorize, then copy the code it shows and paste it below.</div>
         <a id="oaLink" class="acctLink" target="_blank" rel="noopener">Open Claude login ↗</a>
         <label class="acctLbl">Paste the code (looks like <code>code#state</code>)<textarea id="oaCode" class="acctInput" rows="3" placeholder="paste here" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea></label>
+        <button id="oaPaste" class="chip small acctPaste">📋 Paste from clipboard</button>
         <button id="oaComplete" class="btn primary">Complete login</button>
       </div>
     </div>
     <div id="acctPaneApikey" class="acctPane hidden">
       <label class="acctLbl">Account name<input id="akName" class="acctInput" placeholder="e.g. work-api" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
       <label class="acctLbl">API key<input id="akKey" class="acctInput" type="password" placeholder="sk-ant-…" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <button id="akPaste" class="chip small acctPaste">📋 Paste from clipboard</button>
       <a class="acctLink" target="_blank" rel="noopener" href="${esc(keysUrl)}">Create a key on the Anthropic Console ↗</a>
       <div class="acctNote">API-key accounts bill per token (metered), unlike a Max/Pro subscription.</div>
       <button id="akSave" class="btn primary">Save API key</button>
@@ -2518,6 +2519,16 @@ function renderAddAccount() {
     $('acctPaneApikey').classList.toggle('hidden', t.dataset.tab !== 'apikey');
   });
   $('acctBack').onclick = renderAccountsList;
+  // Paste straight from the clipboard — no keyboard, no long-press fiddling on iOS.
+  const pasteInto = async (elId) => {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (!t || !t.trim()) return toast('Clipboard is empty');
+      $(elId).value = t.trim(); toast('Pasted');
+    } catch { toast('Clipboard blocked — long-press the field and Paste'); }
+  };
+  $('oaPaste').onclick = () => pasteInto('oaCode');
+  $('akPaste').onclick = () => pasteInto('akKey');
   let flowId = null;
   $('oaStart').onclick = async () => {
     const id = $('oaName').value.trim(); if (!id) return toast('Enter an account name');
