@@ -122,10 +122,22 @@ export async function saveApiKey({ id, label, apiKey }) {
   return { ok: true, id: accountId, validated: valid === true, note: valid === null ? vmsg : '' };
 }
 
-export async function removeAccount(id) { await broker(['remove', sanitizeId(id)]); return { ok: true }; }
-export async function setPrimary(id) { await broker(['primary', sanitizeId(id)]); return { ok: true }; }
-export async function cooldown(id, minutes) { await broker(['cooldown', sanitizeId(id), '--minutes', String(minutes || 90), '--reason', 'manual']); return { ok: true }; }
-export async function clearCooldown(id) { await broker(['clear', sanitizeId(id)]); return { ok: true }; }
+// For operations on an EXISTING account (incl. "mine"): validate charset only —
+// do NOT use sanitizeId (it's for NEW names and rejects the reserved "mine").
+const existingId = (id) => { const s = String(id || '').trim(); if (!/^[a-z0-9_-]+$/i.test(s)) throw new Error('bad account id'); return s; };
+
+export async function removeAccount(id) { await broker(['remove', existingId(id)]); return { ok: true }; }
+export async function setPrimary(id) { await broker(['primary', existingId(id)]); return { ok: true }; }
+export async function cooldown(id, minutes) { await broker(['cooldown', existingId(id), '--minutes', String(minutes || 90), '--reason', 'manual']); return { ok: true }; }
+export async function clearCooldown(id) { await broker(['clear', existingId(id)]); return { ok: true }; }
+
+// Move a live session onto another account (transcript relocation + affinity in the
+// broker). The HTTP layer stops the old bridge first so the transcript isn't mid-write.
+export async function switchSession(sessionId, accountId) {
+  if (!sessionId) throw new Error('sessionId required');
+  const out = await broker(['switch', String(sessionId), existingId(accountId)]);
+  try { return JSON.parse(out.trim().split('\n').pop()); } catch { return { ok: true, accountId }; }
+}
 
 export const consoleKeysUrl = OAUTH.CONSOLE_KEYS_URL;
 
