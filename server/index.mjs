@@ -237,21 +237,29 @@ function killSessionBridge(id) {
       }
     }
   } catch {}
-  let killed = 0;
+  // Match ONLY real bridge processes: the line must carry both this id AND the
+  // `--remote-control` flag (both the dtach master and the claude child have it). We do
+  // NOT match on socket-path substrings (cc-rc-/cc-box-) — those show up in routine
+  // operator commands (`ls /tmp/cc-rc-*`, greps), and matching them would let an archive
+  // POST SIGKILL an unrelated shell that merely mentions a session. claude ignores a
+  // lone SIGTERM, so escalate to SIGKILL after a grace period (the supervisor does the
+  // same); the registry row is already gone, so nothing relaunches it.
+  const pids = [];
   try {
     const out = execSync(`pgrep -af ${JSON.stringify(id)} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 });
     for (const line of out.split('\n')) {
-      if (!line.trim()) continue;
-      if (!/--remote-control|cc-rc-|cc-box-/.test(line)) continue; // only RC bridges + their dtach wrappers
+      if (!line.trim() || !/--remote-control(\s|$)/.test(line)) continue;
       const pid = parseInt(line, 10);
-      if (pid && pid !== process.pid) { try { process.kill(pid, 'SIGTERM'); killed++; } catch {} }
+      if (pid && pid !== process.pid) pids.push(pid);
     }
   } catch {}
+  for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+  if (pids.length) setTimeout(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 3000).unref?.();
   for (const sock of [`/tmp/cc-box-${id}.dtach`, rcName ? `/tmp/cc-rc-${rcName}.dtach` : null]) {
     if (sock) { try { unlinkSync(sock); } catch {} }
   }
   LIVE_BRIDGES.delete(id);
-  return { killed };
+  return { killed: pids.length };
 }
 
 // Dream-cycle / meta sessions all open with the SAME boilerplate prompt, so the
