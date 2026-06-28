@@ -852,6 +852,28 @@ app.post('/api/accounts/primary', ...acctRoute((req) => accounts.setPrimary((req
 app.post('/api/accounts/cooldown', ...acctRoute((req) => accounts.cooldown((req.body || {}).id, (req.body || {}).minutes)));
 app.post('/api/accounts/clear', ...acctRoute((req) => accounts.clearCooldown((req.body || {}).id)));
 
+// Move a LIVE session to another account: stop its bridge on the old account, relocate
+// its transcript into the new account's config dir, pin affinity. It resumes on the new
+// account on the next message (the wrapper routes by affinity). The in-flight turn, if
+// any, restarts — history is preserved. Credentials are never touched.
+app.post('/api/sessions/:id/switch-account', ...acctRoute(async (req) => {
+  const id = req.params.id;
+  const accountId = (req.body || {}).accountId;
+  if (!/^[a-f0-9-]{8,}$/i.test(id)) throw new Error('bad session id');
+  if (!accountId) throw new Error('accountId required');
+  // 1) stop the live bridge on the old account: rcEngine.destroy clears in-memory +
+  //    kills the box dtach socket; the precise pkills catch a supervisor-owned bridge.
+  //    Match only the claude RC process (uuid as a --resume/--session-id ARG) — never a
+  //    bare uuid mention, which could hit unrelated processes.
+  try { rcEngine.destroy(id); } catch {}
+  for (const pat of [`--resume ${id}`, `--session-id ${id}`]) {
+    try { execSync(`pkill -TERM -f -- ${JSON.stringify(pat)}`, { stdio: 'ignore', timeout: 4000 }); } catch {}
+  }
+  // 2) let it die + release the transcript file, then relocate + set affinity
+  await new Promise((r) => setTimeout(r, 700));
+  return { ...(await accounts.switchSession(id, accountId)), id };
+}));
+
 // "Needs you" inbox — Linear-backed (any issue on your team labeled NEEDS_LABEL). Any
 // agent can file an item via the Linear API / your harness; it survives compaction and new
 // sessions. The chat UI renders these as cards you can act on. 🔴 = Urgent, 🟡 = High.

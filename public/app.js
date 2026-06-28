@@ -1787,6 +1787,7 @@ function openStatusSheet() {
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });
   if (cur.agent === 'codex') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: () => {} });
   else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: () => {} });
+  if (cur.id && cur.agent !== 'codex') rows.push({ ic: '', label: 'Switch account', desc: 'move this chat to another Claude account', fn: () => openAccountSwitch() });
   openSheet('Status', rows);
 }
 function reviewCurrent() {
@@ -2360,6 +2361,32 @@ async function acctAction(path, payload, okMsg) {
     if (j.error) return toast(j.error);
     toast(okMsg); renderAccountsList();
   } catch { toast('Action failed'); }
+}
+
+// Move the CURRENT chat to another Claude account (transcript follows; it resumes there
+// on your next message — the in-flight turn, if any, restarts).
+async function openAccountSwitch() {
+  if (!cur.id) return toast('Send a message first — no saved session yet');
+  let data; try { data = await (await api('/api/accounts')).json(); } catch { return toast('Could not load accounts'); }
+  const accts = (data.accounts || []).filter((a) => a.usable);
+  if (accts.length < 2) return toast('Add a second account first (/login)');
+  openSheet('Switch this chat to…', accts.map((a) => ({
+    ic: a.primary ? '★' : '',
+    label: a.label || a.id,
+    desc: (a.email || a.id)
+      + (a.utilization && a.utilization.max != null ? ` · ${a.utilization.max}% used` : '')
+      + (a.cooling ? ' · cooling' : ''),
+    fn: () => switchChatAccount(a.id, a.label || a.id),
+  })));
+}
+async function switchChatAccount(accountId, label) {
+  if (!cur.id) return toast('No saved session yet');
+  toast('Switching…');
+  try {
+    const j = await (await api(`/api/sessions/${cur.id}/switch-account`, { method: 'POST', body: JSON.stringify({ accountId }) })).json();
+    if (j.error) return toast(j.error);
+    toast(`Moved to ${label} — your next message continues there`);
+  } catch { toast('Switch failed'); }
 }
 
 function renderAddAccount() {
