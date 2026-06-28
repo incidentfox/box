@@ -7,7 +7,9 @@
   "license": "GPL-3.0-or-later",
   "scripts": {
     "start": "node server/index.mjs",
-    "test:linear-lite": "node lib/linear-lite/test.mjs"
+    "test:linear-lite": "node lib/linear-lite/test.mjs",
+    "test:codex-context": "node server/codex-context.test.mjs",
+    "test": "node lib/linear-lite/test.mjs && node server/codex-context.test.mjs"
   },
   "engines": {
     "node": ">=18"

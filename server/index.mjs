@@ -21,6 +21,7 @@ import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases } from
 import * as accounts from './accounts.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
+import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -33,6 +34,7 @@ const ROOT = join(__dirname, '..');
 const PUBLIC = join(ROOT, 'public');
 const HOME = homedir();
 const PROJECTS = join(HOME, '.claude', 'projects'); // primary; for fallbacks only — scans must use eachProjectDir()
+const CODEX_HOME = process.env.CODEX_HOME || join(HOME, '.codex'); // where Codex writes session rollouts
 const RC_REGISTRY = join(HOME, '.config', 'cc-rc-sessions.tsv');
 
 // Account-aware session discovery: the cc-account-broker routes a session to a
@@ -618,9 +620,24 @@ function claudeContext(file) {
   } catch {}
   return null;
 }
+// Live Codex context from the session's rollout file (authoritative — it's what Codex's
+// own TUI shows). See codex-context.mjs for why the streamed turn.completed usage can't be
+// used. Returns null if no rollout / no token_count yet, so callers can fall back.
+function codexContext(id, model = '') {
+  const info = readCodexTokenInfo(findCodexRollout(CODEX_HOME, id));
+  return info ? contextFromCodexInfo(info, { model }) : null;
+}
 function contextForSession(id, { agent = null, file = null, codex = null } = {}) {
   const cx = codex || ((loadCodex().sessions || {})[id]);
-  if ((agent === 'codex' || cx) && cx) return cx.context || normalizeContext({ agent: 'codex', model: ((cx.settings || {}).codex || {}).model || '' });
+  if ((agent === 'codex' || cx) && cx) {
+    const model = ((cx.settings || {}).codex || {}).model || (cx.context || {}).model || '';
+    const stored = cx.context;
+    // Trust the stored value unless it's missing or impossible (usedTokens > windowTokens —
+    // the symptom of the old cumulative-usage bug). Then re-read the live figure from the
+    // rollout so reopening a chat self-heals a stale "999%" meter without a fresh turn.
+    const bogus = !stored || !(stored.windowTokens > 0) || stored.usedTokens > stored.windowTokens;
+    return (bogus && codexContext(id, model)) || stored || normalizeContext({ agent: 'codex', model });
+  }
   const f = file || findSessionFile(id);
   return claudeContext(f) || normalizeContext({ agent: 'claude' });
 }
@@ -654,11 +671,13 @@ function ensureCodexSession(id, attrs = {}) {
   saveCodex(state);
   return state.sessions[id];
 }
-function updateCodexContext(id, info) {
-  if (!id || !info) return null;
+function updateCodexContext(id, info, precomputed = null) {
+  if (!id || (!info && !precomputed)) return null;
   const state = loadCodex();
   const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, messages: [] };
-  prev.context = contextFromCodexInfo(info, prev.context || {});
+  // Prefer the rollout-derived live context (precomputed) over the streamed turn.completed
+  // usage, which is cumulative and would inflate the meter (the "999%" bug).
+  prev.context = precomputed || contextFromCodexInfo(info, prev.context || {});
   prev.lastUsed = Date.now();
   state.sessions[id] = prev;
   saveCodex(state);
@@ -2491,7 +2510,11 @@ function runCodexTurn(s, msg, resolve) {
         if (s.sessionId) { s.cxLastFlush = Date.now(); flushCodexAssistant(s); }
         bcast(s, { type: 'text', delta });
       } else if (ev.type === 'context') {
-        if (s.sessionId) s.context = updateCodexContext(s.sessionId, ev.info);
+        // The context event is our cue that a turn settled; read the LIVE occupancy from
+        // the rollout (codexContext) rather than ev.info, which is the cumulative session
+        // total and would inflate the meter to "999%". Fall back to ev.info if the rollout
+        // isn't readable yet (e.g. brand-new session before its first token_count flush).
+        if (s.sessionId) s.context = updateCodexContext(s.sessionId, ev.info, codexContext(s.sessionId, (s.context || {}).model || ''));
         else s.context = contextFromCodexInfo(ev.info, s.context || {});
         persist(s);
         bcast(s, { type: 'context', context: s.context });
