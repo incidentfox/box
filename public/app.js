@@ -2312,7 +2312,11 @@ function renameChat(s, onDone) {
     closeSheet();
     if (onDone) onDone(name);
   };
-  inner.appendChild(row); $('sheet').classList.remove('hidden'); setTimeout(() => { inp.focus(); inp.select(); }, 80);
+  inner.appendChild(row); $('sheet').classList.remove('hidden');
+  // Focus synchronously, still inside the tap gesture — iOS only raises the soft keyboard for a
+  // user-initiated focus(). A setTimeout breaks that gesture chain, so the keyboard stays down and
+  // you have to tap the field again. The sheet un-hides instantly (no transition), so it's focusable now.
+  inp.focus(); inp.select();
 }
 $('renameBtn').onclick = () => renameChat(cur);
 
