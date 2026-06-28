@@ -18,6 +18,21 @@ This is just the app source — see `README.md` (backend `server/index.mjs`, fro
 supervisor `scripts/keeper.sh`, optional harness in `harness/`). Keys live only in `.env`
 (gitignored) — never commit or echo them.
 
+### Linear: real workspace OR the built-in local clone (`lib/linear-lite/`)
+
+The Board + "needs you" inbox don't require a Linear account. With **no `LINEAR_API_KEY`**, the
+server boots a local, SQLite-backed clone of the slice of Linear's GraphQL the app uses
+(`lib/linear-lite/`, DB at `~/.cc-mobile/linear-lite.db`). The seam is one function:
+`linearGql()` in `server/index.mjs` routes to `linearLite.gql()` in local mode, else to
+`api.linear.app`. `harness/needs-me.mjs` falls back to the same DB. `bin/linear-lite.mjs import`
+pushes local issues into a real Linear when the user connects one. `LINEAR_LOCAL=off` disables
+the Board instead of falling back. Contract test: `node lib/linear-lite/test.mjs` (replays the
+exact query strings the server sends — keep it in sync if you change a Linear query).
+
+> ⚠️ This box exports `EXTRA_ENV_FILE` / `LINEAR_API_KEY`, so a plain `node server/index.mjs`
+> here talks to the **real** IncidentFox Linear. To exercise LOCAL mode, unset those:
+> `env -u EXTRA_ENV_FILE -u LINEAR_API_KEY -u LINEAR_TEAM_ID -u NEEDS_LABEL HOME=<tmp> PORT=<alt> node server/index.mjs`.
+
 > ⚠️ **Never boot a second server against the live `STATE_DIR` (`~/.cc-mobile`).** It's hard-coded
 > (not env-overridable), so a throwaway instance shares the SAME state files as the running app.
 > Two processes doing read-modify-write on e.g. `archived.json` can tear a non-atomic write and

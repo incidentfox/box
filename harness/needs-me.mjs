@@ -14,7 +14,9 @@
  *   LINEAR_TEAM_KEY  (required)   short team key, e.g. "ENG"  (or set LINEAR_TEAM_ID)
  *   NEEDS_LABEL      (optional)   label name, default "needs-me"  (auto-created if missing)
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 function loadEnvFile(p) {
@@ -30,9 +32,19 @@ const TEAM_KEY = env('LINEAR_TEAM_KEY');
 const TEAM_ID_CFG = env('LINEAR_TEAM_ID');
 const LABEL_NAME = env('NEEDS_LABEL', 'needs-me');
 
-if (!LK) { /* no key → silent no-op so the SessionStart hook stays quiet */ process.exit(0); }
+// No real key? Fall back to the box's local Linear clone (the same SQLite DB the box server
+// seeds), so the "needs you" inbox works with no Linear account. LINEAR_LOCAL=off disables it.
+const STATE_DB = join(homedir(), '.cc-mobile', 'linear-lite.db');
+const LINEAR_LOCAL = !LK && env('LINEAR_LOCAL') !== 'off' && existsSync(STATE_DB);
+let _lite = null;
+if (LINEAR_LOCAL) {
+  const { createLinearLite } = await import('../lib/linear-lite/index.mjs');
+  _lite = createLinearLite({ dbPath: STATE_DB, teamKey: TEAM_KEY || 'TASK', needsLabel: LABEL_NAME });
+}
+if (!LK && !_lite) { /* no key and no local DB → silent no-op so the SessionStart hook stays quiet */ process.exit(0); }
 
 async function gql(q, v) {
+  if (_lite) return _lite.gql(q, v); // local SQLite-backed clone
   const r = await fetch('https://api.linear.app/graphql', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: LK },
@@ -52,8 +64,9 @@ async function team() {
     const d = await gql(`query($id:String!){team(id:$id){id key states{nodes{id name type}} labels{nodes{id name}}}}`, { id: TEAM_ID_CFG });
     node = d.team;
   } else {
-    if (!TEAM_KEY) throw new Error('set LINEAR_TEAM_KEY or LINEAR_TEAM_ID');
-    const d = await gql(`query($k:String!){teams(filter:{key:{eq:$k}}){nodes{id key states{nodes{id name type}} labels{nodes{id name}}}}}`, { k: TEAM_KEY });
+    const key = TEAM_KEY || (_lite ? _lite.teamKey : '');
+    if (!key) throw new Error('set LINEAR_TEAM_KEY or LINEAR_TEAM_ID');
+    const d = await gql(`query($k:String!){teams(filter:{key:{eq:$k}}){nodes{id key states{nodes{id name type}} labels{nodes{id name}}}}}`, { k: key });
     node = d.teams.nodes[0];
   }
   if (!node) throw new Error('team not found — check LINEAR_TEAM_KEY / LINEAR_TEAM_ID');

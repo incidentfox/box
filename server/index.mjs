@@ -98,13 +98,33 @@ const DG_MODEL = cfg('DG_STT_MODEL', 'nova-3');
 // ---- personalization + optional integrations ------------------------------
 // Your name, used in the morning-brief status doc the app keeps per session.
 const OWNER_NAME = cfg('OWNER_NAME', 'you');
-// Linear (optional): set LINEAR_API_KEY to enable the in-app Board + "needs you" inbox.
-// LINEAR_TEAM_ID = the GraphQL team UUID whose board you want; LINEAR_TEAM_KEY = its key
-// (e.g. "ENG") to scope issue-by-number lookups; NEEDS_LABEL = the label that flags an
-// issue as needing your personal decision.
-const LINEAR_TEAM_ID = cfg('LINEAR_TEAM_ID');
-const LINEAR_TEAM_KEY = cfg('LINEAR_TEAM_KEY');
+// Linear: the in-app Board + "needs you" inbox. Two modes:
+//   • REAL Linear  — set LINEAR_API_KEY (+ LINEAR_TEAM_ID / LINEAR_TEAM_KEY) to drive a real
+//     Linear workspace.
+//   • LOCAL clone  — with NO key, the box runs a built-in, account-free clone of Linear backed
+//     by a SQLite file (~/.cc-mobile/linear-lite.db). The Board + inbox work out of the box; if
+//     you later connect a real Linear, `node bin/linear-lite.mjs import` pushes everything up.
+// NEEDS_LABEL = the label that flags an issue as needing your personal decision.
+// Set LINEAR_LOCAL=off to fully disable the Board instead of falling back to the local clone.
 const NEEDS_LABEL = cfg('NEEDS_LABEL', 'needs-me');
+const LINEAR_KEY_RAW = cfg('LINEAR_API_KEY');
+const LINEAR_LOCAL = !LINEAR_KEY_RAW && cfg('LINEAR_LOCAL') !== 'off';
+let linearLite = null;
+if (LINEAR_LOCAL) {
+  try {
+    const { createLinearLite } = await import('../lib/linear-lite/index.mjs');
+    linearLite = createLinearLite({
+      dbPath: join(STATE_DIR, 'linear-lite.db'),
+      teamKey: cfg('LINEAR_TEAM_KEY') || 'TASK',
+      teamName: cfg('LINEAR_TEAM_NAME') || 'Tasks',
+      needsLabel: NEEDS_LABEL,
+    });
+    console.log(`[box] Linear (local clone) ready — ${join(STATE_DIR, 'linear-lite.db')}, team ${linearLite.teamKey}. Connect real Linear later: node bin/linear-lite.mjs import`);
+  } catch (e) { console.error('[box] linear-lite init failed (Board disabled):', e && e.message); }
+}
+// In local mode the team id/key come from the embedded clone; otherwise from config.
+const LINEAR_TEAM_ID = linearLite ? linearLite.teamId : cfg('LINEAR_TEAM_ID');
+const LINEAR_TEAM_KEY = linearLite ? linearLite.teamKey : cfg('LINEAR_TEAM_KEY');
 // Your Linear workspace URL slug (the bit in linear.app/<slug>/…), used only to build
 // fallback issue links. Optional — resolved issues carry their own canonical url.
 const LINEAR_WORKSPACE = cfg('LINEAR_WORKSPACE');
@@ -1188,7 +1208,9 @@ function readPipelines() {
 app.get('/api/pipelines', requireAuth, (req, res) => res.json(readPipelines()));
 
 // ---- Linear integration: view an issue + its PR, close the ticket, merge the PR.
-const LINEAR_KEY = cfg('LINEAR_API_KEY');
+// In local mode there's no API key, but the feature is on — use a sentinel so the many
+// `if (!LINEAR_KEY) return 500` guards below still pass; linearGql() routes to the clone.
+const LINEAR_KEY = LINEAR_KEY_RAW || (linearLite ? 'local' : '');
 const GH_TOKEN = cfg('GITHUB_TOKEN');
 // OpenAI — used (optionally) for the cheap per-session morning-brief refresh.
 const OPENAI_KEY = cfg('OPENAI_API_KEY');
@@ -1207,7 +1229,7 @@ function codexAvailable() {
 // Lightweight client bootstrap: lets the frontend learn $HOME (for path shortening),
 // the owner name, and which optional integrations are wired so it can hide the Board /
 // brain UI when they aren't configured. Safe to expose (no secrets).
-const LINEAR_ENABLED = !!(LINEAR_KEY && LINEAR_TEAM_ID);
+const LINEAR_ENABLED = !!((LINEAR_KEY_RAW || linearLite) && LINEAR_TEAM_ID);
 app.get('/api/config', requireAuth, (req, res) => res.json({
   home: HOME,
   ownerName: OWNER_NAME,
@@ -1226,6 +1248,7 @@ if (overlay.routes) { try { overlay.routes(app, { requireAuth, HOME, DEFAULT_CWD
 if (overlay.onReady) { try { overlay.onReady({ HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.onReady failed:', e && e.message); } }
 
 async function linearGql(query, variables) {
+  if (linearLite) return linearLite.gql(query, variables); // local SQLite-backed clone
   const r = await fetch('https://api.linear.app/graphql', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: LINEAR_KEY }, body: JSON.stringify(variables ? { query, variables } : { query }) });
   const j = await r.json(); if (j.errors) throw new Error(JSON.stringify(j.errors)); return j.data;
 }

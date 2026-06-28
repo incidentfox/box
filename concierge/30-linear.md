@@ -1,7 +1,13 @@
 # Concierge prompt — set up Linear for the Box Board + "needs you" inbox
 
-Optional. This unlocks Box's in-app **task board** and the **"needs you"** decision inbox. A
-free Linear personal plan is enough.
+**You probably don't need this.** Box's in-app **task board** and **"needs you"** inbox work
+out of the box with **no Linear account** — Box ships a built-in, local clone of Linear backed
+by a SQLite file (`~/.cc-mobile/linear-lite.db`). Just install and use the Board.
+
+Follow this prompt **only** to drive a *real* Linear workspace (e.g. you already live in
+Linear). If you connect Linear later, push everything you created locally up to it with:
+`node bin/linear-lite.mjs import --key <lin_api_…> --team-key <KEY>`. A free Linear personal
+plan is enough.
 
 **Paste everything below into a computer-use agent.**
 
