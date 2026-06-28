@@ -1057,7 +1057,7 @@ function renderIssue(d) {
   const act = (label, fn, cls) => { const b = document.createElement('button'); b.className = 'iAct' + (cls ? ' ' + cls : ''); b.textContent = label; b.onclick = fn; bar.appendChild(b); };
   act('🤖 Delegate', () => delegateIssue(d));
   act('Status', () => changeStatus(d));
-  if (d.pr && d.pr.state !== 'merged') act('Merge PR', () => mergeIssuePr(d), 'primary');
+  if (d.pr && d.pr.state !== 'merged') act('Merge PR', () => mergeIssuePr(d), 'accent');
   act('Dismiss', () => dismissIssue(d), 'danger');
 }
 async function sendIssueComment() {

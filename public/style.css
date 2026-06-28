@@ -143,9 +143,10 @@ body.boardDragging .tkt:active { transform: none; }
 .issueCmtBody { font-size: 13.5px; line-height: 1.45; color: var(--ink); }
 .issueCmtBody p:first-child { margin-top: 0; } .issueCmtBody p:last-child { margin-bottom: 0; }
 .issueBar { flex: none; display: flex; flex-wrap: wrap; gap: 7px; padding: 8px 12px; border-top: 1px solid var(--line); }
-.iAct { flex: 1 1 auto; min-width: max-content; text-align: center; font-size: 13px; font-weight: 600; color: var(--ink); background: var(--subtle-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 13px; cursor: pointer; white-space: nowrap; }
+.iAct { flex: none; font-size: 13px; font-weight: 600; color: var(--ink); background: var(--subtle-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 13px; cursor: pointer; white-space: nowrap; }
 .iAct:active { transform: scale(.97); }
-.iAct.primary { background: var(--accent); color: #fff; border-color: transparent; }
+/* own modifier name — the global `.primary` utility (full-width 340px CTA) must NOT bleed in here */
+.iAct.accent { background: var(--accent); color: #fff; border-color: transparent; }
 .iAct.danger { color: #c0392b; }
 .issueCompose { flex: none; display: flex; gap: 8px; align-items: center; padding: 8px 12px calc(8px + var(--safe-b)); border-top: 1px solid var(--line); }
 .issueCommentInput { flex: 1; font-size: 16px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 22px; background: var(--subtle); color: var(--ink); outline: none; }
