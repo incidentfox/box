@@ -84,13 +84,20 @@ command -v git >/dev/null 2>&1 && ok "git" || warn "git missing"
 
 if command -v dtach >/dev/null 2>&1; then ok "dtach"; else warn "installing dtach (session persistence)"; pkg_install dtach; command -v dtach >/dev/null 2>&1 && ok "dtach" || warn "dtach missing (sessions won't persist across SSH drops)"; fi
 
-# build toolchain for node-pty (native module)
+# build toolchain for node-pty (native module — `npm install` compiles it from source).
+# This is the #1 cause of a failed setup, so be explicit about what's needed.
 if [ "$OS" = "Linux" ]; then
   case "$PM" in
     apt) pkg_install build-essential python3 ;;
     dnf) pkg_install gcc-c++ make python3 ;;
     pacman) pkg_install base-devel python ;;
+    *) warn "no known package manager — ensure a C/C++ toolchain (gcc/g++/make) + python3 are installed; node-pty compiles natively" ;;
   esac
+  if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then ok "C/C++ build toolchain present"
+  else warn "no C compiler found — node-pty will fail to build (apt: build-essential · dnf: gcc-c++ make · pacman: base-devel)"; fi
+elif [ "$OS" = "Darwin" ]; then
+  if xcode-select -p >/dev/null 2>&1; then ok "Xcode Command Line Tools present"
+  else warn "Xcode Command Line Tools missing — node-pty needs them. Run: xcode-select --install  (then re-run this script)"; fi
 fi
 
 # claude CLI — required; Box drives the user's logged-in CLI. Auto-install if missing.
@@ -132,8 +139,30 @@ fi
 echo
 
 # ---- npm install ------------------------------------------------------------
-bold "2) Installing app dependencies (this builds node-pty — may take a minute)"
-if npm install --no-audit --no-fund >/dev/null 2>&1; then ok "dependencies installed"; else warn "npm install hit an error — see: npm install"; fi
+bold "2) Installing app dependencies (this compiles node-pty — may take a minute)"
+mkdir -p "$HOME/.cc-mobile"; NPM_LOG="$HOME/.cc-mobile/npm-install.log"
+if npm install --no-audit --no-fund > "$NPM_LOG" 2>&1; then
+  ok "dependencies installed"
+else
+  warn "npm install failed — last lines (full log: $NPM_LOG):"
+  tail -n 15 "$NPM_LOG" | sed 's/^/      /'
+fi
+# node-pty is the ONE native dependency and the usual point of failure. Verify it
+# actually loads (a swallowed build error otherwise surfaces later as a dead app).
+if node -e 'require("node-pty")' >/dev/null 2>&1; then
+  ok "node-pty native module OK"
+else
+  warn "node-pty failed to build/load — Box drives terminals through it, so this MUST be fixed:"
+  case "$OS" in
+    Linux)  warn "    install build tools, then re-run ./install.sh —"
+            warn "      apt:    $SUDO apt-get install -y build-essential python3"
+            warn "      dnf:    $SUDO dnf install -y gcc-c++ make python3"
+            warn "      pacman: $SUDO pacman -S --noconfirm base-devel python" ;;
+    Darwin) warn "    run 'xcode-select --install', then re-run ./install.sh" ;;
+    *)      warn "    install a C/C++ toolchain + python3, then re-run ./install.sh" ;;
+  esac
+  warn "    (or just rebuild it: npm rebuild node-pty)  ·  build log: $NPM_LOG"
+fi
 echo
 
 # ---- .env -------------------------------------------------------------------
