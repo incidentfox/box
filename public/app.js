@@ -1752,8 +1752,12 @@ function onServer(o) {
     if (!live) startAssistant(); clearLoading();
     live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
     const data = { input: o.detail }; (live.toolData = live.toolData || {})[o.id] = data;
-    live.body.insertBefore(toolChip(o.name, o.input || '', data), live.textEl);
-    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; live.body.appendChild(nt); live.textEl = nt; maybeScroll();
+    // Place the chip AFTER the text that preceded it. live.textEl holds the just-streamed
+    // pre-tool text; inserting the chip BEFORE it pushed that text below the chip — so a
+    // summary written right before an AskUserQuestion rendered UNDER the question card.
+    const chip = toolChip(o.name, o.input || '', data);
+    live.textEl.insertAdjacentElement('afterend', chip);
+    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; maybeScroll();
     // AskUserQuestion pauses the turn waiting for user input — clear the running/loading state so Send shows
     if (o.name === 'AskUserQuestion') { live.textEl.classList.remove('cursor'); running = false; killGhostIndicators(); refreshButton(); }
   }
@@ -1805,8 +1809,10 @@ function onSync(o) {
         if (p.t === 'tool') {
           live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
           (live.toolData = live.toolData || {})[p.id] = { input: p.detail, result: p.result };
-          live.body.insertBefore(toolChip(p.name, p.input || '', live.toolData[p.id]), live.textEl);
-          live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; live.body.appendChild(nt); live.textEl = nt;
+          // chip AFTER the preceding text segment (not before live.textEl) — keep real order
+          const chip = toolChip(p.name, p.input || '', live.toolData[p.id]);
+          live.textEl.insertAdjacentElement('afterend', chip);
+          live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
         } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.textEl.innerHTML = md(live.raw); }
       }
     } else {
