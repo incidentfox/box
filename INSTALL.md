@@ -71,6 +71,13 @@ keeper to cron, starts the server + a Cloudflare quick-tunnel, and prints the UR
 If `install.sh` reports a missing prerequisite it couldn't auto-install (often the `claude`
 CLI or `node`), install it per its hint and re-run — the script is idempotent.
 
+**Most common failure: `node-pty` didn't build.** It's the one native module and needs a
+C/C++ toolchain. The installer now verifies this and prints the exact fix, but if you hit it:
+install build tools and re-run (Linux apt: `sudo apt-get install -y build-essential python3`;
+dnf: `sudo dnf install -y gcc-c++ make python3`; Arch: `sudo pacman -S base-devel python`;
+macOS: `xcode-select --install`), or just `npm rebuild node-pty`. Full npm log:
+`~/.cc-mobile/npm-install.log`.
+
 ## Step 4 — Verify it's actually up
 Don't trust, verify:
 
