@@ -190,6 +190,15 @@ function readRcRegistry() {
 const LIVE_BRIDGES = new Map(); // sessionId -> { rcName, cwd, pid }
 function reconcileLiveBridges() {
   const next = new Map();
+  // Archived = "I'm done with this chat" → it must NOT keep a `claude --remote-control`
+  // process burning RAM. Reap any bridge belonging to an archived session here instead of
+  // re-binding it as live. Because this runs on startup AND every 30s, a bridge that leaked
+  // (archived before this reaper shipped, archived while the server was down, or somehow
+  // respawned) is torn down within one tick — the chronic memory pressure / OOM crash-restart
+  // loop behind INC-980. Resuming a chat un-archives it (see runWorker → unarchiveOnResume),
+  // so an actively used session is never reaped.
+  let archived; try { archived = loadArchived(); } catch { archived = new Set(); }
+  let reaped = 0;
   let out = '';
   try { out = execSync(`pgrep -af -- '--remote-control' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
   for (const line of out.split('\n')) {
@@ -204,6 +213,13 @@ function reconcileLiveBridges() {
     const m = cmd.match(/--(?:resume|session-id)\s+([0-9a-fA-F-]{36})/);
     if (!m) continue;                                  // box-new w/o argv id → stays an idle card
     const sessionId = m[1];
+    if (archived.has(sessionId)) {
+      // Tear the archived bridge down — unless a turn is mid-flight (RUNNING), since resuming
+      // unarchives, this only guards a sub-tick race — and never bind an archived session as
+      // "live". killSessionBridge is idempotent, so once reaped it won't be re-found next tick.
+      if (!RUNNING.has(sessionId)) { try { killSessionBridge(sessionId); reaped++; } catch {} }
+      continue;
+    }
     const rcm = cmd.match(/--remote-control\s+(\S+)/);
     let cwd = '';
     try { cwd = execSync(`readlink /proc/${pid}/cwd 2>/dev/null || true`, { encoding: 'utf8', timeout: 1000 }).trim(); } catch {}
@@ -211,6 +227,7 @@ function reconcileLiveBridges() {
   }
   LIVE_BRIDGES.clear();
   for (const [k, v] of next) LIVE_BRIDGES.set(k, v);
+  if (reaped) console.log(`reaped ${reaped} archived RC bridge(s)`);
   return LIVE_BRIDGES.size;
 }
 
@@ -255,7 +272,11 @@ function killSessionBridge(id) {
   } catch {}
   for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch {} }
   if (pids.length) setTimeout(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 3000).unref?.();
-  for (const sock of [`/tmp/cc-box-${id}.dtach`, rcName ? `/tmp/cc-rc-${rcName}.dtach` : null]) {
+  // Box-local sockets are keyed by the FIRST 8 hex chars of the id (rc-engine rcSockPath:
+  // /tmp/cc-box-<id8>.dtach), NOT the full uuid — use the engine's own path so the stale
+  // socket is actually removed (the old full-id path never matched, leaving a dead socket
+  // that `dtach -A` would later reattach to).
+  for (const sock of [rcEngine.sockPath(id), rcName ? `/tmp/cc-rc-${rcName}.dtach` : null]) {
     if (sock) { try { unlinkSync(sock); } catch {} }
   }
   LIVE_BRIDGES.delete(id);
@@ -456,6 +477,21 @@ const saveArchived = (set) => writeJsonAtomic(ARCH_FILE, [...set]);
 const ARCH_AT_FILE = join(STATE_DIR, 'archived-at.json');   // { sessionId: archivedAtMs } — additive sidecar
 const loadArchivedAt = () => { try { const o = JSON.parse(readFileSync(ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
 const saveArchivedAt = (m) => writeJsonAtomic(ARCH_AT_FILE, m);
+// Resuming an archived chat brings it back to life: when the user sends a new message we
+// un-archive it so it rejoins the active feed AND the reconcile reaper (which tears down
+// bridges for archived sessions, see reconcileLiveBridges) leaves its freshly-spawned bridge
+// alone. No-op (no disk write) when the session isn't archived, so it's cheap to call on every
+// turn. Mirrors the archive endpoint's two-file update (archived.json + the archived-at sidecar).
+function unarchiveOnResume(id) {
+  if (!id) return false;
+  try {
+    const set = loadArchived();
+    if (!set.has(id)) return false;
+    set.delete(id); saveArchived(set);
+    const at = loadArchivedAt(); if (id in at) { delete at[id]; saveArchivedAt(at); }
+    return true;
+  } catch { return false; }
+}
 
 // ---- full-text session search via the `sessiongrep` CLI (Rust). It self-reindexes
 // incrementally before each search, so results stay fresh. We parse its text output and
@@ -2139,7 +2175,7 @@ async function runWorker(s) {
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
     s.curText = ''; s.curTools = []; s.curParts = []; s.canceled = false; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
-    if (s.sessionId) RUNNING.add(s.sessionId);
+    if (s.sessionId) { RUNNING.add(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
