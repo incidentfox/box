@@ -1750,12 +1750,32 @@ Be specific enough that ${OWNER_NAME} can act or reply without reading the chat.
   })();
 }
 function ensureTail(s, fromLine) {
-  if (!s.sessionId || s.tailStop) return;
-  const jf = jsonlPath(s.sessionId);
-  const start = fromLine != null ? fromLine : readJsonl(jf).lines;
-  s.tailStop = tailJsonl(jf, start, (ev) => onTailEvent(s, ev));
+  if (!s.sessionId || s.tailStop || s._tailWait) return;
+  const begin = (jf) => {
+    if (s.tailStop) return;
+    const start = fromLine != null ? fromLine : readJsonl(jf).lines;
+    s.tailStop = tailJsonl(jf, start, (ev) => onTailEvent(s, ev));
+  };
+  // For a brand-new chat the pre-minted session id makes session_p resolve at SPAWN —
+  // before claude has created the JSONL — and we don't yet know which account/cwd it'll
+  // land under (the broker may route it to ~/.claude-<id>). jsonlPath() would then return
+  // its fallback path and we'd tail a file that never gets written → no output rendered.
+  // So: tail immediately if the file already exists, else poll across all config dirs
+  // (findSessionFile) until it appears, then tail THAT real path.
+  const existing = findSessionFile(s.sessionId);
+  if (existing) { begin(existing); return; }
+  let tries = 0;
+  s._tailWait = setInterval(() => {
+    if (s.tailStop || !s.sessionId) { clearInterval(s._tailWait); s._tailWait = null; return; }
+    const f = findSessionFile(s.sessionId);
+    if (f) { clearInterval(s._tailWait); s._tailWait = null; begin(f); }
+    else if (++tries > 75) { clearInterval(s._tailWait); s._tailWait = null; } // ~30s: give up quietly
+  }, 400);
 }
-function stopTail(s) { if (s.tailStop) { try { s.tailStop(); } catch {} s.tailStop = null; } }
+function stopTail(s) {
+  if (s._tailWait) { clearInterval(s._tailWait); s._tailWait = null; }
+  if (s.tailStop) { try { s.tailStop(); } catch {} s.tailStop = null; }
+}
 
 // Watch for any subscribed session being parked on an interactive prompt (AskUserQuestion /
 // ExitPlanMode / permission). claude does NOT write the pending tool_use to the JSONL until it's
