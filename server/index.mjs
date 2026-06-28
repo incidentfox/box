@@ -14,10 +14,12 @@ import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
 import { join, resolve, dirname, basename, extname } from 'node:path';
 import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import multer from 'multer';
 import { RCEngine, tail as tailJsonl, readAll as readJsonl } from './rc-engine.mjs';
+import * as accounts from './accounts.mjs';
+import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -96,6 +98,21 @@ const TEAM_KEY_FILTER = LINEAR_TEAM_KEY ? `, team:{ key:{ eq:"${LINEAR_TEAM_KEY}
 const ISSUE_PREFIX = LINEAR_TEAM_KEY ? `${LINEAR_TEAM_KEY}-` : '';
 const ISSUE_RE = LINEAR_TEAM_KEY ? new RegExp(`\\b${LINEAR_TEAM_KEY}-(\\d+)\\b`, 'g') : null;
 const issueUrl = (n) => (LINEAR_WORKSPACE ? `https://linear.app/${LINEAR_WORKSPACE}/issue/${ISSUE_PREFIX}${n}` : '');
+
+// ---- optional private overlay -------------------------------------------------
+// Business-specific extensions that must NEVER fork the public core. If BOX_OVERLAY
+// (or ~/.config/box/box.local.mjs) exists, it's imported at boot. It may export:
+//   categorizeAuto(session, file) -> subcat key | null   — override the auto-session bucket
+//   subLabels: { key: 'Label' }                          — display names for those buckets
+//   routes(app, ctx)                                     — register extra Express routes
+//   onReady(ctx)                                         — arbitrary init hook
+// Keeps your private logic in your own file; the core stays generic = no drift.
+let overlay = {};
+const OVERLAY_PATH = process.env.BOX_OVERLAY || localEnv.BOX_OVERLAY || join(HOME, '.config', 'box', 'box.local.mjs');
+if (existsSync(OVERLAY_PATH)) {
+  try { overlay = await import(pathToFileURL(OVERLAY_PATH).href); console.log('[box] loaded overlay:', OVERLAY_PATH); }
+  catch (e) { console.error('[box] overlay load failed:', e && e.message); }
+}
 
 let AUTH_TOKEN = process.env.CC_AUTH_TOKEN || localEnv.CC_AUTH_TOKEN;
 if (!AUTH_TOKEN) {
@@ -464,6 +481,8 @@ function openingPrompt(file) {
   return '';
 }
 function autoSubcat(id, file) {
+  // A private overlay may classify auto-sessions into its own buckets (e.g. by prompt/dir).
+  if (overlay.categorizeAuto) { try { const k = overlay.categorizeAuto({ id }, file); if (k) return k; } catch {} }
   const dir = basename(dirname(file || ''));
   // Generic sub-buckets. Add your own dir markers here if you run scheduled agents in
   // dedicated directories and want them split out under the Automated tab.
@@ -815,6 +834,24 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
 });
 app.get('/api/commands', requireAuth, (req, res) => res.json({ commands: req.query.agent === 'codex' ? scanCodexCommands() : scanCommands() }));
 
+// ---- Accounts: pool/switch Claude accounts via an external account broker -----
+// The `/login` dialog wraps the headless OAuth flow (authorize URL → paste code) and an
+// API-key option, writing each account's creds into its own config dir and registering it
+// with the broker. Optional — needs a broker (set CC_BROKER_JS); see server/accounts.mjs.
+const acctRoute = (fn) => [requireAuth, async (req, res) => {
+  try { res.json(await fn(req)); }
+  catch (e) { res.status(400).json({ error: String(e?.message || e) }); }
+}];
+app.get('/api/accounts', ...acctRoute(async () => ({ ...(await accounts.listAccounts()), consoleKeysUrl: accounts.consoleKeysUrl, manageUsage: accounts.manageUsageUrls })));
+app.post('/api/accounts/refresh-usage', ...acctRoute(async () => ({ ...(await accounts.refreshUsage()), consoleKeysUrl: accounts.consoleKeysUrl, manageUsage: accounts.manageUsageUrls })));
+app.post('/api/accounts/oauth/start', ...acctRoute((req) => accounts.startOAuth(req.body || {})));
+app.post('/api/accounts/oauth/complete', ...acctRoute((req) => accounts.completeOAuth(req.body || {})));
+app.post('/api/accounts/apikey', ...acctRoute((req) => accounts.saveApiKey(req.body || {})));
+app.post('/api/accounts/remove', ...acctRoute((req) => accounts.removeAccount((req.body || {}).id)));
+app.post('/api/accounts/primary', ...acctRoute((req) => accounts.setPrimary((req.body || {}).id)));
+app.post('/api/accounts/cooldown', ...acctRoute((req) => accounts.cooldown((req.body || {}).id, (req.body || {}).minutes)));
+app.post('/api/accounts/clear', ...acctRoute((req) => accounts.clearCooldown((req.body || {}).id)));
+
 // "Needs you" inbox — Linear-backed (any issue on your team labeled NEEDS_LABEL). Any
 // agent can file an item via the Linear API / your harness; it survives compaction and new
 // sessions. The chat UI renders these as cards you can act on. 🔴 = Urgent, 🟡 = High.
@@ -970,7 +1007,13 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
     voice: !!(ELEVEN_KEY || DEEPGRAM_KEY),
     codex: codexAvailable(),
   },
+  // Display names for Automated-tab sub-buckets; a private overlay can add its own.
+  subLabels: overlay.subLabels || {},
 }));
+
+// Let a private overlay register extra routes / run init (business endpoints, etc.).
+if (overlay.routes) { try { overlay.routes(app, { requireAuth, HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.routes failed:', e && e.message); } }
+if (overlay.onReady) { try { overlay.onReady({ HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.onReady failed:', e && e.message); } }
 
 async function linearGql(query, variables) {
   const r = await fetch('https://api.linear.app/graphql', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: LINEAR_KEY }, body: JSON.stringify(variables ? { query, variables } : { query }) });
@@ -1713,6 +1756,51 @@ function ensureTail(s, fromLine) {
 }
 function stopTail(s) { if (s.tailStop) { try { s.tailStop(); } catch {} s.tailStop = null; } }
 
+// Watch for any subscribed session being parked on an interactive prompt (AskUserQuestion /
+// ExitPlanMode / permission). claude does NOT write the pending tool_use to the JSONL until it's
+// answered, so the JSONL tail can't surface it — the box would look stuck. We detect it from
+// ~/.claude/sessions (status==='waiting') and scrape the TUI for the question + options so it
+// renders in-chat. One global poller (vs per-session intervals) sidesteps start-timing for new
+// chats whose sessionId resolves only after the first turn begins.
+setInterval(() => { for (const s of RT.values()) { if (s.subs.size && s.sessionId) checkWaiting(s).catch(() => {}); } }, 1200);
+async function checkWaiting(s) {
+  if (!s.sessionId || !s.subs.size) return;            // only while someone's watching this chat
+  const st = rcEngine.sessionState(s.sessionId);
+  const waiting = !!(st && st.status === 'waiting');
+  if (!waiting) {
+    if (s.waitingActive) { s.waitingActive = false; s.waitingPayload = null; s.waitingSettled = false; s.waitingTries = 0; bcast(s, { type: 'waiting_clear', sessionId: s.sessionId }); }
+    return;
+  }
+  // waiting === true. Re-scrape across polls until we get a parsed prompt — status can flip to
+  // 'waiting' a beat before the menu finishes painting, so the first scrape may come up empty.
+  if (s.waitingActive && s.waitingSettled) return;     // already surfaced the final prompt
+  let prompt = null, attached = false;
+  try {
+    // Attach a local pty so we can read the TUI (collision-safe: reattaches a box-local bridge,
+    // refuses to spawn a competing one for a session owned elsewhere). Then scrape the screen.
+    const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    if (rec && !rec.blocked) { attached = true; const buf = await rcEngine.captureScreen(s.sessionId); if (buf) prompt = promptFromBuffer(buf); }
+  } catch {}
+  s.waitingActive = true;
+  s.waitingTries = (s.waitingTries || 0) + 1;
+  // Stop retrying once we have a prompt, we can't scrape (not attached → owned elsewhere), or we've tried enough.
+  if (prompt || !attached || s.waitingTries >= 5) s.waitingSettled = true;
+  s.waitingPayload = { type: 'waiting', sessionId: s.sessionId, waitingFor: (st && st.waitingFor) || '', prompt, answerable: attached };
+  bcast(s, s.waitingPayload);
+}
+async function answerWaiting(extKey, sel) {
+  const s = rt(extKey);
+  if (!s.sessionId) return;
+  try {
+    const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
+    const ok = await rcEngine.answerWaiting(s.sessionId, sel);
+    // Optimistically clear the card; the JSONL tail will render the answered tool_use/result and
+    // Claude's continuation as they land. (Don't touch RUNNING — this session may not be box-driven.)
+    if (ok) { s.waitingActive = false; s.waitingPayload = null; s.waitingSettled = false; s.waitingTries = 0; bcast(s, { type: 'waiting_clear', sessionId: s.sessionId }); }
+  } catch (e) { bcast(s, { type: 'error', msg: String((e && e.message) || e).slice(-300) }); }
+}
+
 function enqueue(extKey, msg) {
   const s = rt(extKey);
   msg.qid = randomBytes(4).toString('hex');
@@ -1797,7 +1885,10 @@ function runTurn(s, msg) {
     if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
 	    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
     let prompt = msg.text || '';
-    if (Array.isArray(msg.images) && msg.images.length) prompt = msg.images.map((pp) => `[Image attached at ${pp} — view it with the Read tool]`).join('\n') + '\n\n' + prompt;
+    if (Array.isArray(msg.images) && msg.images.length) {
+      const isImg = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
+      prompt = msg.images.map((pp) => `[${isImg(pp) ? 'Image' : 'File'} attached at ${pp} — view it with the Read tool]`).join('\n') + '\n\n' + prompt;
+    }
 
     let done = false;
     const finish = () => {
@@ -2031,8 +2122,9 @@ wss.on('connection', (ws) => {
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
-      if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot
+      if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
     } else if (m.type === 'settings') {
@@ -2043,6 +2135,7 @@ wss.on('connection', (ws) => {
       bcast(s, { type: 'settings', settings: s.settings });
     } else if (m.type === 'dequeue') { dequeue(m.key, m.qid); }
     else if (m.type === 'cancel') { cancelCurrent(m.key); }
+    else if (m.type === 'answer_waiting') { answerWaiting(m.key, m.sel || {}); }
   });
   ws.on('close', unsub);
 });

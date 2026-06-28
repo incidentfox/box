@@ -28,6 +28,11 @@ const CWD = process.env.CC_WORKSPACE || HOME;
 const PROJECTS_BASE = path.join(HOME, '.claude', 'projects');
 const projectDirFor = (cwd) => path.join(PROJECTS_BASE, String(cwd || CWD).replace(/\//g, '-'));
 const PROJ_DIR = projectDirFor(CWD);
+// Per-process runtime state claude writes for each session: { sessionId, pid, status, waitingFor, ... }.
+// status==='waiting' means the session is parked on an interactive prompt (AskUserQuestion /
+// ExitPlanMode / permission) — which is NOT written to the JSONL until answered. This is the
+// detection signal the box uses to surface a pending prompt that JSONL can't show.
+const SESSIONS_DIR = path.join(HOME, '.claude', 'sessions');
 // Detach node-pty from dtach after 30 min idle; the claude RC process keeps
 // running in the background. Next message reattaches via dtach -A (idempotent).
 const IDLE_MS = 30 * 60 * 1000;
@@ -285,6 +290,7 @@ export class RCEngine extends EventEmitter {
       sessionId: effId || null,                    // known up front now, even for new chats
       jsonl: sessionId ? findJsonl(sessionId) : path.join(projectDirFor(cwd), newId + '.jsonl'),
       booted: false, idleTimer: null,
+      outBuf: '',   // rolling tail of raw PTY output, for scraping a pending interactive prompt
     };
     // booted: TUI is ready to accept keystrokes. session_p resolves once the real id is
     // known — immediate now that we mint it ourselves (was deferred until the JSONL appeared).
@@ -326,6 +332,9 @@ export class RCEngine extends EventEmitter {
     term.onData((d) => {
       if (!s.booted) { boot += d; scheduleQuiet(); }
       if (!s.sessionId) detectSession();
+      // keep a rolling tail of the TUI so we can reconstruct the screen when parked on a prompt
+      s.outBuf += d;
+      if (s.outBuf.length > 96000) s.outBuf = s.outBuf.slice(-64000);
     });
     // dtach client exits when we detach or when the session ends; either way
     // clean up our local record (dtach sock may still exist if claude is alive).
@@ -396,6 +405,64 @@ export class RCEngine extends EventEmitter {
   interrupt(sessionId) {
     const s = this.sessions.get(sessionId);
     if (s) s.pty.write('\x1b'); // ESC interrupts the current turn in the TUI
+  }
+
+  // Read claude's per-process runtime state for a session (status/waitingFor/pid), by matching
+  // sessionId across ~/.claude/sessions/<pid>.json. Cheap; safe to poll. Returns null if absent.
+  sessionState(sessionId) {
+    if (!sessionId) return null;
+    try {
+      for (const f of fs.readdirSync(SESSIONS_DIR)) {
+        if (!f.endsWith('.json')) continue;
+        try { const o = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8')); if (o.sessionId === sessionId) return o; } catch {}
+      }
+    } catch {}
+    return null;
+  }
+
+  isWaiting(sessionId) { const st = this.sessionState(sessionId); return !!(st && st.status === 'waiting'); }
+
+  // Force a fresh full repaint of the TUI (so outBuf holds the current screen even if we attached
+  // after the prompt appeared) and return the rolling buffer. Requires a live local pty.
+  async captureScreen(sessionId) {
+    const s = this.sessions.get(sessionId);
+    if (!s || !s.pty) return null;
+    await s.booted_p;
+    // nudge the size to provoke a redraw, then restore — net no size change, just a repaint.
+    try { s.pty.resize(99, 40); await new Promise((r) => setTimeout(r, 70)); s.pty.resize(100, 40); } catch {}
+    await new Promise((r) => setTimeout(r, 260));
+    return s.outBuf;
+  }
+
+  // Answer a pending selection prompt by injecting keystrokes.
+  //   { index: n }            -> select the n-th option (cursor starts at 1): Down×(n-1) then Enter.
+  //   { text, freeTextIndex } -> select the free-text option, then TYPE the text (plain chars —
+  //                              NOT bracketed paste, whose leading ESC the menu reads as cancel)
+  //                              and Enter.
+  // Assumes the menu cursor is at option 1 (a freshly-shown prompt), which holds because the box
+  // injects the whole sequence atomically and doesn't otherwise move the cursor.
+  async answerWaiting(sessionId, sel) {
+    const s = this.sessions.get(sessionId);
+    if (!s || !s.pty || !sel) return false;
+    await s.booted_p;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const down = async (k) => { for (let i = 1; i < k; i++) { s.pty.write('\x1b[B'); await sleep(110); } };
+    if (sel.text != null && Number.isInteger(sel.freeTextIndex) && sel.freeTextIndex >= 1) {
+      // The free-text option ("Type something" / "Tell Claude what to change") DECLINES the
+      // structured question and drops to the normal composer; then we send the reply as a normal
+      // message (bracketed paste so newlines/specials survive — safe now that the menu is gone).
+      await down(sel.freeTextIndex);
+      s.pty.write('\r'); await sleep(500);
+      s.pty.write(bracketedPaste(String(sel.text))); await sleep(150);
+      s.pty.write('\r');
+      return true;
+    }
+    if (Number.isInteger(sel.index) && sel.index >= 1) {
+      await down(sel.index);
+      s.pty.write('\r');
+      return true;
+    }
+    return false;
   }
 
   // Soft close: detach node-pty from dtach, leaving the claude RC process alive.

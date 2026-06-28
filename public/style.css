@@ -303,8 +303,19 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 
 /* composer */
 .composer { flex: none; border-top: 1px solid var(--line); background: var(--bg); padding: 8px 10px calc(8px + var(--safe-b)); position: relative; }
-.composer.dragover { box-shadow: inset 0 2px 0 0 color-mix(in srgb, var(--accent, #4a7dff) 70%, transparent); }
-.composer.dragover::after { content: 'Drop image to attach'; position: absolute; left: 0; right: 0; bottom: calc(100% + 4px); text-align: center; font-size: 12px; font-weight: 600; color: var(--accent); pointer-events: none; }
+/* full-screen drag-and-drop overlay */
+.dropOverlay { position: fixed; inset: 0; z-index: 9000; display: none; align-items: center; justify-content: center; background: color-mix(in srgb, var(--bg) 72%, transparent); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); pointer-events: none; }
+.dropOverlay.show { display: flex; }
+.dropInner { display: flex; flex-direction: column; align-items: center; gap: 10px; border: 2.5px dashed var(--accent); border-radius: 22px; padding: 42px 60px; color: var(--accent); font-size: 18px; font-weight: 700; background: color-mix(in srgb, var(--accent) 9%, var(--card)); box-shadow: 0 12px 40px rgba(0,0,0,.18); }
+.dropInner .dropIcon svg { width: 40px; height: 40px; }
+/* non-image attachment chips (composer attach row + sent user message) */
+.fileThumb { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; width: 64px; height: 64px; padding: 6px; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 12px; position: relative; overflow: hidden; }
+.fileThumbIcon svg { width: 20px; height: 20px; color: var(--muted); }
+.fileThumbName { font-size: 8.5px; line-height: 1.1; text-align: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.fileThumbExt { font-size: 8px; font-weight: 700; color: var(--muted); }
+.umgFile { display: inline-flex; align-items: center; gap: 6px; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; max-width: 220px; }
+.umgFile .umgFileIcon svg { width: 15px; height: 15px; color: var(--muted); }
+.umgFileName { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queueArea { display: flex; flex-direction: column; gap: 6px; padding: 2px 2px 8px; }
 .qchip { display: flex; align-items: center; gap: 8px; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 13px; padding: 9px 12px; cursor: pointer; }
 .qchip.running { opacity: .6; cursor: default; }
@@ -487,6 +498,18 @@ html[data-theme="dark"] .askUserOpt.selected { background: #2a1e18; }
 .askUserFallback .askUserQuestion { font-weight: 500; color: var(--muted); background: color-mix(in srgb, var(--accent) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 10px; padding: 10px 12px; }
 .askOptLabel { font-size: 14px; font-weight: 500; }
 .askOptDesc { font-size: 12px; color: var(--muted); line-height: 1.4; margin-top: 1px; }
+
+/* Live pending prompt (AskUserQuestion / plan / permission) surfaced from the running session */
+.waitingCard { display: flex; flex-direction: column; gap: 9px; margin: 8px 0; max-width: min(380px, 92vw); border: 1.5px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-left: 3px solid var(--accent); border-radius: 13px; padding: 12px 13px; background: color-mix(in srgb, var(--accent) 5%, var(--card)); }
+.waitHeader { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.waitQuestion { font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.4; }
+.waitOpt { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 10px 13px; border: 1.5px solid var(--line); border-radius: 12px; background: var(--card); cursor: pointer; color: var(--ink); transition: border-color .15s, background .15s; }
+.waitOpt:active { opacity: .7; }
+.waitOpt:disabled { cursor: default; }
+.waitOpt.chosen { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--card)); }
+.waitOptLabel { font-size: 14px; font-weight: 500; }
+.waitOptDesc { font-size: 12px; color: var(--muted); line-height: 1.4; margin-top: 1px; }
+.waitHint { font-size: 11.5px; color: var(--muted); }
 .askUserOther { color: var(--muted); font-size: 13px; border-style: dashed; }
 
 /* attention dot on session list rows */
@@ -584,3 +607,45 @@ html[data-theme="dark"] .lbState { background: var(--subtle-2); color: var(--mut
 .attnActions { margin-top: 10px; display: flex; justify-content: flex-end; }
 .attnDismiss { font-size: 12px; font-weight: 600; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
 .attnDismiss:hover { background: var(--card); color: var(--fg, inherit); border-color: color-mix(in srgb, var(--muted) 40%, var(--line)); }
+
+/* ---------- Claude accounts / login overlay ---------- */
+#accountsOverlay { z-index: 27; }
+.accountsBody { padding: 12px 14px 40px; overflow-y: auto; }
+.acctIntro { font-size: 12.5px; color: var(--muted); line-height: 1.45; margin: 2px 2px 12px; }
+.acctCard { background: var(--card); border: 1px solid var(--line); border-radius: 13px; padding: 12px 13px; margin-bottom: 10px; }
+.acctCard.primary { border-color: var(--accent); }
+.acctTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.acctName { font-size: 15px; font-weight: 650; }
+.acctType { font-size: 10.5px; font-weight: 600; color: var(--muted); background: var(--subtle-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; margin-left: 4px; }
+.acctMeta { font-size: 12px; color: var(--muted); margin-top: 4px; word-break: break-all; }
+.acctActions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.acctActions .chip.danger { color: #c0392b; border-color: #c0392b55; }
+.acctBadge { font-size: 10.5px; font-weight: 700; border-radius: 7px; padding: 2px 8px; white-space: nowrap; }
+.acctBadge.ok { color: #1a7f37; background: #1a7f3718; }
+.acctBadge.cool { color: var(--accent); background: var(--subtle-2); }
+.acctBadge.warn { color: #b25f00; background: #b25f0018; }
+.acctForm { padding: 4px 2px; }
+.acctTabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.acctTab { flex: 1; font-size: 13.5px; font-weight: 600; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 9px 0; }
+.acctTab.sel { color: #fff; background: var(--accent); border-color: var(--accent); }
+.acctLbl { display: block; font-size: 12.5px; font-weight: 600; color: var(--muted); margin: 12px 2px 5px; }
+.acctInput { width: 100%; box-sizing: border-box; font-size: 15px; font-family: inherit; color: inherit; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 5px; }
+.acctInput:focus { outline: none; border-color: var(--accent); }
+textarea.acctInput { resize: vertical; }
+.btn.primary { display: block; width: 100%; box-sizing: border-box; margin-top: 14px; font-size: 15px; font-weight: 650; color: #fff; background: var(--accent); border: none; border-radius: 11px; padding: 12px 0; }
+.btn.primary:disabled { opacity: .6; }
+.acctNote { font-size: 12.5px; color: var(--muted); line-height: 1.5; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 12px 0; }
+.acctNote code { font-size: 11.5px; background: var(--card); padding: 1px 5px; border-radius: 5px; }
+.acctLink { display: inline-block; font-size: 14px; font-weight: 600; color: var(--accent); margin: 10px 0; word-break: break-all; }
+.acctBack { margin-top: 16px; }
+
+/* ---------- account usage bars ---------- */
+.acctIntro { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.acctUsage { margin-top: 9px; }
+.acctBar { height: 6px; border-radius: 4px; background: var(--subtle-2); overflow: hidden; }
+.acctBarFill { height: 100%; border-radius: 4px; transition: width .3s; }
+.acctBarFill.lo { background: #1a7f37; }
+.acctBarFill.mid { background: #b25f00; }
+.acctBarFill.hi { background: #c0392b; }
+.acctUsageMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 11.5px; color: var(--muted); }
+.acctUsageLink { font-size: 11.5px; font-weight: 600; color: var(--accent); white-space: nowrap; }

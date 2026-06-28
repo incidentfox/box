@@ -8,7 +8,8 @@ const DEFAULT_SETTINGS = {
   claude: { model: 'sonnet', effort: 'high' },
 };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: LS.getItem('box_agent') || 'claude', parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, claude: { ...DEFAULT_SETTINGS.claude } } };
-let images = [];            // [{path, url}]
+let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
+let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
 let pipeView = 'list';   // 'list' | 'detail' — for the Pipelines swipe-back target
 
@@ -135,6 +136,7 @@ const ICONS = {
   clipboard: SVG('<rect x="9" y="2" width="6" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>', { w: 2 }),
   copy: SVG('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', { w: 2 }),
   trash: SVG('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h2a2 2 0 0 1 2 2v2"/>', { w: 1.9 }),
+  archive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>', { w: 1.9 }),
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
@@ -289,7 +291,16 @@ function renderTabs() {
       srow.appendChild(b);
     };
     mk('', 'All', c.auto || 0);
-    for (const [k, label] of AUTO_SUBS) if (sub[k]) mk(k, label, sub[k]);
+    // Label buckets via overlay subLabels first, then built-in defaults, then a humanized key.
+    const labelMap = Object.assign({}, Object.fromEntries(AUTO_SUBS), (CFG && CFG.subLabels) || {});
+    const humanize = (k) => k.replace(/(^|[-_])(\w)/g, (m, s, ch) => (s ? ' ' : '') + ch.toUpperCase());
+    const order = [...AUTO_SUBS.map(([k]) => k), ...Object.keys((CFG && CFG.subLabels) || {}), ...Object.keys(sub)];
+    const seen = new Set();
+    for (const k of order) {
+      if (seen.has(k) || !sub[k]) continue;
+      seen.add(k);
+      mk(k, labelMap[k] || humanize(k), sub[k]);
+    }
   }
 }
 function timeGroup(ms) {
@@ -454,7 +465,7 @@ async function openPipelines() {
     sub: [it.from, it.date && it.date.slice(0, 10)].filter(Boolean).join(' · '),
     flag: it.priority || it.action || '',
   })));
-  if (!d.brainDir) { const w = document.createElement('p'); w.className = 'empty'; w.textContent = 'No company-brain clone found on this box.'; body.appendChild(w); }
+  if (!d.brainDir) { const w = document.createElement('p'); w.className = 'empty'; w.textContent = 'No notes/brain folder found (set BRAIN_DIR).'; body.appendChild(w); }
 }
 /* ---------- Linear board (kanban of all INC tickets by status) ---------- */
 // A GLOBAL view of every open ticket grouped by workflow state — unlike the
@@ -1262,7 +1273,14 @@ function addUser(text, images) {
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   const body = document.createElement('div'); body.className = 'body';
-  if (images && images.length) { const r = document.createElement('div'); r.className = 'umgs'; images.forEach((p) => { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }); body.appendChild(r); }
+  if (images && images.length) {
+    const r = document.createElement('div'); r.className = 'umgs';
+    images.forEach((p) => {
+      if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
+      else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(p.split('/').pop())}</span>`; r.appendChild(fc); }
+    });
+    body.appendChild(r);
+  }
   if (text) { const t = document.createElement('div'); t.textContent = text; body.appendChild(t); }
   wrap.appendChild(body);
   const acts = document.createElement('div'); acts.className = 'msgActions';
@@ -1271,7 +1289,7 @@ function addUser(text, images) {
   acts.appendChild(cpBtn); wrap.appendChild(acts);
   $('messages').appendChild(wrap);
 }
-function beginTurn(text, images) { addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
+function beginTurn(text, images) { clearWaitingCard(); addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
 
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
@@ -1304,6 +1322,8 @@ function onServer(o) {
   else if (o.type === 'notice') { if (!live) startAssistant(); const n = document.createElement('div'); n.className = 'notice'; n.textContent = o.text; live.body.appendChild(n); maybeScroll(); }
   else if (o.type === 'error') { if (!live) startAssistant(); clearLoading(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.msg; live.body.appendChild(e); }
   else if (o.type === 'blocked') renderBlocked(o);
+  else if (o.type === 'waiting') renderWaiting(o);
+  else if (o.type === 'waiting_clear') clearWaitingCard();
   else if (o.type === 'done') finishTurn(o);
 }
 function onSync(o) {
@@ -1319,6 +1339,18 @@ function onSync(o) {
   if (live && live.body && live.body.parentElement) live.body.parentElement.remove();
   live = null; killGhostIndicators();
   if (o.running) {
+    // Reopening/reloading a session whose latest turn is still in-flight would render
+    // that turn TWICE: REST /history already drew the in-flight turn's assistant blocks
+    // (they're flushed to the JSONL as the turn runs), and the live path below redraws
+    // the SAME turn from curParts. When history is present (cur.hadHistory), drop its
+    // copy of the in-flight assistant turn — every node after the last user bubble — so
+    // only the live rebuild remains. The user bubble itself stays (history owns it).
+    if (cur.hadHistory) {
+      const kids = [...$('messages').children];
+      let lastUser = -1;
+      kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
+      if (lastUser >= 0) for (let i = kids.length - 1; i > lastUser; i--) kids[i].remove();
+    }
     if (!cur.hadHistory && (o.curUser || (o.curUserImages || []).length)) addUser(o.curUser, o.curUserImages);  // existing sessions already have it in history
     startAssistant();
     if (Array.isArray(o.curParts) && o.curParts.length) {
@@ -1405,6 +1437,17 @@ function submit() {
   const text = $('input').value.trim();
   if (!text && !images.length) return;
   hideSuggest();
+  // A pending question/plan is up → a typed reply is a free-text ("Other") answer to it.
+  if (waitingState && waitingState.answerable) {
+    if (!text) return;
+    if (!(waitingState.freeTextIndex >= 1)) { toast('Tap an option above, or answer on desktop'); return; }
+    const ft = waitingState.freeTextIndex; waitingState = null;   // optimistic
+    $('input').value = ''; autoGrow(); addUser(text, []);
+    try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: { text, freeTextIndex: ft } })); } catch {}
+    document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
+    refreshButton(); scrollBottom();
+    return;
+  }
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
   $('input').value = ''; autoGrow(); images = []; renderAttach();
@@ -1430,6 +1473,58 @@ function renderBlocked(o) {
   box.appendChild(msg); box.appendChild(btn);
   live.body.appendChild(box); maybeScroll();
 }
+// A pending interactive prompt (AskUserQuestion / plan approval / permission). These never reach
+// the JSONL until answered, so the server detects the parked state + scrapes the TUI and pushes it
+// here; tapping an option (or typing a reply) injects the answer back into the live session.
+function clearWaitingCard() {
+  waitingState = null;
+  document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
+  $('input').placeholder = cur.mode === 'bash' ? 'Run a command on the box…' : 'Message…';
+  refreshButton();
+}
+function renderWaiting(o) {
+  clearWaitingCard();                 // never stack two cards
+  if (!live) startAssistant();
+  clearLoading(); running = false; killGhostIndicators();
+  waitingState = { answerable: !!o.answerable, freeTextIndex: null };
+  const card = document.createElement('div'); card.className = 'waitingCard';
+  const p = o.prompt;
+  if (p && Array.isArray(p.options) && p.options.length) {
+    if (p.header) { const h = document.createElement('div'); h.className = 'waitHeader'; h.textContent = p.header; card.appendChild(h); }
+    const q = document.createElement('div'); q.className = 'waitQuestion';
+    q.textContent = p.title || (p.kind === 'plan' ? 'Review the plan and choose how to proceed' : 'Claude is asking a question');
+    card.appendChild(q);
+    const ft = p.options.find((x) => x.freeText); if (ft) waitingState.freeTextIndex = ft.n;
+    for (const opt of p.options) {
+      if (opt.freeText) continue;                          // the composer is the free-text path
+      if (/^chat about this$/i.test(opt.label)) continue;  // TUI escape, not a real answer
+      const btn = document.createElement('button'); btn.className = 'waitOpt';
+      btn.innerHTML = `<span class="waitOptLabel">${esc(opt.label)}</span>` + (opt.desc ? `<span class="waitOptDesc">${esc(opt.desc)}</span>` : '');
+      if (o.answerable) btn.onclick = () => chooseWaiting(opt.n, btn); else btn.disabled = true;
+      card.appendChild(btn);
+    }
+    const hint = document.createElement('div'); hint.className = 'waitHint';
+    hint.textContent = o.answerable ? 'or type your own answer below ↓' : 'This session is running on another device — answer it there.';
+    card.appendChild(hint);
+  } else {
+    const q = document.createElement('div'); q.className = 'waitQuestion';
+    q.textContent = '⏸ Claude is waiting for your input' + (o.waitingFor ? ` (${o.waitingFor})` : '') + '.';
+    card.appendChild(q);
+    const hint = document.createElement('div'); hint.className = 'waitHint';
+    hint.textContent = o.answerable ? 'Type a reply below to continue.' : 'Open this chat on desktop to answer.';
+    card.appendChild(hint);
+  }
+  live.body.appendChild(card); maybeScroll();
+  if (o.answerable) $('input').placeholder = 'Type your answer…';
+  refreshButton();
+}
+function chooseWaiting(index, btn) {
+  if (!waitingState || !waitingState.answerable) return;
+  document.querySelectorAll('.waitOpt').forEach((b) => { b.disabled = true; b.classList.remove('chosen'); });
+  if (btn) btn.classList.add('chosen');
+  waitingState = null;   // optimistic; server confirms with waiting_clear
+  try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: { index } })); } catch {}
+}
 function stopCurrent() {
   try { ws.send(JSON.stringify({ type: 'cancel', key: cur.key })); } catch {}
   if (live) { clearLoading(); live.textEl.classList.remove('cursor'); if (live.raw) live.textEl.innerHTML = md(live.raw); }
@@ -1447,8 +1542,18 @@ $('copyInputBtn').onclick = () => {
     document.execCommand('copy'); toast('Copied!');
   });
 };
-// Enter inserts a newline (default). Send only via the ↑ button, or ⌘/Ctrl+Enter on a hardware keyboard.
-$('input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } });
+// Enter behavior: on desktop (mouse/fine pointer) Enter sends, Shift+Enter inserts a newline.
+// On mobile (coarse/touch pointer) Enter inserts a newline (default); send via the ↑ button.
+// ⌘/Ctrl+Enter always sends on either. IME composition (e.g. Chinese) is never treated as send.
+const isTouchDevice = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+$('input').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  if (e.isComposing || e.keyCode === 229) return;            // mid-IME-composition: let it confirm, don't send
+  if (e.metaKey || e.ctrlKey) { e.preventDefault(); submit(); return; }  // ⌘/Ctrl+Enter sends anywhere
+  if (isTouchDevice) return;                                 // mobile: Enter = newline (default)
+  if (e.shiftKey) return;                                    // desktop: Shift+Enter = newline (default)
+  e.preventDefault(); submit();                              // desktop: Enter = send
+});
 
 /* textarea autogrow + @// triggers */
 function autoGrow() { const t = $('input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.38) + 'px'; }
@@ -1486,55 +1591,76 @@ $('agentChip').onclick = () => {
   ]);
 };
 
-/* ---------- attach images ---------- */
+/* ---------- attach files (images + any file type) ---------- */
 // Straight to the native iOS picker (it already offers Take Photo / Photo Library / Choose Files).
 $('attachBtn').onclick = () => $('fileInput').click();
-$('fileInput').onchange = (e) => uploadImages(e.target.files);
-$('camInput').onchange = (e) => uploadImages(e.target.files);
-// Desktop web: attach a screenshot by pasting (Cmd/Ctrl+V) or dragging it onto the page.
-// On iOS the native picker covers this, but these are the natural gestures on a laptop.
+$('fileInput').onchange = (e) => uploadFiles(e.target.files);
+$('camInput').onchange = (e) => uploadFiles(e.target.files);
+const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i;
+const isImageFile = (f) => /^image\//.test((f && f.type) || '') || IMG_EXT_RE.test((f && f.name) || '');
+const isImagePath = (p) => IMG_EXT_RE.test(p || '');
+// Desktop web: attach by pasting (Cmd/Ctrl+V) or dragging onto the page. Accepts ANY file type.
 // Works for both ClipboardEvent.clipboardData and DragEvent.dataTransfer (same DataTransfer API).
-function imageFilesFrom(dt) {
+function filesFrom(dt) {
   const out = [];
   for (const it of (dt && dt.items) || []) {
-    if (it.kind === 'file' && /^image\//.test(it.type)) { const f = it.getAsFile(); if (f) out.push(f); }
+    if (it.kind === 'file') { const f = it.getAsFile(); if (f) out.push(f); }
   }
-  if (!out.length && dt && dt.files) for (const f of dt.files) if (/^image\//.test(f.type)) out.push(f);
+  if (!out.length && dt && dt.files) for (const f of dt.files) out.push(f);
   return out;
 }
 $('input').addEventListener('paste', (e) => {
-  const imgs = imageFilesFrom(e.clipboardData);
-  if (!imgs.length) return;          // plain text/other paste → let it through unchanged
-  e.preventDefault();                // don't also dump the raw image as junk text
-  uploadImages(imgs);
+  const files = filesFrom(e.clipboardData);
+  if (!files.length) return;          // plain text/other paste → let it through unchanged
+  e.preventDefault();                // don't also dump raw file bytes as junk text
+  uploadFiles(files);
 });
-// Drag a file anywhere over the window: highlight the composer, drop to attach. Window-scoped
-// so a near-miss drop can't make the browser navigate away to the file.
+// Full-screen drop zone: drag a file anywhere over the window → overlay appears → drop to attach.
+// Window-scoped so a near-miss drop can't make the browser navigate away to the file.
 const dragHasFiles = (e) => { const t = e.dataTransfer && e.dataTransfer.types; return !!t && [...t].includes('Files'); };
 let dragDepth = 0;
-const setDragHint = (on) => $('composer').classList.toggle('dragover', on);
+const setDragHint = (on) => { const o = $('dropOverlay'); if (o) o.classList.toggle('show', on); };
 window.addEventListener('dragenter', (e) => { if (dragHasFiles(e)) { dragDepth++; setDragHint(true); } });
 window.addEventListener('dragover', (e) => { if (dragHasFiles(e)) e.preventDefault(); });
 window.addEventListener('dragleave', (e) => { if (dragHasFiles(e)) { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) setDragHint(false); } });
 window.addEventListener('drop', (e) => {
   if (!dragHasFiles(e)) return;
   e.preventDefault(); dragDepth = 0; setDragHint(false);
-  const imgs = imageFilesFrom(e.dataTransfer);
-  if (imgs.length) uploadImages(imgs);
+  const files = filesFrom(e.dataTransfer);
+  if (files.length) uploadFiles(files);
 });
-async function uploadImages(files) {
+// `images` is the composer's attachment buffer — images AND other files. Each entry:
+// { path, url (object-url preview for images, '' otherwise), name, isImage }.
+async function uploadFiles(files) {
   if (!files || !files.length) return;
-  const fd = new FormData(); [...files].slice(0, 6).forEach((f) => fd.append('images', f));
+  const picked = [...files].slice(0, 6);
+  const fd = new FormData(); picked.forEach((f) => fd.append('images', f));
   toast('uploading…');
   try {
     const d = await (await api('/api/upload', { method: 'POST', body: fd })).json();
-    d.paths.forEach((p, i) => images.push({ path: p, url: URL.createObjectURL(files[i]) }));
+    d.paths.forEach((p, i) => {
+      const f = picked[i]; const img = isImageFile(f);
+      images.push({ path: p, url: img ? URL.createObjectURL(f) : '', name: (f && f.name) || p.split('/').pop(), isImage: img });
+    });
     renderAttach();
   } catch { toast('upload failed'); }
 }
 function renderAttach() {
   const row = $('attachRow'); row.innerHTML = ''; row.classList.toggle('hidden', !images.length);
-  images.forEach((im, i) => { const t = document.createElement('div'); t.className = 'thumb'; t.innerHTML = `<img src="${im.url}"><div class="x">✕</div>`; t.querySelector('img').onclick = () => window.openImageLightbox(images.map((x) => x.url), i); t.querySelector('.x').onclick = () => { images.splice(i, 1); renderAttach(); }; row.appendChild(t); });
+  images.forEach((im, i) => {
+    const t = document.createElement('div');
+    if (im.isImage) {
+      t.className = 'thumb';
+      t.innerHTML = `<img src="${im.url}"><div class="x">✕</div>`;
+      t.querySelector('img').onclick = () => { const imgs = images.filter((x) => x.isImage); window.openImageLightbox(imgs.map((x) => x.url), imgs.indexOf(im)); };
+    } else {
+      t.className = 'thumb fileThumb';
+      const ext = ((im.name || '').split('.').pop() || '').toUpperCase();
+      t.innerHTML = `<span class="fileThumbIcon">${ICONS.file}</span><span class="fileThumbName">${esc(im.name || 'file')}</span><span class="fileThumbExt">${esc(ext.slice(0, 4)) || 'FILE'}</span><div class="x">✕</div>`;
+    }
+    t.querySelector('.x').onclick = () => { images.splice(i, 1); renderAttach(); };
+    row.appendChild(t);
+  });
   updateSend();
 }
 
@@ -1556,6 +1682,8 @@ async function onType() {
 // and custom commands are loaded from /api/commands?agent=...
 const BUILTIN_CMDS = {
   claude: [
+    { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
+    { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Claude model', action: 'model' },
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
@@ -1679,6 +1807,7 @@ function removeToken(tok) {
 function runSlashCommand(cmd, tok) {
   removeToken(tok);
   $('input').blur();
+  if (cmd.action === 'accounts') return openAccounts();
   if (cmd.action === 'model') return openModelSheet();
   if (cmd.action === 'theme') return openThemeSheet();
   if (cmd.action === 'approvals') return openApprovalsSheet();
@@ -1866,9 +1995,11 @@ $('myMsgsBtn').onclick = async () => {
    voice button) handles the reply. Back returns to the chat. Items are shown as clean cards. */
 // Paint bell icon (attnBtn has a badge child, so we use insertAdjacentHTML not data-icon/paintIcons)
 $('attnBtn').insertAdjacentHTML('afterbegin', ICONS.bell);
-$('clearBtn').onclick = () => {
-  if (!confirm('Clear this conversation?\n\nThis sends /clear to Claude — it resets context but keeps the chat visible here.')) return;
-  enqueueText('/clear', { displayText: '/clear' });
+$('archiveBtn').onclick = async () => {
+  if (!cur.id) return toast('Nothing to archive yet');
+  if (!confirm(`Archive "${cur.title || 'this chat'}"?\n\nIt'll be hidden from your list (and from pickup). Find it later under the Archived filter.`)) return;
+  try { await api(`/api/sessions/${cur.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
+  toast('🗄 Archived'); if (ws) ws.close(); openSessions();
 };
 $('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; showAttention(); };
 $('copyChatBtn').onclick = () => {
@@ -2149,6 +2280,157 @@ function openSheet(title, rows) {
 function closeSheet() { $('sheet').classList.add('hidden'); }
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
 
+/* ---------- Claude accounts (login / pool / failover) ---------- */
+function closeAccounts() { $('accountsOverlay').classList.add('hidden'); }
+$('accountsClose').onclick = closeAccounts;
+$('accountsAdd').onclick = () => renderAddAccount();
+
+async function openAccounts() {
+  const ov = $('accountsOverlay'); ov.classList.remove('hidden'); paintIcons(ov);
+  await renderAccountsList();
+}
+
+function acctBadge(a) {
+  if (!a.usable) return '<span class="acctBadge warn">no creds</span>';
+  if (a.cooling) {
+    const mins = Math.max(0, Math.round((a.until - Date.now() / 1000) / 60));
+    return `<span class="acctBadge cool">cooling ${mins < 90 ? mins + 'm' : (mins / 60).toFixed(1) + 'h'}</span>`;
+  }
+  return '<span class="acctBadge ok">available</span>';
+}
+
+// Live usage bar + a deep-link to manage/buy usage (payment is Anthropic-hosted).
+function usageHtml(a, manage) {
+  const url = a.type === 'apikey' ? manage.console : manage.subscription;
+  const link = `<a class="acctUsageLink" target="_blank" rel="noopener" href="${esc(url)}">Manage / buy usage ↗</a>`;
+  const u = a.utilization;
+  if (a.type === 'apikey') return `<div class="acctUsage"><span class="muted">metered API key</span>${link}</div>`;
+  if (!u || u.max == null) return `<div class="acctUsage"><span class="muted">usage: tap ↻ to load</span>${link}</div>`;
+  const lvl = u.max >= 92 ? 'hi' : (u.max >= 70 ? 'mid' : 'lo');
+  const parts = [];
+  if (u.fiveHour != null) parts.push(`5h ${u.fiveHour}%`);
+  if (u.sevenDay != null) parts.push(`7d ${u.sevenDay}%`);
+  if (u.opus != null) parts.push(`opus ${u.opus}%`);
+  const extra = u.extraUsageEnabled ? ' · extra usage on' : '';
+  return `<div class="acctUsage">
+    <div class="acctBar"><div class="acctBarFill ${lvl}" style="width:${Math.min(100, u.max)}%"></div></div>
+    <div class="acctUsageMeta"><span>${parts.join(' · ') || (u.max + '%')}${extra}</span>${link}</div></div>`;
+}
+
+async function renderAccountsList() {
+  const body = $('accountsBody'); body.innerHTML = '<div class="histLoader">Loading…</div>';
+  let data;
+  try { data = await (await api('/api/accounts')).json(); }
+  catch { body.innerHTML = '<div class="histLoader">Failed to load accounts</div>'; return; }
+  body.innerHTML = '';
+  body.dataset.consoleKeysUrl = data.consoleKeysUrl || '';
+  const manage = data.manageUsage || { subscription: 'https://claude.ai/settings/usage', console: 'https://console.anthropic.com/settings/billing' };
+  if (!data.installed) {
+    const n = document.createElement('div'); n.className = 'acctNote';
+    n.innerHTML = 'Account pooling not activated — it needs an account broker on this box (set <code>CC_BROKER_JS</code>). Single account works fine without it.';
+    body.appendChild(n);
+  }
+  const intro = document.createElement('div'); intro.className = 'acctIntro';
+  intro.innerHTML = '<span>New sessions go to whichever account has headroom; one near its limit is skipped before it blocks.</span> <button id="acctRefreshUsage" class="chip small">↻ Usage</button>';
+  body.appendChild(intro);
+  intro.querySelector('#acctRefreshUsage').onclick = async (e) => {
+    const b = e.target; b.disabled = true; b.textContent = '↻ …';
+    try { await api('/api/accounts/refresh-usage', { method: 'POST' }); } catch {}
+    renderAccountsList();
+  };
+  for (const a of (data.accounts || [])) {
+    const card = document.createElement('div'); card.className = 'acctCard' + (a.primary ? ' primary' : '');
+    card.innerHTML = `<div class="acctTop"><div class="acctName">${a.primary ? '★ ' : ''}${esc(a.label || a.id)} <span class="acctType">${a.type === 'apikey' ? 'API key' : 'subscription'}</span></div>${acctBadge(a)}</div>
+      <div class="acctMeta">${esc(a.email || a.id)} · <span class="muted">${esc(a.configDir)}</span></div>
+      ${usageHtml(a, manage)}
+      <div class="acctActions"></div>`;
+    const acts = card.querySelector('.acctActions');
+    const btn = (label, fn, cls = '') => { const b = document.createElement('button'); b.className = 'chip small ' + cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
+    if (!a.primary && a.usable) btn('Make primary', () => acctAction('/api/accounts/primary', { id: a.id }, 'Primary set'));
+    if (a.cooling) btn('Clear cooldown', () => acctAction('/api/accounts/clear', { id: a.id }, 'Cooldown cleared'));
+    else if (a.usable) btn('Rest 90m', () => acctAction('/api/accounts/cooldown', { id: a.id, minutes: 90 }, 'Resting account'));
+    if (a.id !== 'mine' && !a.primary) btn('Remove', () => { if (confirm(`Remove account "${a.label || a.id}"? (its credentials dir is left on disk)`)) acctAction('/api/accounts/remove', { id: a.id }, 'Removed'); }, 'danger');
+    body.appendChild(card);
+  }
+}
+
+async function acctAction(path, payload, okMsg) {
+  try {
+    const j = await (await api(path, { method: 'POST', body: JSON.stringify(payload) })).json();
+    if (j.error) return toast(j.error);
+    toast(okMsg); renderAccountsList();
+  } catch { toast('Action failed'); }
+}
+
+function renderAddAccount() {
+  const body = $('accountsBody');
+  const keysUrl = body.dataset.consoleKeysUrl || 'https://console.anthropic.com/settings/keys';
+  body.innerHTML = `<div class="acctForm">
+    <div class="acctTabs"><button class="acctTab sel" data-tab="oauth">Claude subscription</button><button class="acctTab" data-tab="apikey">API key</button></div>
+    <div id="acctPaneOauth" class="acctPane">
+      <label class="acctLbl">Account name<input id="oaName" class="acctInput" placeholder="e.g. friend" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <label class="acctLbl">Email <span class="muted">(optional — pre-fills the login)</span><input id="oaEmail" class="acctInput" placeholder="friend@example.com" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <button id="oaStart" class="btn primary">Get login link</button>
+      <div id="oaStep2" class="hidden">
+        <div class="acctNote">1. Open the link and sign in <b>as that account</b> — use a private/incognito window if you're already logged in as someone else.<br>2. Authorize, then copy the code it shows and paste it below.</div>
+        <a id="oaLink" class="acctLink" target="_blank" rel="noopener">Open Claude login ↗</a>
+        <label class="acctLbl">Paste the code (looks like <code>code#state</code>)<textarea id="oaCode" class="acctInput" rows="3" placeholder="paste here" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea></label>
+        <button id="oaComplete" class="btn primary">Complete login</button>
+      </div>
+    </div>
+    <div id="acctPaneApikey" class="acctPane hidden">
+      <label class="acctLbl">Account name<input id="akName" class="acctInput" placeholder="e.g. work-api" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <label class="acctLbl">API key<input id="akKey" class="acctInput" type="password" placeholder="sk-ant-…" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <a class="acctLink" target="_blank" rel="noopener" href="${esc(keysUrl)}">Create a key on the Anthropic Console ↗</a>
+      <div class="acctNote">API-key accounts bill per token (metered), unlike a Max/Pro subscription.</div>
+      <button id="akSave" class="btn primary">Save API key</button>
+    </div>
+    <button id="acctBack" class="chip small acctBack">← Back to accounts</button></div>`;
+  body.querySelectorAll('.acctTab').forEach((t) => t.onclick = () => {
+    body.querySelectorAll('.acctTab').forEach((x) => x.classList.toggle('sel', x === t));
+    $('acctPaneOauth').classList.toggle('hidden', t.dataset.tab !== 'oauth');
+    $('acctPaneApikey').classList.toggle('hidden', t.dataset.tab !== 'apikey');
+  });
+  $('acctBack').onclick = renderAccountsList;
+  let flowId = null;
+  $('oaStart').onclick = async () => {
+    const id = $('oaName').value.trim(); if (!id) return toast('Enter an account name');
+    const b = $('oaStart'); b.disabled = true; b.textContent = 'Getting link…';
+    try {
+      const j = await (await api('/api/accounts/oauth/start', { method: 'POST', body: JSON.stringify({ id, label: id, email: $('oaEmail').value.trim() }) })).json();
+      if (j.error) return toast(j.error);
+      flowId = j.flowId; $('oaLink').href = j.url; $('oaStep2').classList.remove('hidden');
+      toast('Open the link, then paste the code back');
+    } catch { toast('Failed to start login'); }
+    finally { b.disabled = false; b.textContent = 'Get login link'; }
+  };
+  $('oaComplete').onclick = async () => {
+    const code = $('oaCode').value.trim(); if (!code) return toast('Paste the code first');
+    if (!flowId) return toast('Start the login first');
+    const b = $('oaComplete'); b.disabled = true; b.textContent = 'Finishing…';
+    try {
+      const j = await (await api('/api/accounts/oauth/complete', { method: 'POST', body: JSON.stringify({ flowId, code }) })).json();
+      if (j.error) return toast(j.error);
+      const sub = j.subscriptionType ? j.subscriptionType.toUpperCase() : 'plan unknown';
+      toast(`Logged in${j.email ? ' as ' + j.email : ''} · ${sub}`);
+      if (j.subscriptionType && j.subscriptionType !== 'max') setTimeout(() => toast('Heads up: not a Max plan'), 1500);
+      renderAccountsList();
+    } catch { toast('Login failed'); }
+    finally { b.disabled = false; b.textContent = 'Complete login'; }
+  };
+  $('akSave').onclick = async () => {
+    const id = $('akName').value.trim(), apiKey = $('akKey').value.trim();
+    if (!id) return toast('Enter an account name'); if (!apiKey) return toast('Paste an API key');
+    const b = $('akSave'); b.disabled = true; b.textContent = 'Saving…';
+    try {
+      const j = await (await api('/api/accounts/apikey', { method: 'POST', body: JSON.stringify({ id, label: id, apiKey }) })).json();
+      if (j.error) return toast(j.error);
+      toast(j.validated ? 'API key saved & validated' : 'API key saved'); renderAccountsList();
+    } catch { toast('Save failed'); }
+    finally { b.disabled = false; b.textContent = 'Save API key'; }
+  };
+}
+
 /* ---------- voice (bilingual EN+中文, realtime streaming STT) ---------- */
 // Streams mic PCM to our /stt relay → ElevenLabs Scribe v2 Realtime → live partial +
 // committed transcripts. Each audio chunk is sent ONCE (cheap, O(n)), and committed
@@ -2349,6 +2631,20 @@ async function stopRec(useIt) {
     requestAnimationFrame(() => { track.scrollLeft = (idx || 0) * track.clientWidth; updateCount(); });
   }
   function close() { lb.classList.add('hidden'); track.innerHTML = ''; track.classList.remove('nozoom'); }
+  function nav(dir) {
+    if (lb.classList.contains('hidden') || srcs.length < 2) return;
+    const w = Math.max(1, track.clientWidth);
+    const i = Math.round(track.scrollLeft / w);
+    const next = Math.max(0, Math.min(srcs.length - 1, i + dir));
+    track.scrollTo({ left: next * w, behavior: 'smooth' });
+  }
+  // Desktop web keyboard nav: Esc dismisses, ←/→ step through the thread's gallery.
+  document.addEventListener('keydown', (e) => {
+    if (lb.classList.contains('hidden')) return;
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); nav(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); nav(1); }
+  });
   function updateCount() { const i = Math.round(track.scrollLeft / Math.max(1, track.clientWidth)); count.textContent = srcs.length > 1 ? `${i + 1} / ${srcs.length}` : ''; }
   track.addEventListener('scroll', () => { if (!track.classList.contains('nozoom')) updateCount(); });
   function attachZoom(img) {
