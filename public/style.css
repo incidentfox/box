@@ -675,3 +675,7 @@ textarea.acctInput { resize: vertical; }
 
 /* paste-from-clipboard button in the login form */
 .acctPaste { display: inline-block; margin-top: 8px; }
+
+/* readonly code display in the login form — never raises the keyboard */
+.acctCodeView { font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; opacity: .85; margin-top: 8px; }
+.acctCodeView:focus { outline: none; }

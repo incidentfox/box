@@ -2499,8 +2499,9 @@ function renderAddAccount() {
       <div id="oaStep2" class="hidden">
         <div class="acctNote">1. Open the link and sign in <b>as that account</b> — use a private/incognito window if you're already logged in as someone else.<br>2. Authorize, then copy the code it shows and paste it below.</div>
         <a id="oaLink" class="acctLink" target="_blank" rel="noopener">Open Claude login ↗</a>
-        <label class="acctLbl">Paste the code (looks like <code>code#state</code>)<textarea id="oaCode" class="acctInput" rows="3" placeholder="paste here" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea></label>
-        <button id="oaPaste" class="chip small acctPaste">📋 Paste from clipboard</button>
+        <div class="acctLbl">Paste the code (looks like <code>code#state</code>) — no typing needed</div>
+        <button id="oaPaste" class="btn primary">📋 Paste code from clipboard</button>
+        <textarea id="oaCode" class="acctInput acctCodeView" rows="3" readonly placeholder="your pasted code shows here"></textarea>
         <button id="oaComplete" class="btn primary">Complete login</button>
       </div>
     </div>
@@ -2519,13 +2520,21 @@ function renderAddAccount() {
     $('acctPaneApikey').classList.toggle('hidden', t.dataset.tab !== 'apikey');
   });
   $('acctBack').onclick = renderAccountsList;
-  // Paste straight from the clipboard — no keyboard, no long-press fiddling on iOS.
+  // Paste straight from the clipboard — no keyboard. The code field is readonly so
+  // tapping it never raises the iOS keyboard; if the clipboard API is blocked we
+  // un-lock the field and focus it so the user can long-press → Paste (keyboard only
+  // as a last resort).
   const pasteInto = async (elId) => {
+    const el = $(elId);
     try {
       const t = await navigator.clipboard.readText();
-      if (!t || !t.trim()) return toast('Clipboard is empty');
-      $(elId).value = t.trim(); toast('Pasted');
-    } catch { toast('Clipboard blocked — long-press the field and Paste'); }
+      if (!t || !t.trim()) return toast('Clipboard is empty — copy the code first');
+      el.removeAttribute('readonly'); el.value = t.trim(); el.setAttribute('readonly', '');
+      toast('Pasted ✓');
+    } catch {
+      el.removeAttribute('readonly'); el.focus();
+      toast('Long-press the field and tap Paste');
+    }
   };
   $('oaPaste').onclick = () => pasteInto('oaCode');
   $('akPaste').onclick = () => pasteInto('akKey');
