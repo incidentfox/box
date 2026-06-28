@@ -10,7 +10,8 @@ const DEFAULT_SETTINGS = {
   claude: { model: 'opus', effort: 'xhigh' },
 };
 const AGENT_LABEL = { claude: 'Claude', codex: 'Codex' };
-let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: LS.getItem('box_agent') || 'claude', parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, claude: { ...DEFAULT_SETTINGS.claude } } };
+const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000 };
+let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: LS.getItem('box_agent') || 'claude', parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -509,11 +510,39 @@ async function doArchive(s, on) {
 }
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
+function fmtTokens(n) {
+  n = Math.max(0, Math.round(Number(n) || 0));
+  if (n >= 1000000) return (n / 1000000).toFixed(n < 10000000 ? 1 : 0).replace(/\.0$/, '') + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'k';
+  return String(n);
+}
+function currentContext() {
+  const agent = cur.agent === 'codex' ? 'codex' : 'claude';
+  const cx = cur.context || {};
+  const win = Number(cx.windowTokens) || DEFAULT_CONTEXT_WINDOW[agent];
+  const used = Math.max(0, Math.round(Number(cx.usedTokens) || 0));
+  return {
+    usedTokens: used,
+    windowTokens: win,
+    percent: win ? Math.min(999, Math.round((used / win) * 100)) : 0,
+    source: cx.source || 'estimated',
+  };
+}
+function renderContextMeter() {
+  const el = $('contextMeter'); if (!el) return;
+  const cx = currentContext();
+  el.classList.toggle('warn', cx.percent >= 70 && cx.percent < 90);
+  el.classList.toggle('hi', cx.percent >= 90);
+  const estimated = cx.source !== 'reported';
+  el.title = `${cx.usedTokens.toLocaleString()} / ${cx.windowTokens.toLocaleString()} tokens${estimated ? ' (estimated)' : ''}`;
+  el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
+}
 $('newBtn').onclick = () => openSheet('New chat', [
   { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
   { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
 ]);
 $('themeBtn').onclick = toggleTheme;
+if ($('contextMeter')) $('contextMeter').onclick = openStatusSheet;
 
 /* ---------- session search — full-text across ALL chats (title/summary/cwd/transcript)
    via the sessiongrep CLI on the server. Only surfaces chats this box can actually open. */
@@ -1344,11 +1373,12 @@ function connectWS() {
 }
 async function openChat(s) {
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), firstUser: null, hadHistory: !!s.id };
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   $('chatTitle').textContent = cur.title;
+  renderContextMeter();
   $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
@@ -1360,6 +1390,7 @@ async function openChat(s) {
     const h = await (await api(`/api/sessions/${s.id}/history`)).json();
     cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
     cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
+    cur.context = h.context || cur.context; renderContextMeter();
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
     for (const m of h.messages) addHistMessage(m);
     scrollBottom();
@@ -1372,6 +1403,7 @@ async function openChat(s) {
     scrollBottom();
   } else {
     addNote(cur.parentId ? `Forked from ${cur.parentTitle || cur.parentId.slice(0, 8)}. The first turn includes parent context.` : `New ${cur.agent === 'codex' ? 'Codex' : 'Claude'} chat in ${shortCwd(cur.cwd)} — say anything to begin.`);
+    renderContextMeter();
   }
   connectWS();
   refreshButton();
@@ -1744,6 +1776,7 @@ function onServer(o) {
   if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', []); return; }
   if (o.type === 'queue') return renderQueue(o.queue);
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
+  if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
   if (o.type === 'turn_start') return beginTurn(o.text, o.images);
   if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); return; }
   if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
@@ -1782,6 +1815,7 @@ function onSync(o) {
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
   if (o.title && cur.title === 'New chat') { cur.title = o.title; $('chatTitle').textContent = o.title; }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
+  if (o.context) { cur.context = o.context; renderContextMeter(); }
   // Remove stale live bubble from DOM before recreating it below (prevents duplicate
   // assistant bubbles when the WS reconnects mid-stream and onSync fires again).
   if (live && live.body && live.body.parentElement) live.body.parentElement.remove();
@@ -2040,6 +2074,7 @@ function setAgent(agent) {
   cur.agent = agent === 'codex' ? 'codex' : 'claude';
   LS.setItem('box_agent', cur.agent);
   refreshAgentChip();
+  renderContextMeter();
 }
 $('agentChip').onclick = () => {
   const rows = [
@@ -2289,10 +2324,12 @@ async function forkCurrent() {
 function openStatusSheet() {
   cur.settings = normalizeSettings(cur.settings);
   const cfg = cur.agent === 'codex' ? cur.settings.codex : cur.settings.claude;
+  const cx = currentContext();
   const rows = [
     { ic: '', label: 'Thread', desc: cur.id || 'New unsaved chat', fn: () => {} },
     { ic: '', label: 'Agent', desc: cur.agent === 'codex' ? 'Codex' : 'Claude', fn: () => {} },
     { ic: '', label: 'State', desc: running ? 'Running' : 'Idle', fn: () => {} },
+    { ic: '', label: 'Context', desc: `${cx.percent}% · ${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${cx.source !== 'reported' ? ' est' : ''}`, fn: () => {} },
     { ic: '', label: 'Workspace', desc: shortCwd(cur.cwd || defaultCwd), fn: () => {} },
   ];
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });

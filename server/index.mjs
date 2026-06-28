@@ -539,7 +539,7 @@ function parseSessiongrep(out) {
 }
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveCodex = (state) => { try { writeFileSync(CODEX_FILE, JSON.stringify(state, null, 2)); } catch {} };
+const saveCodex = (state) => writeJsonAtomic(CODEX_FILE, state);
 // Delegation ledger: INC-id (e.g. "INC-917") -> array of delegation records, oldest→newest.
 // The LAST entry is the current/primary delegation (the session the user delegated to most
 // recently); the history is kept so a re-delegated ticket still shows every owner.
@@ -557,6 +557,73 @@ function normalizeSettings(settings = {}) {
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
 }
+const DEFAULT_CONTEXT_WINDOWS = {
+  codex: 258400,
+  claude: 1000000,
+};
+function modelContextWindow(agent, model) {
+  const m = String(model || '').toLowerCase();
+  if (agent === 'codex') return DEFAULT_CONTEXT_WINDOWS.codex;
+  if (!m) return DEFAULT_CONTEXT_WINDOWS.claude;
+  if (m.includes('opus-4-8') || m.includes('opus')) return 1000000;
+  return 200000;
+}
+const sumNums = (...vals) => vals.reduce((n, v) => n + (Number.isFinite(Number(v)) ? Number(v) : 0), 0);
+function normalizeContext({ agent, model, usedTokens, windowTokens, source = 'estimated', updatedAt = Date.now() } = {}) {
+  const win = Number(windowTokens) || modelContextWindow(agent, model);
+  const used = Math.max(0, Math.round(Number(usedTokens) || 0));
+  return {
+    agent: agent || 'claude',
+    model: model || '',
+    usedTokens: used,
+    windowTokens: win,
+    percent: win ? Math.min(999, Math.round((used / win) * 100)) : 0,
+    source,
+    updatedAt,
+  };
+}
+function contextFromCodexInfo(info, prev = {}) {
+  const last = (info && info.last_token_usage) || {};
+  const total = (info && info.total_token_usage) || {};
+  const used = sumNums(last.input_tokens, last.output_tokens) || Number(last.total_tokens) || Number(total.total_tokens) || 0;
+  return normalizeContext({
+    agent: 'codex',
+    model: prev.model || '',
+    usedTokens: used,
+    windowTokens: info && info.model_context_window,
+    source: info && info.model_context_window ? 'reported' : 'estimated',
+  });
+}
+function contextFromClaudeUsage(usage, model) {
+  const used = sumNums(
+    usage && usage.input_tokens,
+    usage && usage.cache_creation_input_tokens,
+    usage && usage.cache_read_input_tokens,
+    usage && usage.output_tokens,
+  );
+  return normalizeContext({ agent: 'claude', model, usedTokens: used, source: 'reported-usage-estimated-window' });
+}
+function claudeContext(file) {
+  if (!file) return null;
+  try {
+    const st = statSync(file); const len = Math.min(st.size, 4 * 1024 * 1024); const start = st.size - len;
+    const fd = openSync(file, 'r'); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, start); closeSync(fd);
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].trim()) continue;
+      let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+      const msg = o && o.message;
+      if (msg && msg.usage) return contextFromClaudeUsage(msg.usage, msg.model || '');
+    }
+  } catch {}
+  return null;
+}
+function contextForSession(id, { agent = null, file = null, codex = null } = {}) {
+  const cx = codex || ((loadCodex().sessions || {})[id]);
+  if ((agent === 'codex' || cx) && cx) return cx.context || normalizeContext({ agent: 'codex', model: ((cx.settings || {}).codex || {}).model || '' });
+  const f = file || findSessionFile(id);
+  return claudeContext(f) || normalizeContext({ agent: 'claude' });
+}
 function ensureCodexSession(id, attrs = {}) {
   if (!id) return null;
   const state = loadCodex();
@@ -570,6 +637,7 @@ function ensureCodexSession(id, attrs = {}) {
   // rename goes through names.json (the rename route), not here, so this never fights it.
   const established = prev.title && prev.title !== 'Codex chat' ? prev.title : '';
   state.sessions[id] = {
+    ...prev,
     id,
     agent: 'codex',
     title: established || attrs.title || prev.title || 'Codex chat',
@@ -581,9 +649,20 @@ function ensureCodexSession(id, attrs = {}) {
     settings: normalizeSettings(attrs.settings || prev.settings || {}),
     parentId: attrs.parentId || prev.parentId || null,
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context || prev.context || null,
   };
   saveCodex(state);
   return state.sessions[id];
+}
+function updateCodexContext(id, info) {
+  if (!id || !info) return null;
+  const state = loadCodex();
+  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, messages: [] };
+  prev.context = contextFromCodexInfo(info, prev.context || {});
+  prev.lastUsed = Date.now();
+  state.sessions[id] = prev;
+  saveCodex(state);
+  return prev.context;
 }
 function appendCodexMessage(id, role, text, extra = {}) {
   if (!id || (!text && !extra.parts)) return;
@@ -597,6 +676,44 @@ function appendCodexMessage(id, role, text, extra = {}) {
   if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
   prev.lastUsed = now;
   state.sessions[id] = prev;
+  saveCodex(state);
+}
+
+// Build the stripped {text|tool} parts a history reload renders, from the live turn's
+// curParts (heavy tool results/detail dropped — history only shows the chip label).
+function codexAssistantParts(curParts) {
+  return (curParts || [])
+    .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool'))
+    .map((p) => (p.t === 'tool'
+      ? { t: 'tool', id: p.id, name: p.name, input: p.input }
+      : { t: 'text', text: p.text }));
+}
+// Persist the in-flight Codex assistant turn AS IT STREAMS, not only at finish(). Codex
+// turns run long (a delegated ticket is 200+ tool calls / many minutes) and this box is
+// OOM-prone, so it restarts mid-turn — which used to lose the ENTIRE reply: the turn lived
+// only in memory until finish(), so a killed turn left the user message with no answer
+// (and context stuck at 0). We upsert a single "live" assistant row keyed by the turn id;
+// finalize() drops the live flag once the turn ends cleanly. A reload after a crash then
+// shows whatever the agent had produced so far instead of nothing.
+let CODEX_TURN_SEQ = 0;
+function flushCodexAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadCodex();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.cxTurnId };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.live && last.turnId === s.cxTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  state.sessions[s.sessionId] = prev;
   saveCodex(state);
 }
 
@@ -669,6 +786,20 @@ function autoSubcat(id, file) {
   return 'other-auto';
 }
 
+function liveCodexSessionIds(sessions) {
+  const ids = new Set();
+  let procText = '';
+  try { procText = execSync(`pgrep -af 'codex exec' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
+  for (const s of sessions || []) {
+    if (!s || !s.id) continue;
+    if (procText.includes(s.id)) { ids.add(s.id); continue; }
+    if (s.dtachSock) {
+      try { if (existsSync(s.dtachSock)) ids.add(s.id); } catch {}
+    }
+  }
+  return ids;
+}
+
 function listSessions({ limit = 40, filter = 'all' } = {}) {
   const rc = readRcRegistry();
   const names = loadNames();
@@ -691,17 +822,20 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     }
   }
   const codexSessions = Object.values(loadCodex().sessions || {}).map((s) => ({
+    ...s,
     id: s.id, agent: 'codex', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'Codex chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+    settings: s.settings || {}, context: s.context || null,
   }));
   files.sort((a, b) => b.mtime - a.mtime);
   const items = files.concat(codexSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
-  // Live = supervisor-registered (TSV) ∪ box-local --remote-control bridges discovered
-  // at runtime (survives a Box-app-server restart that wiped the in-memory map).
-  const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys()]);
+  const codexLiveIds = liveCodexSessionIds(codexSessions);
+  // Live = Claude remote-control bridges plus Codex sessions with an active exec process
+  // or a registered terminal dtach socket.
+  const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys(), ...codexLiveIds]);
   // tail-scan the most-recent non-archived sessions for preview + needs-input + lastTs
   const scan = new Map();
   for (const f of files) { if (scan.size >= 130) break; if (!archived.has(f.id)) scan.set(f.id, tailInfo(f.file)); }
@@ -742,6 +876,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const out = chosen.map((s) => {
     const r = rc[s.id];
     const lb = !r ? LIVE_BRIDGES.get(s.id) : null; // discovered box-local live bridge (not in TSV)
+    const cxLive = codexLiveIds.has(s.id);
     const cwd = r ? r.cwd : (lb ? lb.cwd : (s.cwd || (s.file ? decodeCwd(dirname(s.file)) : DEFAULT_CWD)));
     let hasAttention = false;
     try {
@@ -760,12 +895,13 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       cwd,
       preview: s.preview || (scan.get(s.id) && scan.get(s.id).preview) || (s.file ? sessionPreview(s.file) : ''),
       parentId: s.parentId || null, parentTitle: s.parentTitle || '',
-      live: !!r || !!lb, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
+      live: !!r || !!lb || cxLive, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
       status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : 'main',
       subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
-      pinned: (!!r || !!lb) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
+      pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
       hasAttention,
+      context: contextForSession(s.id, { agent: s.agent || 'claude', file: s.file, codex: s.agent === 'codex' ? s : null }),
     };
   });
   // Archived view sorts most-recently-archived first (so a chat you JUST archived is
@@ -831,12 +967,12 @@ function readJsonlChunk(file, endOffset) {
 }
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
-  if (codex) return { messages: (codex.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '' };
+  if (codex) return { messages: (codex.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
   const file = findSessionFile(id);
-  if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD };
+  if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD, context: normalizeContext({ agent: 'claude' }) };
   const { raw, startOffset } = readJsonlChunk(file, before);
   const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
-  return { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}) };
+  return { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) };
 }
 
 // ---- helpers: available skills/commands for the "/" picker ----------------
@@ -1860,11 +1996,12 @@ function rt(extKey) {
     RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || null, agent: p.agent || null,
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
       settings: normalizeSettings(p.settings || {}),
+      context: p.context || null,
       queue: p.queue || [], running: false, curText: '', curTools: [], curParts: [], subs: new Set(), proc: null, canceled: false });
   }
   return RT.get(key);
 }
-function persist(s) { try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), queue: s.queue })); } catch {} }
+function persist(s) { try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, queue: s.queue })); } catch {} }
 function bcast(s, o) { for (const ws of s.subs) { try { ws.send(JSON.stringify(o)); } catch {} } }
 const queueView = (s) => s.queue.map((q, i) => ({ qid: q.qid, text: q.displayText != null ? q.displayText : q.text, mode: q.mode, agent: q.agent || s.agent || 'claude', images: q.images || [], running: i === 0 && s.running }));
 
@@ -1924,6 +2061,11 @@ function onTailEvent(s, ev) {
   } else if (ev.kind === 'turn_end') {
     if (s.onTurnEnd) s.onTurnEnd();
     s.turnCount = (s.turnCount || 0) + 1;
+    if (s.sessionId) {
+      s.context = contextForSession(s.sessionId, { agent: s.agent || 'claude' });
+      bcast(s, { type: 'context', context: s.context });
+      persist(s);
+    }
     // Every 10 turns, refresh the session's ATTENTION.md (via OpenAI, not Claude)
     if (s.turnCount % 10 === 0) triggerAttentionUpdate(s);
   }
@@ -2298,22 +2440,19 @@ function runTurn(s, msg) {
 function runCodexTurn(s, msg, resolve) {
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
   let done = false;
-  let assistantText = '';
+  // Unique per turn so flushCodexAssistant upserts ONE live row and never collides with a
+  // stale live row left by a turn the box was restarted out of (time + seq survives a
+  // counter reset on restart).
+  s.cxTurnId = `${Date.now()}-${++CODEX_TURN_SEQ}`;
+  s.cxLastFlush = 0;
   const finish = () => {
     if (done) return; done = true;
     clearTimeout(s.turnTimer); s.proc = null;
-    if (s.sessionId) {
-      // Persist the turn as ordered parts (separate text paragraphs + tool chips), the
-      // same shape Claude history uses, so a reloaded Codex conversation renders like
-      // the live view instead of collapsing into one text block. Strip heavy tool
-      // results/detail — history only renders the chip label, and the store is capped.
-      const parts = (s.curParts || [])
-        .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool'))
-        .map((p) => (p.t === 'tool'
-          ? { t: 'tool', id: p.id, name: p.name, input: p.input }
-          : { t: 'text', text: p.text }));
-      if (parts.length) appendCodexMessage(s.sessionId, 'assistant', assistantText, { parts });
-    }
+    // Finalize the streamed assistant row (same ordered {text|tool} shape Claude history
+    // uses, so a reload renders like the live view). The row was already being written
+    // incrementally below; this just clears the `live` flag — or writes it once for a
+    // turn so short nothing flushed mid-stream.
+    if (s.sessionId) flushCodexAssistant(s, { finalize: true });
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
@@ -2332,7 +2471,7 @@ function runCodexTurn(s, msg, resolve) {
         s.sessionId = ev.id; s.agent = 'codex';
         ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '' });
+        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
         appendCodexMessage(s.sessionId, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
         persist(s);
         bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '' });
@@ -2344,14 +2483,25 @@ function runCodexTurn(s, msg, resolve) {
         // being text — right after a tool the client opens a fresh text element, so a
         // leading separator there would render a stray empty paragraph.
         const raw = ev.delta || '';
-        assistantText += (assistantText ? '\n\n' : '') + raw;
         const last = s.curParts[s.curParts.length - 1];
         const delta = ((last && last.t === 'text' && last.text) ? '\n\n' : '') + raw;
         pushTextPart(s, delta);
+        // Persist each agent message the moment it lands — agent messages are bounded
+        // (~tens per turn), so a crash never loses one.
+        if (s.sessionId) { s.cxLastFlush = Date.now(); flushCodexAssistant(s); }
         bcast(s, { type: 'text', delta });
+      } else if (ev.type === 'context') {
+        if (s.sessionId) s.context = updateCodexContext(s.sessionId, ev.info);
+        else s.context = contextFromCodexInfo(ev.info, s.context || {});
+        persist(s);
+        bcast(s, { type: 'context', context: s.context });
       } else if (ev.type === 'tool') {
         s.curTools.push(ev);
         s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        // A tool-heavy turn can fire hundreds of these — persist the growing turn at most
+        // every ~2s so an all-tools stretch still survives a crash without thrashing disk.
+        const now = Date.now();
+        if (s.sessionId && (!s.cxLastFlush || now - s.cxLastFlush > 2000)) { s.cxLastFlush = now; flushCodexAssistant(s); }
         bcast(s, ev);
       } else if (ev.type === 'tool_result') {
         const t = s.curTools.find((x) => x.id === ev.id); if (t) t.result = ev.content;
@@ -2478,7 +2628,8 @@ wss.on('connection', (ws) => {
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
