@@ -61,10 +61,17 @@
     <strong class="ctitle">Board</strong>
     <span id="boardMeta" class="boardMeta"></span>
     <div class="spacer"></div>
+    <button id="boardSearchBtn" class="iconbtn ghost" title="search" data-icon="search"></button>
     <button id="boardNew" class="iconbtn ghost" title="new issue" data-icon="plus"></button>
     <button id="boardRefresh" class="iconbtn ghost" title="refresh" data-icon="arrow-down"></button>
   </header>
+  <div id="boardSearch" class="boardSearch hidden">
+    <span class="boardSearchIc" data-icon="search"></span>
+    <input id="boardSearchInput" class="boardSearchInput" placeholder="Search tickets…" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="boardSearchClear" class="iconbtn ghost" title="clear" data-icon="close"></button>
+  </div>
   <div id="boardBody" class="boardWrap"></div>
+  <div id="boardResults" class="boardResults hidden"></div>
 </section>
 
 <!-- LINEAR ISSUE DETAIL -->

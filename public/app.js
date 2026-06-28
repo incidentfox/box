@@ -195,6 +195,7 @@ const ICONS = {
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
+  search: SVG('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', { w: 2 }),
 };
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { if (!el._painted) { el.innerHTML = ICONS[el.dataset.icon] || ''; el._painted = 1; } }); }
 
@@ -526,36 +527,75 @@ async function openPipelines() {
 /* ---------- Linear board (kanban of all INC tickets by status) ---------- */
 // A GLOBAL view of every open ticket grouped by workflow state — unlike the
 // per-cwd ATTENTION.md, it's the same regardless of which dir the session runs in.
+// Loads stale-while-revalidate (instant repaint from cache, then refetch), supports
+// drag-to-reorder / drag-to-restatus, and live search.
 $('boardBtn').onclick = openBoard;
 $('boardBack').onclick = () => history.back();
-$('boardRefresh').onclick = openBoard;
+$('boardRefresh').onclick = () => refreshBoard(true);
 const PRIO = { 1: ['urgent', '#e0533a'], 2: ['high', '#e08a1e'], 3: ['med', '#3b82c4'], 4: ['low', '#9aa0a6'] };
+
+let boardCache = null;        // last payload — stale-while-revalidate → instant repaint on reopen
+let boardFetchSeq = 0;        // race guard for overlapping board fetches
+let boardQuery = '';          // active search text ('' = normal column view)
+
 async function openBoard() {
   navTo({ view: 'board' });
   show('board'); paintIcons($('board'));
-  const body = $('boardBody'); body.innerHTML = '<p class="empty">Loading board…</p>';
-  $('boardMeta').textContent = '';
+  // paint the cached board instantly, then revalidate in the background — feels instant on reopen
+  if (boardCache && !boardQuery) renderBoard(boardCache);
+  else if (!boardCache) { $('boardBody').innerHTML = '<p class="empty">Loading board…</p>'; $('boardMeta').textContent = ''; }
+  await refreshBoard(boardDirty);   // force-fresh if a mutation happened while we were away
+  boardDirty = false;
+}
+async function refreshBoard(fresh) {
+  const seq = ++boardFetchSeq;
   let d;
-  try { d = await (await api('/api/linear-board')).json(); }
-  catch { body.innerHTML = '<p class="empty">Could not load the board.</p>'; return; }
-  if (d.error) { body.innerHTML = `<p class="empty">${d.error}</p>`; return; }
-  body.innerHTML = '';
+  try { d = await (await api('/api/linear-board' + (fresh ? '?fresh=1' : ''))).json(); }
+  catch { if (!boardCache) $('boardBody').innerHTML = '<p class="empty">Could not load the board.</p>'; return; }
+  if (seq !== boardFetchSeq) return;            // a newer fetch superseded us
+  if (drag) return;                             // never repaint out from under an in-flight drag
+  if (d.error) { if (!boardCache) $('boardBody').innerHTML = `<p class="empty">${esc(d.error)}</p>`; return; }
+  boardCache = d;
+  if (boardQuery) runBoardSearch(); else renderBoard(d);
+}
+function renderBoard(d) {
+  const body = $('boardBody'); body.innerHTML = '';
   $('boardMeta').textContent = `${d.total} open`;
   for (const col of (d.columns || [])) {
     const c = document.createElement('div'); c.className = 'boardCol';
+    c.dataset.stateId = col.stateId || '';
+    c.dataset.stateName = col.name || '';
+    c.dataset.type = col.type || '';
     const hd = document.createElement('div'); hd.className = 'boardColHd';
     hd.innerHTML = `<span class="boardColName"></span><span class="boardColRight">${col.recent ? '<span class="boardColTag">recent</span>' : ''}<span class="boardColCount">${col.count}</span></span>`;
     hd.querySelector('.boardColName').textContent = col.name;
     c.appendChild(hd);
     const list = document.createElement('div'); list.className = 'boardColList';
     for (const t of col.issues) list.appendChild(ticketCard(t));
-    if (!col.issues.length) { const e = document.createElement('p'); e.className = 'boardEmpty'; e.textContent = '—'; list.appendChild(e); }
+    syncColEmpty(list);
     c.appendChild(list); body.appendChild(c);
   }
   if (!(d.columns || []).length) body.innerHTML = '<p class="empty">No tickets.</p>';
 }
+// keep a column's "—" empty marker in sync with its card count (also after drag moves)
+function syncColEmpty(list) {
+  const has = list.querySelector('.tkt');
+  let mk = list.querySelector('.boardEmpty');
+  if (!has && !mk) { mk = document.createElement('p'); mk.className = 'boardEmpty'; mk.textContent = '—'; list.appendChild(mk); }
+  else if (has && mk) mk.remove();
+}
+function recountCol(colEl) {
+  if (!colEl) return;
+  const list = colEl.querySelector('.boardColList');
+  const cnt = colEl.querySelector('.boardColCount');
+  if (cnt) cnt.textContent = list.querySelectorAll('.tkt').length;
+  syncColEmpty(list);
+}
 function ticketCard(t) {
   const card = document.createElement('div'); card.className = 'tkt';
+  card.dataset.id = t.id;
+  card.dataset.sort = (t.sortOrder == null ? 0 : t.sortOrder);
+  card._t = t;
   const [plabel, pcolor] = PRIO[t.priority] || [];
   const top = document.createElement('div'); top.className = 'tktTop';
   top.innerHTML = `${pcolor ? `<span class="tktPrio" style="background:${pcolor}" title="${plabel}"></span>` : ''}<span class="tktId"></span><span class="tktTime"></span>`;
@@ -582,8 +622,224 @@ function ticketCard(t) {
     if (dg.sessionId) { el.classList.add('clk'); el.onclick = (e) => { e.stopPropagation(); openChat({ id: dg.sessionId, title: who, agent: dg.agent }); }; }
     card.appendChild(el);
   }
-  card.onclick = () => { issueOrigin = { kind: 'board' }; openIssue(t.id); };
+  card.onclick = () => { if (card._justDragged) return; issueOrigin = { kind: 'board' }; openIssue(t.id); };
+  attachCardDrag(card);
   return card;
+}
+
+/* ---------- board drag-and-drop ----------
+   Long-press a card to lift it, then drop it: in another column → changes its workflow
+   state; within a column → reorders it. Both persist via POST /api/linear/:id/move
+   (stateId + a midpoint sortOrder). Pointer Events → works with touch and mouse. The DOM
+   moves optimistically; a background refresh reconciles, and a failed move snaps back. */
+const DRAG_HOLD = 200, DRAG_SLOP = 9, DRAG_EDGE = 46;
+let drag = null;
+let boardDndInit = false;
+function initBoardDnd() {
+  if (boardDndInit) return; boardDndInit = true;
+  window.addEventListener('pointermove', onDragMove, { passive: false });
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+  // iOS won't honor preventDefault on pointermove for scroll, but it does on touchmove —
+  // this is what actually stops the page/column scrolling under an active drag.
+  window.addEventListener('touchmove', (e) => { if (drag) e.preventDefault(); }, { passive: false });
+}
+function attachCardDrag(card) {
+  card.addEventListener('pointerdown', (e) => {
+    if (boardQuery || drag) return;                          // no DnD while searching / already dragging
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.target.closest('.tktDeleg.clk')) return;           // delegation badge owns its own tap
+    const sx = e.clientX, sy = e.clientY, pid = e.pointerId;
+    const hold = setTimeout(() => { beginDrag(card, e, pid); teardown(); }, DRAG_HOLD);
+    const move = (ev) => {
+      if (ev.pointerId !== pid) return;
+      if (Math.abs(ev.clientX - sx) > DRAG_SLOP || Math.abs(ev.clientY - sy) > DRAG_SLOP) { clearTimeout(hold); teardown(); }
+    };
+    const up = () => { clearTimeout(hold); teardown(); };
+    const teardown = () => {
+      card.removeEventListener('pointermove', move);
+      card.removeEventListener('pointerup', up);
+      card.removeEventListener('pointercancel', up);
+    };
+    card.addEventListener('pointermove', move);
+    card.addEventListener('pointerup', up);
+    card.addEventListener('pointercancel', up);
+  });
+}
+function beginDrag(card, e, pid) {
+  const list = card.parentElement, col = card.closest('.boardCol');
+  const origPrev = prevTkt(card), origNext = nextTkt(card);
+  const rect = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true);
+  ghost.classList.add('tktGhost');
+  ghost.style.width = rect.width + 'px';
+  document.body.appendChild(ghost);
+  const ph = document.createElement('div'); ph.className = 'tktPlaceholder'; ph.style.height = rect.height + 'px';
+  list.insertBefore(ph, card.nextSibling);
+  card.classList.add('tktDragSrc');                          // hidden but kept (re-homed on drop)
+  document.body.classList.add('boardDragging');
+  const board = $('boardBody'); board.style.touchAction = 'none';
+  try { board.setPointerCapture(pid); } catch {}
+  drag = {
+    card, ghost, ph, pid, fromList: list, fromCol: col, targetCol: col,
+    offX: e.clientX - rect.left, offY: e.clientY - rect.top, x: e.clientX, y: e.clientY,
+    origPrevId: origPrev ? origPrev.dataset.id : null, origNextId: origNext ? origNext.dataset.id : null,
+    raf: 0,
+  };
+  if (navigator.vibrate) { try { navigator.vibrate(12); } catch {} }
+  positionGhost();
+  drag.raf = requestAnimationFrame(autoScrollTick);
+}
+function positionGhost() { if (drag) drag.ghost.style.transform = `translate(${drag.x - drag.offX}px, ${drag.y - drag.offY}px) scale(1.03)`; }
+function onDragMove(e) {
+  if (!drag || e.pointerId !== drag.pid) return;
+  e.preventDefault();
+  drag.x = e.clientX; drag.y = e.clientY;
+  positionGhost();
+  updatePlaceholder();
+}
+function updatePlaceholder() {
+  const cols = [...$('boardBody').querySelectorAll('.boardCol')];
+  if (!cols.length) return;
+  let target = null;
+  for (const c of cols) { const r = c.getBoundingClientRect(); if (drag.x >= r.left && drag.x <= r.right) { target = c; break; } }
+  if (!target) { let best = Infinity; for (const c of cols) { const r = c.getBoundingClientRect(); const d = Math.abs((r.left + r.right) / 2 - drag.x); if (d < best) { best = d; target = c; } } }
+  drag.targetCol = target;
+  const list = target.querySelector('.boardColList');
+  const cards = [...list.querySelectorAll('.tkt')].filter((c) => c !== drag.card);
+  let before = null;
+  for (const c of cards) { const r = c.getBoundingClientRect(); if (drag.y < r.top + r.height / 2) { before = c; break; } }
+  const mk = list.querySelector('.boardEmpty'); if (mk) mk.remove();
+  if (before) list.insertBefore(drag.ph, before); else list.appendChild(drag.ph);
+}
+function autoScrollTick() {
+  if (!drag) return;
+  const board = $('boardBody'), br = board.getBoundingClientRect();
+  if (drag.x < br.left + DRAG_EDGE) board.scrollLeft -= 14;
+  else if (drag.x > br.right - DRAG_EDGE) board.scrollLeft += 14;
+  if (drag.targetCol) {
+    const list = drag.targetCol.querySelector('.boardColList'), lr = list.getBoundingClientRect();
+    if (drag.y < lr.top + DRAG_EDGE) list.scrollTop -= 12;
+    else if (drag.y > lr.bottom - DRAG_EDGE) list.scrollTop += 12;
+  }
+  updatePlaceholder();
+  drag.raf = requestAnimationFrame(autoScrollTick);
+}
+async function endDrag(e) {
+  if (!drag) return;
+  if (e && e.pointerId != null && e.pointerId !== drag.pid) return;
+  const d = drag; drag = null;
+  if (d.raf) cancelAnimationFrame(d.raf);
+  const board = $('boardBody');
+  try { board.releasePointerCapture(d.pid); } catch {}
+  board.style.touchAction = '';
+  document.body.classList.remove('boardDragging');
+  d.ghost.remove();
+  // re-home the real card where the placeholder landed
+  const targetList = d.ph.parentElement, targetCol = d.ph.closest('.boardCol');
+  d.card.classList.remove('tktDragSrc');
+  targetList.insertBefore(d.card, d.ph);
+  d.ph.remove();
+  d.card._justDragged = true; setTimeout(() => { d.card._justDragged = false; }, 60);   // swallow the post-drag click
+  recountCol(d.fromCol); recountCol(targetCol);
+  // did anything actually change?
+  const movedCols = targetCol !== d.fromCol;
+  const prev = prevTkt(d.card), next = nextTkt(d.card);
+  const fpId = prev ? prev.dataset.id : null, fnId = next ? next.dataset.id : null;
+  if (!movedCols && fpId === d.origPrevId && fnId === d.origNextId) return;   // dropped back in place
+  const newStateId = targetCol.dataset.stateId || '';
+  if (movedCols && !newStateId) { toast('couldn’t move'); refreshBoard(true); return; }
+  // midpoint sortOrder between the new neighbours (ascending = top)
+  const ps = prev ? parseFloat(prev.dataset.sort) : null;
+  const ns = next ? parseFloat(next.dataset.sort) : null;
+  let newSort;
+  if (ps == null && ns == null) newSort = 0;
+  else if (ps == null) newSort = ns - 1;
+  else if (ns == null) newSort = ps + 1;
+  else newSort = (ps + ns) / 2;
+  d.card.dataset.sort = newSort;
+  if (d.card._t) { d.card._t.sortOrder = newSort; if (movedCols) d.card._t.stateId = newStateId; }
+  const payload = { sortOrder: newSort };
+  if (movedCols && newStateId) payload.stateId = newStateId;
+  const id = d.card.dataset.id;
+  try {
+    const r = await (await api(`/api/linear/${id}/move`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+    if (!r.ok) { toast(r.error || 'move failed'); refreshBoard(true); return; }
+    if (movedCols) toast(`${id} → ${r.state || targetCol.dataset.stateName}`);
+    refreshBoard(true);   // reconcile sortOrder/labels in the background (DOM is already correct)
+  } catch { toast('move failed'); refreshBoard(true); }
+}
+function prevTkt(el) { let n = el.previousElementSibling; while (n && !n.classList.contains('tkt')) n = n.previousElementSibling; return n; }
+function nextTkt(el) { let n = el.nextElementSibling; while (n && !n.classList.contains('tkt')) n = n.nextElementSibling; return n; }
+initBoardDnd();
+
+/* ---------- board search (instant local filter + server search of all Linear) ---------- */
+let boardSearchDeb = null, boardSearchSeq = 0;
+$('boardSearchBtn').onclick = boardSearchToggle;
+$('boardSearchClear').onclick = () => { $('boardSearchInput').value = ''; setBoardQuery(''); $('boardSearchInput').focus(); };
+$('boardSearchInput').addEventListener('input', (e) => {
+  clearTimeout(boardSearchDeb); const v = e.target.value;
+  boardSearchDeb = setTimeout(() => setBoardQuery(v), 130);
+});
+$('boardSearchInput').addEventListener('keydown', (e) => { if (e.key === 'Escape') boardSearchClose(); });
+function boardSearchToggle() {
+  const bar = $('boardSearch');
+  if (bar.classList.contains('hidden')) { bar.classList.remove('hidden'); paintIcons(bar); $('boardSearchInput').focus(); }
+  else boardSearchClose();
+}
+function boardSearchClose() {
+  $('boardSearch').classList.add('hidden');
+  $('boardSearchInput').value = '';
+  if (boardQuery) setBoardQuery('');
+}
+function setBoardQuery(q) {
+  q = (q || '').trim(); boardQuery = q;
+  if (!q) {
+    $('boardResults').classList.add('hidden'); $('boardBody').classList.remove('hidden');
+    if (boardCache) $('boardMeta').textContent = `${boardCache.total} open`;
+    return;
+  }
+  $('boardBody').classList.add('hidden'); $('boardResults').classList.remove('hidden');
+  runBoardSearch();
+}
+async function runBoardSearch() {
+  const q = boardQuery; if (!q) return;
+  const seq = ++boardSearchSeq;
+  const local = localBoardMatches(q);
+  renderBoardResults(local, q, false);              // instant local hits
+  let extra = [];
+  try { extra = (await (await api('/api/linear-search?q=' + encodeURIComponent(q))).json()).issues || []; } catch {}
+  if (seq !== boardSearchSeq || boardQuery !== q) return;
+  const seen = new Set(local.map((x) => x.id));
+  renderBoardResults(local.concat(extra.filter((x) => !seen.has(x.id))), q, true);
+}
+function localBoardMatches(q) {
+  const ql = q.toLowerCase(); const out = [];
+  for (const col of ((boardCache && boardCache.columns) || [])) {
+    for (const t of (col.issues || [])) {
+      const hay = `${t.id} ${t.title} ${(t.labels || []).join(' ')} ${t.assignee || ''}`.toLowerCase();
+      if (hay.includes(ql)) out.push({ ...t, state: col.name });
+    }
+  }
+  return out;
+}
+function renderBoardResults(list, q, done) {
+  const box = $('boardResults');
+  $('boardMeta').textContent = `${list.length} match${list.length === 1 ? '' : 'es'}`;
+  if (!list.length) { box.innerHTML = `<p class="empty">${done ? 'No tickets match “' + esc(q) + '”.' : 'Searching…'}</p>`; return; }
+  box.innerHTML = '';
+  for (const t of list) box.appendChild(resultRow(t));
+}
+function resultRow(t) {
+  const row = document.createElement('div'); row.className = 'bres';
+  const [, pcolor] = PRIO[t.priority] || [];
+  row.innerHTML = `<span class="tktPrio${pcolor ? '' : ' bresNoPrio'}" ${pcolor ? `style="background:${pcolor}"` : ''}></span>`
+    + `<div class="bresMain"><div class="bresTop"><span class="tktId"></span><span class="bresState"></span></div><div class="bresTitle"></div></div>`;
+  row.querySelector('.tktId').textContent = t.id;
+  row.querySelector('.bresState').textContent = t.state || '';
+  row.querySelector('.bresTitle').textContent = t.title || '(untitled)';
+  row.onclick = () => { issueOrigin = { kind: 'board' }; openIssue(t.id); };
+  return row;
 }
 
 /* ---------- Linear issue workspace (view · comment · status · dismiss · delegate · create) ---------- */
