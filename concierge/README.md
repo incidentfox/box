@@ -17,6 +17,7 @@ that matters.
 | [`20-api-keys.md`](20-api-keys.md) | Sign you in / up and fetch the optional API keys (ElevenLabs for voice, etc.). |
 | [`30-linear.md`](30-linear.md) | Get a Linear API key + your team's UUID for the Board + "needs you" inbox. |
 | [`40-stable-url.md`](40-stable-url.md) | Set up a stable `box.yourdomain.com` via a Cloudflare named tunnel. |
+| [`50-power-ups.md`](50-power-ups.md) | **Make agents far more capable:** Google access (Gmail/Calendar/Drive), email-yourself, and a notes "brain". |
 
 ## Ground rules to give your agent (built into every prompt)
 

@@ -68,9 +68,21 @@ If you wired up Linear, file with `node ~/.claude/box-harness/needs-me.mjs --add
 `--resolve <ID> --note "<outcome>"`. These surface at the top of every new session (via the
 SessionStart hook) and in the Box app's "needs you" tab.
 
+## Tools you may have (power-ups — use them when useful)
+
+These are optional; use whichever are set up (see `concierge/50-power-ups.md`):
+
+- **`google` CLI** (if `~/.config/box/google.env` exists): act on my Google account.
+  - `google gmail list "is:unread newer_than:2d" 10` — triage my mail
+  - `google gmail send <me> "<subject>" "<body>"` — **email me a result/digest when you finish
+    something I'd want to know about** (great for long autonomous runs)
+  - `google cal list 5` — what's on my calendar; `google drive list "name contains 'x'"` — find a file
+- **A "brain"** (if `BRAIN_DIR` is set): a notes/markdown folder. Read it for context; append
+  durable facts, decisions, and how-tos so the whole fleet benefits.
+
 ## Memory
 
-If you keep a memory directory, write down durable, non-obvious facts (preferences I've
-stated, decisions and their rationale, ongoing goals) — one fact per file with a short
-index. Don't memorize what the code or git history already records. Verify a remembered
-fact still holds (file/flag/command exists) before acting on it.
+If you keep a memory directory (or a brain), write down durable, non-obvious facts (preferences
+I've stated, decisions and their rationale, ongoing goals) — one fact per file with a short
+index. Don't memorize what the code or git history already records. Verify a remembered fact
+still holds (file/flag/command exists) before acting on it.

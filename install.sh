@@ -179,6 +179,11 @@ if [ "$DO_HARNESS" = 1 ]; then
   # make the harness scripts reachable for the SessionStart hook
   ln -sfn "$APP_DIR/harness" "$HOME/.claude/box-harness"
   ok "harness → ~/.claude/box-harness (symlink)"
+  # put the `google` CLI on PATH (Gmail/Calendar/Drive power-up; needs OAuth setup later)
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$APP_DIR/harness/google" "$HOME/.local/bin/google"
+  ok "google CLI → ~/.local/bin/google (run 'node harness/google-auth.mjs' to enable — see concierge/50-power-ups.md)"
+  case ":$PATH:" in *":$HOME/.local/bin:"*) :;; *) info "add ~/.local/bin to your PATH to use 'google' directly";; esac
 
   if [ -f "$HOME/.claude/settings.json" ]; then
     cp "harness/settings.json.example" "$HOME/.claude/settings.box.json"

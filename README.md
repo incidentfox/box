@@ -137,6 +137,21 @@ When an integration isn't configured, its UI hides itself — Box stays a clean 
 - **`cc-rc-supervisor.sh`** (optional cron): keeps remote-controlled sessions alive across
   reboots and reconnects dropped bridges.
 
+## Power-ups (optional — make agents act on your behalf)
+
+These turn Box from "a coding agent" into an assistant that can *do things*:
+
+- **Google access** — the bundled **`google`** CLI lets agents read & send your **Gmail**,
+  check your **Calendar**, and read your **Drive**. One-time setup:
+  `node harness/google-auth.mjs` (full walkthrough, incl. the Google Cloud part for a
+  computer-use agent, in [`concierge/50-power-ups.md`](concierge/50-power-ups.md)).
+- **Email yourself** — once Google access is on, a long autonomous run can `google gmail send
+  you@example.com "done" "..."` to ping you when it finishes.
+- **A "brain"** — point `BRAIN_DIR` at a notes/markdown folder; agents read it for context and
+  append durable facts so the whole fleet remembers.
+
+Agents are told about these in `harness/CLAUDE.md`, so they'll use them when it helps.
+
 ## Concierge (let a computer-use agent do the boring setup)
 
 Don't want to hunt for API keys or rent a server yourself? The [`concierge/`](concierge/)
