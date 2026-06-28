@@ -214,6 +214,46 @@ function reconcileLiveBridges() {
   return LIVE_BRIDGES.size;
 }
 
+// Tear down the remote-control bridge for a session. Archiving a chat means "I'm done
+// with this" — there's no reason to keep a `claude --remote-control` process (and its
+// dtach master) burning memory + re-running heartbeats/auto-update for it. We (1) drop
+// it from the supervisor registry so the 2-min keeper tick won't relaunch it, (2) kill
+// the dtach master + claude child (both carry the session id in argv — curated bridges
+// live at /tmp/cc-rc-<rcName>.dtach, box-local ones at /tmp/cc-box-<id>.dtach), and
+// (3) remove the now-stale sockets. Idempotent + best-effort: missing pieces are fine.
+function killSessionBridge(id) {
+  if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { killed: 0 };
+  let rcName = null;
+  try { const rc = readRcRegistry(); if (rc[id]) rcName = rc[id].rcName; } catch {}
+  try {
+    if (existsSync(RC_REGISTRY)) {
+      const lines = readFileSync(RC_REGISTRY, 'utf8').split('\n');
+      const kept = lines.filter((l) => { const c = l.split('\t'); return !(c[2] && c[2].trim() === id); });
+      if (kept.length !== lines.length) {
+        // atomic rewrite (tmp + rename) — external scripts (cnew/boxsesh) append rows
+        // concurrently; a torn write would silently drop curated sessions.
+        const tmp = `${RC_REGISTRY}.tmp.${process.pid}`;
+        try { writeFileSync(tmp, kept.join('\n')); renameSync(tmp, RC_REGISTRY); } catch { try { unlinkSync(tmp); } catch {} }
+      }
+    }
+  } catch {}
+  let killed = 0;
+  try {
+    const out = execSync(`pgrep -af ${JSON.stringify(id)} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 });
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue;
+      if (!/--remote-control|cc-rc-|cc-box-/.test(line)) continue; // only RC bridges + their dtach wrappers
+      const pid = parseInt(line, 10);
+      if (pid && pid !== process.pid) { try { process.kill(pid, 'SIGTERM'); killed++; } catch {} }
+    }
+  } catch {}
+  for (const sock of [`/tmp/cc-box-${id}.dtach`, rcName ? `/tmp/cc-rc-${rcName}.dtach` : null]) {
+    if (sock) { try { unlinkSync(sock); } catch {} }
+  }
+  LIVE_BRIDGES.delete(id);
+  return { killed };
+}
+
 // Dream-cycle / meta sessions all open with the SAME boilerplate prompt, so the
 // title is identical for every one. When we detect a meta-prompt, pull the ACTUAL
 // subject out of the embedded "SESSION TRANSCRIPT:" (the session being distilled)
@@ -348,27 +388,43 @@ function sessionPreview(file) {
   } catch {}
   return '';
 }
-// tail-read a session: last meaningful message text (preview) + whether the agent
-// is waiting on the user (last turn was the assistant and it ended with a question).
+// tail-read a session: last meaningful message text (preview), whether the agent is
+// waiting on the user (last turn was the assistant and it ended with a question), and
+// `lastTs` = the newest real chat timestamp = true last-activity time.
+//
+// lastTs intentionally ignores records with no `timestamp` field. An idle
+// remote-control bridge keeps appending control records (bridge-session,
+// permission-mode, mode, ai-title, last-prompt, file-history-snapshot …) that carry NO
+// timestamp; those writes bump the file mtime without any actual chat. Sorting/showing
+// the feed by file mtime therefore floats days-old sessions to the top with a near-now
+// time — exactly the "archived chats suddenly reappear as just-now" bug. lastTs reads
+// the real conversation clock instead, so an idle heartbeat can't fake recency.
 function tailInfo(file) {
   try {
     const st = statSync(file); const len = Math.min(st.size, 48 * 1024); const start = st.size - len;
     const fd = openSync(file, 'r'); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, start); closeSync(fd);
     const lines = buf.toString('utf8').split('\n');
+    let lastTs = 0, preview = '', needsInput = false, gotMsg = false;
     for (let i = lines.length - 1; i >= 0; i--) {
       if (!lines[i].trim()) continue;
       let o; try { o = JSON.parse(lines[i]); } catch { continue; }
-      if ((o.type === 'assistant' || o.type === 'user') && o.message) {
+      if (!lastTs && o.timestamp) { const t = Date.parse(o.timestamp); if (t) lastTs = t; }
+      if (!gotMsg && (o.type === 'assistant' || o.type === 'user') && o.message) {
         const c = o.message.content;
         let t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : '';
         t = (t || '').trim();
-        if (!t || t.startsWith('<') || t.startsWith('Caveat:')) continue;
-        const role = o.message.role || o.type;
-        return { preview: t.replace(/\s+/g, ' ').slice(0, 100), needsInput: role === 'assistant' && /[?？]["'）)\]]*\s*$/.test(t) };
+        if (t && !t.startsWith('<') && !t.startsWith('Caveat:')) {
+          const role = o.message.role || o.type;
+          preview = t.replace(/\s+/g, ' ').slice(0, 100);
+          needsInput = role === 'assistant' && /[?？]["'）)\]]*\s*$/.test(t);
+          gotMsg = true;
+        }
       }
+      if (lastTs && gotMsg) break;
     }
+    return { preview, needsInput, lastTs };
   } catch {}
-  return { preview: '', needsInput: false };
+  return { preview: '', needsInput: false, lastTs: 0 };
 }
 // session ids with a currently-running worker turn (set maintained by runWorker)
 const RUNNING = new Set();
@@ -582,9 +638,18 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // Live = supervisor-registered (TSV) ∪ box-local --remote-control bridges discovered
   // at runtime (survives a Box-app-server restart that wiped the in-memory map).
   const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys()]);
-  // tail-scan the most-recent non-archived sessions for preview + needs-input
+  // tail-scan the most-recent non-archived sessions for preview + needs-input + lastTs
   const scan = new Map();
   for (const f of files) { if (scan.size >= 130) break; if (!archived.has(f.id)) scan.set(f.id, tailInfo(f.file)); }
+  // Effective "last activity" = the newest real chat timestamp from the scan, NOT the
+  // file mtime (an idle remote-control bridge bumps mtime with no actual chat — see
+  // tailInfo). Fall back to mtime for sessions older than the scan window (their mtime
+  // is honest — nothing has touched them) or with no timestamped message. actTime is
+  // always ≤ mtime, so every bridge-bumped session lands inside the top-mtime scan and
+  // gets corrected; unscanned ones keep their truthful mtime. Re-sort by it so the
+  // recency window + ordering reflect real conversation, not heartbeat writes.
+  const actTime = (f) => { const s = f && scan.get(f.id); return (s && s.lastTs) ? s.lastTs : (f ? f.mtime : 0); };
+  items.sort((a, b) => actTime(b) - actTime(a));
   const statusOf = (id) => archived.has(id) ? 'archived' : RUNNING.has(id) ? 'working' : (scan.get(id) && scan.get(id).needsInput) ? 'needs_input' : liveIds.has(id) ? 'live' : 'idle';
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
@@ -634,7 +699,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       live: !!r || !!lb, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
       status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : 'main',
       subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
-      pinned: (!!r || !!lb) && !archived.has(s.id), mtime: s.mtime, renamed: !!(tm.custom || names[s.id]),
+      pinned: (!!r || !!lb) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
       hasAttention,
     };
@@ -794,7 +859,11 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const id = req.params.id; const on = !(req.body && req.body.archived === false);
   if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
   saveArchived(set); saveArchivedAt(at);
-  res.json({ ok: true, archived: on });
+  // Archiving = done with it → kill its remote-control bridge so it stops consuming a
+  // claude process + heartbeating. Opening the card later just respawns the bridge.
+  let killed = 0;
+  if (on) { try { killed = killSessionBridge(id).killed; } catch {} }
+  res.json({ ok: true, archived: on, killed });
 });
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
 app.get('/api/session-search', requireAuth, (req, res) => {
