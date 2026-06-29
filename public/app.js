@@ -36,7 +36,13 @@ applyVV();
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
 /* ---------- helpers ---------- */
-function show(id) { ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
+const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'];
+const desktopMq = window.matchMedia ? window.matchMedia('(min-width: 900px)') : null;
+const isDesktopShell = () => !!(desktopMq && desktopMq.matches);
+function show(id) {
+  document.body.dataset.view = id;
+  TOP_SCREENS.forEach((s) => $(s).classList.toggle('hidden', s !== id));
+}
 
 /* ---------- history-synced navigation (browser Back / Forward) ---------- */
 // The app is one page that toggles top-level <section> "screens" (plus the chat's
@@ -409,6 +415,7 @@ function renderSessionList() {
 }
 function sessionCard(s) {
   const el = document.createElement('div'); el.className = 'sCard';
+  if (cur && cur.id && s.id === cur.id) el.classList.add('current');
   const agent = s.agent || 'claude';
   const sub = s.parentId ? `Fork of ${s.parentTitle || s.parentId.slice(0, 8)}` : (s.note ? s.note : shortCwd(s.cwd));
   const label = STATUS_LABEL[s.status];
@@ -3044,14 +3051,37 @@ document.addEventListener('keydown', (e) => {
   // don't hijack keys while a modal/overlay owns the screen
   if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden') ||
       ($('accountsOverlay') && !$('accountsOverlay').classList.contains('hidden'))) return;
-  const onList = !$('sessions').classList.contains('hidden');
+  const onList = !$('sessions').classList.contains('hidden') || (isDesktopShell() && document.body.dataset.view !== 'login');
   const onChat = !$('chat').classList.contains('hidden');
   if (e.key === '/') { if (onChat && !attnMode) { e.preventDefault(); $('input').focus(); } return; }
-  if (e.key === '?') { toast('Shortcuts: j/k move · Enter opens · / composer · Esc closes', 3200); return; }
+  if (e.key === '?') { toast('Shortcuts: n new · b board · p pipelines · j/k move · Enter opens · / composer', 3800); return; }
   if (!onList) return;
   if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); kbMove(1); }
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); kbMove(-1); }
   else if (e.key === 'Enter') { const c = kbCards()[kbSel]; if (c) { e.preventDefault(); c.querySelector('.sCardFront').click(); } }
+});
+
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden')) return;
+  if (!TOKEN || document.body.dataset.view === 'login') return;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (!$('board').classList.contains('hidden')) boardSearchToggle();
+    else sessSearchToggle();
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+    e.preventDefault();
+    $('newBtn').click();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key.toLowerCase() === 'n') { e.preventDefault(); $('newBtn').click(); }
+  else if (e.key.toLowerCase() === 'b' && CFG.features && CFG.features.linear) { e.preventDefault(); openBoard(); }
+  else if (e.key.toLowerCase() === 'p') { e.preventDefault(); openPipelines(); }
+  else if (e.key.toLowerCase() === 's') { e.preventDefault(); openSessions(curFilter || 'all'); }
 });
 
 /* ---------- Claude accounts (login / pool / failover) ---------- */
@@ -3488,7 +3518,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 61;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 72;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
