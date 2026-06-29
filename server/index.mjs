@@ -835,6 +835,103 @@ function appendCodexMessage(id, role, text, extra = {}) {
   state.sessions[id] = prev;
   saveCodex(state);
 }
+const codexAttachmentIsImage = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
+function codexUserParts(text, attachments = []) {
+  const parts = [];
+  if (text) parts.push({ t: 'text', text: String(text) });
+  for (const p of attachments || []) {
+    if (!p) continue;
+    parts.push({ t: codexAttachmentIsImage(p) ? 'image' : 'file', path: String(p) });
+  }
+  return parts.length ? parts : [{ t: 'text', text: '' }];
+}
+function codexRolloutUserAttachments(id) {
+  const file = findCodexRollout(CODEX_HOME, id);
+  if (!file) return [];
+  const out = [];
+  try {
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o; try { o = JSON.parse(line); } catch { continue; }
+      const p = o && o.type === 'event_msg' ? o.payload : null;
+      if (!p || p.type !== 'user_message') continue;
+      const attachments = [...(p.local_images || []), ...(p.local_files || [])].filter(Boolean);
+      if (attachments.length) out.push({ text: String(p.message || '').trim(), attachments });
+    }
+  } catch {}
+  return out;
+}
+function enrichCodexUserAttachments(id, messages) {
+  const rows = codexRolloutUserAttachments(id);
+  if (!rows.length) return messages || [];
+  let idx = 0;
+  return (messages || []).map((m) => {
+    if (!m || m.role !== 'user' || (m.parts || []).some((p) => p.t === 'image' || p.t === 'file')) return m;
+    const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text || '').join('\n').trim();
+    const hitAt = rows.findIndex((r, i) => i >= idx && (!r.text || r.text === text));
+    if (hitAt < 0) return m;
+    idx = hitAt + 1;
+    return { ...m, parts: [...(m.parts || []), ...codexUserParts('', rows[hitAt].attachments)] };
+  });
+}
+function codexRolloutToolResults(id) {
+  const file = findCodexRollout(CODEX_HOME, id);
+  if (!file) return [];
+  const calls = new Map(), results = [];
+  try {
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o; try { o = JSON.parse(line); } catch { continue; }
+      const p = o && o.type === 'response_item' ? o.payload : null;
+      if (!p) continue;
+      if (p.type === 'function_call') {
+        let args = {};
+        try { args = JSON.parse(p.arguments || '{}'); } catch {}
+        calls.set(p.call_id, { name: p.name || '', args });
+      } else if (p.type === 'function_call_output' && p.call_id) {
+        const c = calls.get(p.call_id);
+        if (!c) continue;
+        if (c.name === 'exec_command' && c.args && c.args.cmd) {
+          results.push({ kind: 'Bash', command: String(c.args.cmd), output: String(p.output || '').slice(0, 6000) });
+        }
+      }
+    }
+  } catch {}
+  return results;
+}
+function enrichCodexToolResults(id, messages) {
+  const rows = codexRolloutToolResults(id);
+  if (!rows.length) return messages || [];
+  const byCommand = new Map();
+  const remaining = rows.map((r) => r.output);
+  const index = (key, output) => {
+    if (!key) return;
+    const arr = byCommand.get(key) || [];
+    arr.push(output);
+    byCommand.set(key, arr);
+  };
+  for (const r of rows) {
+    index(r.command, r.output);
+    index(String(r.command || '').replace(/\s+/g, ' ').slice(0, 120), r.output);
+  }
+  return (messages || []).map((m) => {
+    if (!m || m.role !== 'assistant') return m;
+    let changed = false;
+    const parts = (m.parts || []).map((p) => {
+      if (!p || p.t !== 'tool' || p.result || p.name !== 'Bash') return p;
+      const command = String((p.detail && p.detail.command) || p.input || '');
+      const arr = byCommand.get(command);
+      const result = arr && arr.length ? arr.shift() : remaining.shift();
+      if (!result) return p;
+      changed = true;
+      return { ...p, detail: p.detail || { command }, result };
+    });
+    return changed ? { ...m, parts } : m;
+  });
+}
+function enrichCodexHistory(id, messages) {
+  return enrichCodexToolResults(id, enrichCodexUserAttachments(id, messages || []));
+}
 // codex hands errors back in several shapes (a plain string, or a JSON envelope like
 // {error:{message}} / {message}). Pull out the human-readable bit before we persist it as a note,
 // so a failed turn reads "model X does not exist" instead of a truncated JSON blob.
@@ -867,13 +964,12 @@ function migrateCodexSession(fromId, toId) {
   return state.sessions[toId];
 }
 
-// Build the stripped {text|tool} parts a history reload renders, from the live turn's
-// curParts (heavy tool results/detail dropped — history only shows the chip label).
+// Build the ordered parts a history reload renders from the live turn's curParts.
 function codexAssistantParts(curParts) {
   return (curParts || [])
     .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool'))
     .map((p) => (p.t === 'tool'
-      ? { t: 'tool', id: p.id, name: p.name, input: p.input }
+      ? { t: 'tool', id: p.id, name: p.name, input: p.input, detail: p.detail, result: p.result }
       : { t: 'text', text: p.text }));
 }
 // Persist the in-flight Codex assistant turn AS IT STREAMS, not only at finish(). Codex
@@ -1111,6 +1207,12 @@ const HIST_MSG_LIMIT = 400;
 const HIST_TAIL_BYTES = 6 * 1024 * 1024; // read last 6MB for large files
 function parseJsonlMessages(raw) {
   const messages = [];
+  const pendingTools = new Map();
+  const toolResultText = (content) => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.map((x) => (x && x.type === 'text' ? x.text : '')).join('');
+    return content == null ? '' : String(content);
+  };
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let o; try { o = JSON.parse(line); } catch { continue; }
@@ -1122,8 +1224,14 @@ function parseJsonlMessages(raw) {
       else if (Array.isArray(c)) {
         for (const b of c) {
           if (b.type === 'text' && b.text) parts.push({ t: 'text', text: b.text });
-          else if (b.type === 'tool_use') parts.push({ t: 'tool', name: b.name, input: b.input });
-          else if (b.type === 'tool_result' || b.type === 'thinking') { /* skip */ }
+          else if (b.type === 'tool_use') {
+            const part = { t: 'tool', id: b.id, name: b.name, input: summarizeToolInput(b.name, b.input), detail: b.input };
+            parts.push(part);
+            if (b.id) pendingTools.set(b.id, part);
+          } else if (b.type === 'tool_result') {
+            const part = b.tool_use_id ? pendingTools.get(b.tool_use_id) : null;
+            if (part) part.result = toolResultText(b.content).slice(0, 6000);
+          } else if (b.type === 'thinking') { /* skip */ }
         }
       }
       const isToolResultOnly = Array.isArray(c) && c.every((b) => b.type === 'tool_result');
@@ -1155,7 +1263,7 @@ function readJsonlChunk(file, endOffset) {
 }
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
-  if (codex) return { messages: (codex.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+  if (codex) return { messages: enrichCodexHistory(id, (codex.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
   const file = findSessionFile(id);
   if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD, context: normalizeContext({ agent: 'claude' }) };
   const { raw, startOffset } = readJsonlChunk(file, before);
@@ -2748,6 +2856,7 @@ function runCodexTurn(s, msg, resolve) {
   s.cxLastFlush = 0;
   let lastError = '';
   const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
   const isNewCodexSession = !s.sessionId;
   const explicitTitle = isNewCodexSession ? sanitizeTitle(msg.title) : '';
   const initialTitle = explicitTitle || (isNewCodexSession ? fallbackTitleFromPrompt(msg.text || userText) : '');
@@ -2761,7 +2870,7 @@ function runCodexTurn(s, msg, resolve) {
   if (!s.sessionId) {
     s.provKey = s.key;
     ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-    appendCodexMessage(s.provKey, 'user', userText);
+    appendCodexMessage(s.provKey, 'user', userText, { parts: userParts });
     RUNNING.add(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
@@ -2810,7 +2919,7 @@ function runCodexTurn(s, msg, resolve) {
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText); // provisional path already appended it
+        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts }); // provisional path already appended it
         persist(s);
         bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
       } else if (ev.type === 'text') {

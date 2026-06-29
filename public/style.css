@@ -398,12 +398,14 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .attachRow .x { position: absolute; top: -6px; right: -6px; background: #1a1a1a; color: #fff; width: 19px; height: 19px; border-radius: 50%; font-size: 12px; display: grid; place-items: center; }
 .inputWrap { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 8px 10px 6px; }
 #input { width: 100%; border: none; outline: none; resize: none; background: none; font-size: 16px; line-height: 1.4; max-height: 38vh; padding: 2px 4px; color: var(--ink); }
-.toolsRow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-	.chip { display: inline-flex; align-items: center; gap: 6px; background: var(--subtle-2); border-radius: 16px; padding: 7px 13px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.toolsRow { display: flex; align-items: center; gap: 6px; margin-top: 4px; min-width: 0; }
+	.chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; max-width: 100%; white-space: nowrap; background: var(--subtle-2); border-radius: 16px; padding: 7px 11px; font-size: 13px; font-weight: 600; line-height: 1; color: var(--ink); }
 	.chip svg { width: 15px; height: 15px; }
 	.chip.small { padding: 5px 10px; font-size: 12px; }
 	.chip.bash { background: #14110e; color: #e9c08a; }
-	.chip.agent { padding-inline: 11px; }
+	#modeChip { flex: 0 1 auto; padding-inline: 10px; }
+	#modeLabel, #agentLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+	.chip.agent { flex: 0 0 auto; padding-inline: 11px; }
 	#agentDot { width: 8px; height: 8px; border-radius: 50%; background: #8d7b68; }
 	.chip.agent.codex #agentDot { background: #1f6feb; }
 	.chip.agent.codex { background: #e7f0fb; color: #1f4f9c; }
@@ -420,6 +422,16 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .stopbtn { background: #1d1b18; color: #fff; }
 .stopbtn svg { width: 17px; height: 17px; }
 .iconbtn:active { filter: brightness(.93); }
+
+@media (max-width: 430px) {
+	.toolsRow { gap: 5px; }
+	.inputWrap { padding-inline: 9px; }
+	.chip { padding-inline: 9px; font-size: 12.5px; }
+	#modeChip { width: 42px; padding-inline: 0; }
+	#modeLabel { display: none; }
+	.iconbtn { width: 36px; height: 36px; }
+	.iconbtn svg { width: 20px; height: 20px; }
+}
 
 /* recorder */
 .recorder { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 26px; padding: 7px 10px; margin-top: 8px; }
@@ -440,8 +452,11 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .suggest .si.file .nm { font-family: inherit; color: var(--ink); font-weight: 450; }
 
 /* sheets */
-.sheet { position: fixed; top: 0; left: 0; right: 0; height: var(--app-h); max-height: var(--app-h); overflow: hidden; background: rgba(0,0,0,.35); z-index: 30; display: flex; align-items: flex-end; }
-.sheetInner { width: 100%; background: var(--bg); border-radius: 18px 18px 0 0; padding: 8px 0 calc(10px + var(--safe-b)); max-height: calc(var(--app-h) - 12px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; }
+.sheet { --sheet-y: 0px; --sheet-dim: .35; position: fixed; top: 0; left: 0; right: 0; height: var(--app-h); max-height: var(--app-h); overflow: hidden; background: rgba(0,0,0,var(--sheet-dim)); z-index: 30; display: flex; align-items: flex-end; transition: background .18s ease; }
+.sheetInner { width: 100%; background: var(--bg); border-radius: 18px 18px 0 0; padding: 8px 0 calc(10px + var(--safe-b)); max-height: calc(var(--app-h) - 12px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; transform: translateY(var(--sheet-y)); transition: transform .22s cubic-bezier(.22,.61,.36,1); will-change: transform; }
+.sheet.dragging { transition: none; }
+.sheet.dragging .sheetInner { transition: none; }
+.sheetInner::before { content: ''; display: block; width: 36px; height: 5px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 42%, transparent); margin: 4px auto 1px; }
 .sheetInner h3 { text-align: center; font-size: 15px; margin: 12px 0; color: var(--muted); font-weight: 600; }
 .sheetText { margin: 0 22px 10px; color: var(--muted); font-size: 13.5px; line-height: 1.42; text-align: center; }
 .sheetRow { display: flex; align-items: center; gap: 14px; padding: 15px 22px; font-size: 16px; }

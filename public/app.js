@@ -1516,11 +1516,13 @@ function buildHistElement(m) {
       if (m.role === 'user') {
         const paths = [...text.matchAll(/\[Image attached at (.+?) —/g)].map((x) => x[1]);
         text = text.replace(/^\[Image attached at .+?\]\n?/gm, '').trim();
-        if (paths.length) { const r = document.createElement('div'); r.className = 'umgs'; paths.forEach((pp) => { const im = document.createElement('img'); im.src = imgUrl(pp); r.appendChild(im); }); body.appendChild(r); }
+        if (paths.length) body.appendChild(userAttachmentGrid(paths));
       }
       rawText += (rawText ? '\n' : '') + text;
       if (text) { const d = document.createElement('div'); d.innerHTML = m.role === 'user' ? esc(text) : md(text); body.appendChild(d); }
-    } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.input }));
+    } else if (m.role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
+      body.appendChild(userAttachmentGrid([p.path]));
+    } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.detail || p.input, result: p.result }));
   }
   rawText = rawText.trim();
   wrap.dataset.rawText = rawText;
@@ -1768,18 +1770,21 @@ const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' +
 // echo back as a `remote_user`) can be dropped instead of rendering the message twice.
 let lastUserRender = { text: '', at: 0 };
 function isRecentDupUser(text) { return (text || '') === lastUserRender.text && (Date.now() - lastUserRender.at) < 15000; }
+function userAttachmentGrid(paths) {
+  const r = document.createElement('div'); r.className = 'umgs';
+  (paths || []).forEach((p) => {
+    if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
+    else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(String(p).split('/').pop())}</span>`; r.appendChild(fc); }
+  });
+  return r;
+}
 function addUser(text, images) {
   lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   const body = document.createElement('div'); body.className = 'body';
   if (images && images.length) {
-    const r = document.createElement('div'); r.className = 'umgs';
-    images.forEach((p) => {
-      if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
-      else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(p.split('/').pop())}</span>`; r.appendChild(fc); }
-    });
-    body.appendChild(r);
+    body.appendChild(userAttachmentGrid(images));
   }
   if (text) { const t = document.createElement('div'); t.textContent = text; body.appendChild(t); }
   wrap.appendChild(body);
@@ -2086,7 +2091,7 @@ function autoGrow() { const t = $('input'); t.style.height = 'auto'; t.style.hei
 $('input').addEventListener('input', () => { autoGrow(); onType(); updateSend(); saveDraft(cur.key, $('input').value); });
 
 /* ---------- mode (normal / bash) ---------- */
-function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
+function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').title = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
 $('modeChip').onclick = () => openSheet('Mode', [
   { ic: '⌗', label: 'normal', sel: cur.mode === 'normal', desc: `Chat with ${cur.agent === 'codex' ? 'Codex' : 'Claude'}`, fn: () => setMode('normal') },
   { ic: '⌘', label: 'bash', sel: cur.mode === 'bash', desc: 'Run commands on the box', fn: () => setMode('bash') },
@@ -2097,7 +2102,9 @@ function refreshAgentChip() {
   const rawModel = (cfg && cfg.model) || (isCodex ? 'gpt-5.5' : 'opus');
   const effort = isCodex ? (cfg && cfg.reasoningEffort) : (cfg && cfg.effort);
   // compact display name
-  const modelName = rawModel.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
+  const modelName = isCodex
+    ? rawModel.replace(/^gpt-/, '').replace(/-codex$/, 'c')
+    : rawModel.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
   $('agentChip').classList.toggle('codex', isCodex);
 }
@@ -2483,7 +2490,7 @@ function renameChat(s, onDone) {
     closeSheet();
     if (onDone) onDone(name);
   };
-  inner.appendChild(row); $('sheet').classList.remove('hidden');
+  inner.appendChild(row); showSheet();
   // Focus synchronously, still inside the tap gesture — iOS only raises the soft keyboard for a
   // user-initiated focus(). A setTimeout breaks that gesture chain, so the keyboard stays down and
   // you have to tap the field again. The sheet un-hides instantly (no transition), so it's focusable now.
@@ -2611,7 +2618,7 @@ function openArchiveConfirm(s, opts = {}) {
     el.onclick = () => { closeSheet(); r.fn(); };
     inner.appendChild(el);
   }
-  $('sheet').classList.remove('hidden');
+  showSheet();
 }
 $('archiveBtn').onclick = async () => {
   if (!cur.id) return toast('Nothing to archive yet');
@@ -2889,7 +2896,7 @@ function openToolDetail(name, data) {
   else if (name === 'Read') { if (fp) inner.appendChild(openFileBtn(fp)); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
   else if (name === 'Bash') { inner.appendChild(codeBlock('$ ' + (inp.command || ''))); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
   else { inner.appendChild(codeBlock(JSON.stringify(inp, null, 2))); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
-  $('sheet').classList.remove('hidden');
+  showSheet();
 }
 const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'], video: ['mp4', 'mov', 'webm', 'm4v', 'mkv'] };
 const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
@@ -2945,10 +2952,67 @@ function openSheet(title, rows) {
   if (active && active.id === 'input') active.blur();
   const inner = $('sheetInner'); inner.innerHTML = title ? `<h3>${esc(title)}</h3>` : '';
   for (const r of rows) { const el = document.createElement('div'); el.className = 'sheetRow' + (r.sel ? ' sel' : ''); el.innerHTML = `<span class="ic">${r.ic || ''}</span><div><div>${esc(r.label)}</div>${r.desc ? `<div class="muted" style="font-size:12.5px">${esc(r.desc)}</div>` : ''}</div>`; el.onclick = () => { closeSheet(); r.fn(); }; inner.appendChild(el); }
+  showSheet();
+}
+let sheetDrag = null;
+function setSheetDragOffset(y) {
+  const sheet = $('sheet');
+  const offset = Math.max(0, y || 0);
+  sheet.style.setProperty('--sheet-y', offset + 'px');
+  sheet.style.setProperty('--sheet-dim', Math.max(.12, .35 * (1 - Math.min(offset, 360) / 420)).toFixed(3));
+}
+function resetSheetDrag() {
+  const sheet = $('sheet');
+  sheet.classList.remove('dragging');
+  setSheetDragOffset(0);
+  sheetDrag = null;
+}
+function showSheet() {
+  resetSheetDrag();
+  const inner = $('sheetInner');
+  if (inner) inner.scrollTop = 0;
   $('sheet').classList.remove('hidden');
 }
-function closeSheet() { $('sheet').classList.add('hidden'); }
+function closeSheet() { resetSheetDrag(); $('sheet').classList.add('hidden'); }
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
+function onSheetTouchStart(e) {
+  if ($('sheet').classList.contains('hidden') || e.touches.length !== 1) return;
+  const inner = $('sheetInner');
+  if (!inner || e.target.closest('input, textarea, select, button, a, iframe, audio, video')) return;
+  const y = e.touches[0].clientY;
+  sheetDrag = { startY: y, lastY: y, startAt: performance.now(), dragging: false, offset: 0 };
+}
+function onSheetTouchMove(e) {
+  if (!sheetDrag || e.touches.length !== 1) return;
+  const inner = $('sheetInner');
+  if (!inner) return;
+  const y = e.touches[0].clientY;
+  const dy = y - sheetDrag.startY;
+  sheetDrag.lastY = y;
+  if (!sheetDrag.dragging) {
+    if (dy <= 8 || inner.scrollTop > 0) return;
+    sheetDrag.dragging = true;
+    $('sheet').classList.add('dragging');
+  }
+  e.preventDefault();
+  const resisted = dy > 320 ? 320 + ((dy - 320) * .25) : dy;
+  sheetDrag.offset = Math.max(0, resisted);
+  setSheetDragOffset(sheetDrag.offset);
+}
+function onSheetTouchEnd() {
+  if (!sheetDrag) return;
+  const inner = $('sheetInner');
+  const dt = Math.max(1, performance.now() - sheetDrag.startAt);
+  const velocity = (sheetDrag.lastY - sheetDrag.startY) / dt;
+  const threshold = Math.min(150, Math.max(88, ((inner && inner.offsetHeight) || 0) * .24));
+  const shouldClose = sheetDrag.dragging && (sheetDrag.offset > threshold || (velocity > .65 && sheetDrag.offset > 44));
+  if (shouldClose) closeSheet();
+  else resetSheetDrag();
+}
+$('sheetInner').addEventListener('touchstart', onSheetTouchStart, { passive: true });
+$('sheetInner').addEventListener('touchmove', onSheetTouchMove, { passive: false });
+$('sheetInner').addEventListener('touchend', onSheetTouchEnd);
+$('sheetInner').addEventListener('touchcancel', resetSheetDrag);
 // Desktop convenience: Escape dismisses the topmost transient surface (bottom sheet
 // or the accounts overlay). The image lightbox owns its own Escape; the chat's
 // attention overlay closes with Back (it's a history entry), so it's not handled here.
