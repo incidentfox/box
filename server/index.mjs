@@ -15,19 +15,23 @@ import { createReadStream } from 'node:fs';
 import { join, resolve, dirname, basename, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import multer from 'multer';
 import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases } from './rc-engine.mjs';
 import * as accounts from './accounts.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
+import { GeminiExecEngine } from './gemini-exec-engine.mjs';
+import { AgyExecEngine } from './agy-exec-engine.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
 // (three-way sync). Input = injected keystrokes; rendering = the JSONL tail.
 const rcEngine = new RCEngine();
 const codexEngine = new CodexExecEngine();
+const geminiEngine = new GeminiExecEngine();
+const agyEngine = new AgyExecEngine();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -644,6 +648,12 @@ function sessionSearchRank(r, variant, queryTokens) {
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
 const saveCodex = (state) => writeJsonAtomic(CODEX_FILE, state);
+const GEMINI_FILE = join(STATE_DIR, 'gemini-sessions.json');
+const loadGemini = () => { try { return JSON.parse(readFileSync(GEMINI_FILE, 'utf8')); } catch { return { sessions: {} }; } };
+const saveGemini = (state) => writeJsonAtomic(GEMINI_FILE, state);
+const AGY_FILE = join(STATE_DIR, 'agy-sessions.json');
+const loadAgy = () => { try { return JSON.parse(readFileSync(AGY_FILE, 'utf8')); } catch { return { sessions: {} }; } };
+const saveAgy = (state) => writeJsonAtomic(AGY_FILE, state);
 function codexMessageText(m) {
   if (!m) return '';
   const out = [];
@@ -680,7 +690,7 @@ function codexUserMessagesFromSession(session) {
 function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
   const safeTitle = title || 'conversation';
   const header = `# ${safeTitle}\n\nExported ${messages.length} messages\n\n`;
-  const assistantName = agent === 'codex' ? 'Codex' : 'Claude';
+  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : 'Claude';
   const body = messages.map((m) => {
     const role = m.role === 'user' ? '**You**' : `**${assistantName}**`;
     const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
@@ -714,11 +724,15 @@ const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
+  gemini: { model: 'gemini-3.5-flash' },
+  agy: { model: '' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
 function normalizeSettings(settings = {}) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
+    gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
+    agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
 }
@@ -1025,6 +1039,82 @@ function flushCodexAssistant(s, { finalize = false } = {}) {
   state.sessions[s.sessionId] = prev;
   saveCodex(state);
 }
+function ensureGeminiSession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadGemini();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  const established = prev.title && prev.title !== 'Gemini chat' ? prev.title : '';
+  state.sessions[id] = {
+    id,
+    agent: 'gemini',
+    title: established || attrs.title || prev.title || 'Gemini chat',
+    cwd: attrs.cwd || prev.cwd || DEFAULT_CWD,
+    created: prev.created || attrs.created || now,
+    lastUsed: attrs.lastUsed || now,
+    updatedAt: attrs.updatedAt || now,
+    preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
+    messages: attrs.messages || prev.messages || [],
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+  };
+  saveGemini(state);
+  return state.sessions[id];
+}
+function appendGeminiMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadGemini();
+  const now = Date.now();
+  const prev = state.sessions[id] || { id, agent: 'gemini', title: 'Gemini chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'Gemini chat')) prev.title = plain.slice(0, 80) || 'Gemini chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = now;
+  prev.updatedAt = now;
+  state.sessions[id] = prev;
+  saveGemini(state);
+}
+function ensureAgySession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadAgy();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  const established = prev.title && prev.title !== 'Antigravity chat' ? prev.title : '';
+  state.sessions[id] = {
+    id,
+    agent: 'agy',
+    title: established || attrs.title || prev.title || 'Antigravity chat',
+    cwd: attrs.cwd || prev.cwd || DEFAULT_CWD,
+    created: prev.created || attrs.created || now,
+    lastUsed: attrs.lastUsed || now,
+    updatedAt: attrs.updatedAt || now,
+    preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
+    messages: attrs.messages || prev.messages || [],
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+  };
+  saveAgy(state);
+  return state.sessions[id];
+}
+function appendAgyMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadAgy();
+  const now = Date.now();
+  const prev = state.sessions[id] || { id, agent: 'agy', title: 'Antigravity chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'Antigravity chat')) prev.title = plain.slice(0, 80) || 'Antigravity chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = now;
+  prev.updatedAt = now;
+  state.sessions[id] = prev;
+  saveAgy(state);
+}
 
 // META: the real skill / slash-command list as reported by claude's init event
 // (plugin & built-in skills aren't on disk, so we can't find them by scanning dirs).
@@ -1137,14 +1227,24 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
     settings: s.settings || {}, context: s.context || null,
   }));
+  const geminiSessions = Object.values(loadGemini().sessions || {}).map((s) => ({
+    id: s.id, agent: 'gemini', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'Gemini chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
+    parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+  }));
+  const agySessions = Object.values(loadAgy().sessions || {}).map((s) => ({
+    id: s.id, agent: 'agy', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'Antigravity chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
+    parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+  }));
   files.sort((a, b) => b.mtime - a.mtime);
-  const items = files.concat(codexSessions).sort((a, b) => b.mtime - a.mtime);
+  const items = files.concat(codexSessions, geminiSessions, agySessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
   const codexLiveIds = liveCodexSessionIds(codexSessions);
-  // Live = Claude remote-control bridges plus Codex sessions with an active exec process
-  // or a registered terminal dtach socket.
-  const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys(), ...codexLiveIds]);
+  // Live = Claude remote-control bridges plus Codex sessions with an active exec process,
+  // a registered terminal dtach socket, or another running local agent turn.
+  const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys(), ...codexLiveIds, ...RUNNING]);
   // tail-scan the most-recent non-archived sessions for preview + needs-input + lastTs
   const scan = new Map();
   for (const f of files) { if (scan.size >= 130) break; if (!archived.has(f.id)) scan.set(f.id, tailInfo(f.file)); }
@@ -1289,6 +1389,10 @@ function readJsonlChunk(file, endOffset) {
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) return { messages: enrichCodexHistory(id, (codex.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+  const gemini = (loadGemini().sessions || {})[id];
+  if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext({ agent: 'gemini' }) };
+  const agy = (loadAgy().sessions || {})[id];
+  if (agy) return { messages: (agy.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: agy.cwd || DEFAULT_CWD, agent: 'agy', settings: normalizeSettings(agy.settings || {}), parentId: agy.parentId || null, parentTitle: agy.parentTitle || '', context: normalizeContext({ agent: 'agy' }) };
   const file = findSessionFile(id);
   if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD, context: normalizeContext({ agent: 'claude' }) };
   const { raw, startOffset } = readJsonlChunk(file, before);
@@ -1432,8 +1536,8 @@ app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  const codex = (loadCodex().sessions || {})[req.params.id];
-  if (codex) return res.json({ messages: codexUserMessagesFromSession(codex) });
+  const stored = (loadCodex().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id];
+  if (stored) return res.json({ messages: codexUserMessagesFromSession(stored) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
   const messages = [];
@@ -1468,6 +1572,22 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     return res.send(conversationMarkdown({ title, agent: 'codex', messages }));
+  }
+  const gemini = (loadGemini().sessions || {})[req.params.id];
+  if (gemini) {
+    const title = gemini.title || 'Gemini chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'gemini', messages: gemini.messages || [] }));
+  }
+  const agy = (loadAgy().sessions || {})[req.params.id];
+  if (agy) {
+    const title = agy.title || 'Antigravity chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'agy', messages: agy.messages || [] }));
   }
   const file = findSessionFile(req.params.id);
   if (!file) return res.status(404).end();
@@ -1505,17 +1625,24 @@ app.get('/api/sessions/:id/attention', requireAuth, (req, res) => {
 app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   // Sync the rename to Claude's OWN session title (custom-title meta-line + live
   // /rename) so the resume picker, pickup, and the official Claude app all match.
-  // Codex sessions have no Claude JSONL → keep the box-local names.json store.
+  // Codex/Gemini sessions have no Claude JSONL → keep the box-local JSON stores.
   const id = req.params.id;
   const name = String((req.body && req.body.name) || '').slice(0, 80);
   const isCodex = !!(loadCodex().sessions || {})[id];
-  const wrote = isCodex ? false : writeCustomTitle(id, name);
+  const isGemini = !!(loadGemini().sessions || {})[id];
+  const isAgy = !!(loadAgy().sessions || {})[id];
+  let wrote = false;
+  if (isGemini) { ensureGeminiSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
+  else if (isAgy) { ensureAgySession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
+  else wrote = isCodex ? false : writeCustomTitle(id, name);
   const names = loadNames();
   if (wrote) { if (names[id] != null) { delete names[id]; saveNames(names); } } // drop legacy shadow
-  else { names[id] = name; saveNames(names); }                                 // codex / no-jsonl-yet fallback
+  else { names[id] = name; saveNames(names); }                                 // claude / no-jsonl-yet fallback
   res.json({ ok: true, synced: wrote });
 });
-app.get('/api/commands', requireAuth, (req, res) => res.json({ commands: req.query.agent === 'codex' ? scanCodexCommands() : scanCommands() }));
+app.get('/api/commands', requireAuth, (req, res) => res.json({
+  commands: req.query.agent === 'codex' ? scanCodexCommands() : (req.query.agent === 'gemini' || req.query.agent === 'agy') ? [] : scanCommands(),
+}));
 
 // ---- Accounts: pool/switch Claude accounts via an external account broker -----
 // The `/login` dialog wraps the headless OAuth flow (authorize URL → paste code) and an
@@ -1702,9 +1829,11 @@ const OPENAI_KEY = cfg('OPENAI_API_KEY');
 const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).replace(/\/$/, '');
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
 const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
+const GEMINI_KEY = cfg('GEMINI_API_KEY') || cfg('GOOGLE_AI_STUDIO_API_KEY') || cfg('GOOGLE_API_KEY');
+const AGY_CMD = cfg('AGY_CMD') || (existsSync(join(HOME, '.local', 'bin', 'agy')) ? join(HOME, '.local', 'bin', 'agy') : 'agy');
 
 function isPlaceholderTitle(title) {
-  return /^(New (Claude |Codex )?chat|Claude chat|Codex chat)$/i.test(String(title || '').trim());
+  return /^(New (Claude |Codex |Gemini |Antigravity )?chat|Claude chat|Codex chat|Gemini chat|Antigravity chat)$/i.test(String(title || '').trim());
 }
 function sanitizeTitle(title, max = 60) {
   let s = String(title || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -1795,6 +1924,13 @@ function codexAvailable() {
   catch { _codexAvail = false; }
   return _codexAvail;
 }
+let _agyAvail = null;
+function agyAvailable() {
+  if (_agyAvail !== null) return _agyAvail;
+  try { execSync(`${JSON.stringify(AGY_CMD)} --help`, { stdio: 'ignore' }); _agyAvail = true; }
+  catch { _agyAvail = false; }
+  return _agyAvail;
+}
 
 // Lightweight client bootstrap: lets the frontend learn $HOME (for path shortening),
 // the owner name, and which optional integrations are wired so it can hide the Board /
@@ -1808,6 +1944,8 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
     brain: !!findBrainDir(),
     voice: !!(ELEVEN_KEY || DEEPGRAM_KEY),
     codex: codexAvailable(),
+    gemini: !!GEMINI_KEY,
+    agy: agyAvailable(),
   },
   // Display names for Automated-tab sub-buckets; a private overlay can add its own.
   subLabels: overlay.subLabels || {},
@@ -2065,7 +2203,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
       const det = await linearGql(`{ issues(filter:{ number:{ eq:${issueNum(inc)} }${TEAM_KEY_FILTER} }){ nodes { id state{ type } labels{ nodes{ id } } } } }`);
       const it = (det.issues.nodes || [])[0];
       if (it) {
-        const agentName = rec.agent === 'codex' ? 'Codex' : 'Claude';
+        const agentName = rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : 'Claude';
         const verb = rec.kind === 'resume' ? 'Resumed in' : 'Delegated to';
         const body = `🤖 ${verb} a box ${agentName} agent${rec.sessionTitle ? ` — “${rec.sessionTitle}”` : ''}.`
           + (rec.sessionId ? `\n<!-- box-session:${rec.sessionId} -->` : '');
@@ -2167,14 +2305,40 @@ app.get('/api/linear/:id/sessions', requireAuth, (req, res) => {
       if (n) counts[sid] = (counts[sid] || 0) + n;
     }
   } catch {}
+  // gemini sessions live in one JSON store keyed by id
+  try {
+    for (const [sid, s] of Object.entries(loadGemini().sessions || {})) {
+      const n = (JSON.stringify(s.messages || '').match(new RegExp(id, 'g')) || []).length;
+      if (n) counts[sid] = (counts[sid] || 0) + n;
+    }
+  } catch {}
+  // antigravity sessions live in one JSON store keyed by id
+  try {
+    for (const [sid, s] of Object.entries(loadAgy().sessions || {})) {
+      const n = (JSON.stringify(s.messages || '').match(new RegExp(id, 'g')) || []).length;
+      if (n) counts[sid] = (counts[sid] || 0) + n;
+    }
+  } catch {}
   const names = loadNames();
   const codex = loadCodex().sessions || {};
+  const gemini = loadGemini().sessions || {};
+  const agy = loadAgy().sessions || {};
   const sessions = [];
   for (const sid of Object.keys(counts)) {
     if (sid === exclude) continue;
     if (codex[sid]) {
       const c = codex[sid];
       sessions.push({ id: sid, title: names[sid] || c.title || 'Codex session', agent: 'codex', cwd: c.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: codexSessionMtime(c), mentions: counts[sid] });
+      continue;
+    }
+    if (gemini[sid]) {
+      const g = gemini[sid];
+      sessions.push({ id: sid, title: names[sid] || g.title || 'Gemini session', agent: 'gemini', cwd: g.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: g.updatedAt ? Date.parse(g.updatedAt) : (g.lastUsed || g.created || 0), mentions: counts[sid] });
+      continue;
+    }
+    if (agy[sid]) {
+      const a = agy[sid];
+      sessions.push({ id: sid, title: names[sid] || a.title || 'Antigravity session', agent: 'agy', cwd: a.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: a.updatedAt ? Date.parse(a.updatedAt) : (a.lastUsed || a.created || 0), mentions: counts[sid] });
       continue;
     }
     const file = jsonlPath(sid);
@@ -2230,6 +2394,14 @@ function sessionIssueCounts(file) {
   } catch {}
   return counts;
 }
+function sessionIssueCountsFromMessages(messages, counts) {
+  for (const m of messages || []) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    const text = codexMessageText(m);
+    if (m.role === 'user' && (INC_INJECT_RE.test(text) || /New since your last turn|Needs your input/.test(text))) continue;
+    if (text) tallyIssues(text, counts);
+  }
+}
 app.get('/api/sessions/:id/linear', requireAuth, async (req, res) => {
   const id = String(req.params.id || '');
   if (!/^[A-Za-z0-9-]+$/.test(id)) return res.json({ issues: [] });
@@ -2237,13 +2409,15 @@ app.get('/api/sessions/:id/linear', requireAuth, async (req, res) => {
   try { const file = jsonlPath(id); if (file && existsSync(file)) Object.assign(counts, sessionIssueCounts(file)); } catch {}
   try {                                                // codex dialogue (user/assistant text only)
     const c = (loadCodex().sessions || {})[id];
-    if (c) for (const m of (c.messages || [])) {
-      if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
-      const txt = codexMessageText(m);
-      if (!txt) continue;
-      if (m.role === 'user' && (INC_INJECT_RE.test(txt) || /New since your last turn|Needs your input/.test(txt))) continue;
-      tallyIssues(txt, counts);
-    }
+    if (c) sessionIssueCountsFromMessages(c.messages || [], counts);
+  } catch {}
+  try {
+    const g = (loadGemini().sessions || {})[id];
+    if (g) sessionIssueCountsFromMessages(g.messages || [], counts);
+  } catch {}
+  try {
+    const a = (loadAgy().sessions || {})[id];
+    if (a) sessionIssueCountsFromMessages(a.messages || [], counts);
   } catch {}
   // Keep tickets with a real signal: mentioned ≥2× in dialogue (drops one-off passing
   // references). If none clear the bar, fall back to all so a single-mention session
@@ -2809,6 +2983,8 @@ function runTurn(s, msg) {
       return;
 	    }
     if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
+    if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
+    if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
 	    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
     let prompt = msg.text || '';
     if (Array.isArray(msg.images) && msg.images.length) {
@@ -2993,8 +3169,118 @@ function runCodexTurn(s, msg, resolve) {
       }
     },
   });
-  s.proc.on('close', finish);
+s.proc.on('close', finish);
   s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); bcast(s, { type: 'error', msg: lastError }); finish(); });
+}
+function runGeminiTurn(s, msg, resolve) {
+  if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  const sid = s.sessionId || randomUUID();
+  const isNew = !s.sessionId;
+  const session = ensureGeminiSession(sid, {
+    cwd: s.cwd,
+    title: msg.title || (msg.text || '').slice(0, 80),
+    lastUsed: Date.now(),
+    settings: s.settings,
+    parentId: msg.parentId || s.parentId || null,
+    parentTitle: msg.parentTitle || s.parentTitle || '',
+  });
+  const history = [...(session.messages || [])];
+  appendGeminiMessage(sid, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
+  s.sessionId = sid;
+  s.agent = 'gemini';
+  ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+  if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+  if (isNew) persist(s);
+
+  let done = false;
+  let assistantText = '';
+  const finish = () => {
+    if (done) return; done = true;
+    clearTimeout(s.turnTimer); s.proc = null;
+    if (assistantText.trim()) appendGeminiMessage(s.sessionId, 'assistant', assistantText);
+    bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
+    resolve();
+  };
+  s.turnTimer = setTimeout(() => {
+    if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
+    finish();
+  }, TURN_TIMEOUT_MS);
+  bcast(s, { type: 'session', id: s.sessionId, agent: 'gemini', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || session.title || '' });
+  s.proc = geminiEngine.run({
+    sessionId: s.sessionId,
+    cwd: s.cwd,
+    prompt: msg.text || '',
+    images: msg.images || [],
+    history,
+    settings: (s.settings || {}).gemini || DEFAULT_SETTINGS.gemini,
+    apiKey: GEMINI_KEY,
+    onEvent: (ev) => {
+      if (ev.type === 'text') {
+        assistantText += (assistantText ? '\n\n' : '') + (ev.delta || '');
+        bcast(s, { type: 'text', delta: ev.delta || '' });
+      } else if (ev.type === 'notice' || ev.type === 'error') {
+        bcast(s, ev);
+      }
+    },
+  });
+  Promise.resolve(s.proc && s.proc.promise ? s.proc.promise : s.proc).then(finish).catch((e) => {
+    bcast(s, { type: 'error', msg: String(e && e.message || e).slice(-400) });
+    finish();
+  });
+}
+function runAgyTurn(s, msg, resolve) {
+  if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  const sid = s.sessionId || randomUUID();
+  const isNew = !s.sessionId;
+  const session = ensureAgySession(sid, {
+    cwd: s.cwd,
+    title: msg.title || (msg.text || '').slice(0, 80),
+    lastUsed: Date.now(),
+    settings: s.settings,
+    parentId: msg.parentId || s.parentId || null,
+    parentTitle: msg.parentTitle || s.parentTitle || '',
+  });
+  const history = [...(session.messages || [])];
+  appendAgyMessage(sid, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
+  s.sessionId = sid;
+  s.agent = 'agy';
+  ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+  if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+  if (isNew) persist(s);
+
+  let done = false;
+  let assistantText = '';
+  const finish = () => {
+    if (done) return; done = true;
+    clearTimeout(s.turnTimer); s.proc = null;
+    if (assistantText.trim()) appendAgyMessage(s.sessionId, 'assistant', assistantText);
+    bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
+    resolve();
+  };
+  s.turnTimer = setTimeout(() => {
+    if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
+    finish();
+  }, TURN_TIMEOUT_MS);
+  bcast(s, { type: 'session', id: s.sessionId, agent: 'agy', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || session.title || '' });
+  s.proc = agyEngine.run({
+    sessionId: s.sessionId,
+    cwd: s.cwd,
+    prompt: msg.text || '',
+    images: msg.images || [],
+    history,
+    settings: (s.settings || {}).agy || DEFAULT_SETTINGS.agy,
+    command: AGY_CMD,
+    onEvent: (ev) => {
+      if (ev.type === 'text') {
+        assistantText += (assistantText ? '\n\n' : '') + (ev.delta || '');
+        bcast(s, { type: 'text', delta: ev.delta || '' });
+      } else if (ev.type === 'notice' || ev.type === 'error') {
+        bcast(s, ev);
+      }
+    },
+  });
+  s.proc.on('close', finish);
+  s.proc.on('error', (e) => { bcast(s, { type: 'error', msg: String(e.message || e) }); finish(); });
 }
 // resume persisted, non-empty queues on startup (after a restart) so a queued message is never
 // lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
@@ -3119,6 +3405,8 @@ wss.on('connection', (ws) => {
       s.settings = normalizeSettings(m.settings || s.settings || {});
       persist(s);
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       bcast(s, { type: 'settings', settings: s.settings });
     } else if (m.type === 'dequeue') { dequeue(m.key, m.qid); }
     else if (m.type === 'cancel') { cancelCurrent(m.key); }
