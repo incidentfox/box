@@ -539,6 +539,85 @@ function parseSessiongrep(out) {
   }
   return results;
 }
+const SESSION_SEARCH_STOP = new Set([
+  'a', 'an', 'and', 'are', 'about', 'all', 'can', 'chat', 'chats', 'find', 'for', 'from', 'i',
+  'im', 'in', 'it', 'like', 'looking', 'me', 'my', 'of', 'on', 'or', 'past', 'session', 'sessions',
+  'stuff', 'talk', 'talking', 'that', 'the', 'this', 'to', 'was', 'were', 'with', 'you',
+]);
+const SESSION_SEARCH_EXPANSIONS = [
+  {
+    terms: ['visa', 'immigration', 'rfe', 'uscis', 'h1b', 'h-1b', 'o1', 'o-1', 'opt', 'lawyer', 'attorney'],
+    queries: [
+      'immigration visa RFE USCIS O-1 H-1B OPT',
+      'Request for Evidence petition attorney lawyer immigration',
+      'status change visa petition denial USCIS',
+    ],
+  },
+  {
+    terms: ['linear', 'ticket', 'issue', 'needs-jimmy', 'inc'],
+    queries: ['Linear issue ticket INC needs-jimmy', 'work queue in progress Linear'],
+  },
+  {
+    terms: ['email', 'gmail', 'inbox', 'mail'],
+    queries: ['email Gmail inbox message thread', 'AgentMail sent received email'],
+  },
+  {
+    terms: ['meeting', 'call', 'transcript', 'recording'],
+    queries: ['meeting transcript recording Circleback Deepgram', 'call notes action items'],
+  },
+];
+function sessionSearchTokens(q) {
+  return String(q || '').toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)?/g) || [];
+}
+function addSearchQuery(list, seen, query, kind = 'query') {
+  const clean = String(query || '').replace(/\s+/g, ' ').trim();
+  if (clean.length < 2) return;
+  const key = clean.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  list.push({ query: clean, kind });
+}
+function buildSessionSearchQueries(q) {
+  const tokens = sessionSearchTokens(q);
+  const tok = new Set(tokens);
+  const queries = []; const seen = new Set();
+  addSearchQuery(queries, seen, q, 'exact');
+  const meaningful = tokens.filter((t) => !SESSION_SEARCH_STOP.has(t));
+  if (meaningful.length) addSearchQuery(queries, seen, meaningful.join(' '), 'keywords');
+  for (const intent of SESSION_SEARCH_EXPANSIONS) {
+    if (!intent.terms.some((t) => tok.has(t))) continue;
+    const intentTerms = meaningful.filter((t) => intent.terms.includes(t));
+    if (intentTerms.length && intentTerms.length !== meaningful.length) addSearchQuery(queries, seen, intentTerms.join(' '), 'intent');
+    for (const query of intent.queries) addSearchQuery(queries, seen, query, 'expanded');
+  }
+  return queries.slice(0, 8);
+}
+function runSessiongrepSearch(query, limit = 40) {
+  return new Promise((resolve) => {
+    execFile(SESSIONGREP_BIN, ['search', query, '--limit', String(limit)], { timeout: 9000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      if (err && !stdout) return resolve({ error: 'search unavailable', results: [] });
+      resolve({ results: parseSessiongrep(stdout) });
+    });
+  });
+}
+function usableSearchText(s) {
+  const text = sgStrip(s).replace(/https?:\/\/\S+/g, '[link]').replace(/\bX-Amz-[A-Za-z]+=\S+/g, '').replace(/\s+/g, ' ').trim();
+  if (!text || text === '[link]') return '';
+  if (!/[a-z0-9]{3}/i.test(text)) return '';
+  if (text.length > 60 && /[?&]X-Amz-|%2Faws4_request|X-Amz-Signature/i.test(text)) return '';
+  return text;
+}
+function sessionSearchPreview(r) {
+  return usableSearchText(r.snippet) || usableSearchText(r.preview);
+}
+function sessionSearchRank(r, variant, queryTokens) {
+  const hay = `${r.title} ${r.cwd} ${r.preview} ${r.snippet}`.toLowerCase();
+  let overlap = 0;
+  for (const t of queryTokens) if (t.length > 2 && hay.includes(t)) overlap += 1;
+  const kindBoost = ({ exact: 24, keywords: 32, intent: 46, expanded: 38 })[variant.kind] || 0;
+  const fieldBoost = r.match === 'title' ? 18 : r.match === 'cwd' ? 8 : 0;
+  return (Number(r.score) || 0) + kindBoost + fieldBoost + (overlap * 12);
+}
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
 const saveCodex = (state) => writeJsonAtomic(CODEX_FILE, state);
@@ -1116,30 +1195,41 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   res.json({ ok: true, archived: on, killed });
 });
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
-app.get('/api/session-search', requireAuth, (req, res) => {
+// Natural-language queries are expanded into a few targeted searches, then merged and reranked.
+app.get('/api/session-search', requireAuth, async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (q.length < 2) return res.json({ results: [] });
-  execFile(SESSIONGREP_BIN, ['search', q, '--limit', '40'], { timeout: 9000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-    if (err && !stdout) return res.json({ results: [], error: 'search unavailable' });
+  const exclude = new Set(String(req.query.exclude || '').split(',').map((s) => s.trim()).filter(Boolean));
+  const variants = buildSessionSearchQueries(q);
+  const queryTokens = sessionSearchTokens(q).filter((t) => !SESSION_SEARCH_STOP.has(t));
+  const searches = await Promise.all(variants.map(async (variant) => ({ variant, ...(await runSessiongrepSearch(variant.query, 45)) })));
+  if (searches.every((s) => s.error && !s.results.length)) return res.json({ results: [], error: 'search unavailable' });
+  try {
     const codexIds = new Set(Object.values(loadCodex().sessions || {}).map((s) => s.id));
     const archived = loadArchived();
-    const seen = new Set(); const results = [];
-    for (const r of parseSessiongrep(stdout)) {
-      if (r.provider !== 'claude' && r.provider !== 'codex') continue;   // box can only open these
-      if (seen.has(r.id)) continue;
-      const openable = r.provider === 'codex' ? codexIds.has(r.id) : !!findSessionFile(r.id);
-      if (!openable) continue;                                           // skip laptop-only / unindexed hits
-      seen.add(r.id);
-      results.push({
-        id: r.id, agent: r.provider,
-        title: r.title || r.snippet || r.preview || 'session',
-        cwd: r.cwd, preview: r.snippet || r.preview, age: r.age,
-        match: r.match, archived: archived.has(r.id),
-      });
-      if (results.length >= 30) break;
+    const byId = new Map();
+    for (const search of searches) {
+      for (const r of search.results) {
+        if (r.provider !== 'claude' && r.provider !== 'codex') continue;   // box can only open these
+        if (exclude.has(r.id) || exclude.has(`${r.provider}:${r.id}`)) continue;
+        const openable = r.provider === 'codex' ? codexIds.has(r.id) : !!findSessionFile(r.id);
+        if (!openable) continue;                                           // skip laptop-only / unindexed hits
+        const rank = sessionSearchRank(r, search.variant, queryTokens);
+        const prev = byId.get(r.id);
+        if (!prev || rank > prev.rank) byId.set(r.id, { ...r, rank, matchedQuery: search.variant.query, matchKind: search.variant.kind });
+      }
     }
-    res.json({ results });
-  });
+    const results = [...byId.values()].sort((a, b) => (b.rank - a.rank) || (b.score - a.score)).slice(0, 30).map((r) => ({
+      id: r.id, agent: r.provider,
+      title: r.title || r.snippet || r.preview || 'session',
+      cwd: r.cwd, preview: sessionSearchPreview(r), age: r.age,
+      match: r.match, matchedQuery: r.matchedQuery, matchKind: r.matchKind,
+      archived: archived.has(r.id),
+    }));
+    res.json({ results, searched: variants.map((v) => v.query) });
+  } catch (e) {
+    res.status(500).json({ results: [], error: String(e.message || e) });
+  }
 });
 app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
