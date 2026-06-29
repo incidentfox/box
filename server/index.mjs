@@ -644,6 +644,42 @@ function sessionSearchRank(r, variant, queryTokens) {
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
 const saveCodex = (state) => writeJsonAtomic(CODEX_FILE, state);
+function codexMessageText(m) {
+  if (!m) return '';
+  const out = [];
+  const push = (v) => { if (typeof v === 'string' && v.trim()) out.push(v); };
+  push(m.text);
+  if (typeof m.content === 'string') push(m.content);
+  else if (Array.isArray(m.content)) {
+    for (const p of m.content) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') push(p.text);
+    }
+  }
+  if (Array.isArray(m.parts)) {
+    for (const p of m.parts) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.t === 'text' || p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') push(p.text);
+    }
+  }
+  return out.join('\n').trim();
+}
+function codexSessionMentionCount(session, issueId) {
+  let n = 0;
+  for (const m of ((session && session.messages) || [])) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    const txt = codexMessageText(m);
+    if (!txt) continue;
+    n += (txt.match(new RegExp(issueId, 'g')) || []).length;
+  }
+  return n;
+}
+function codexSessionMtime(session) {
+  const v = session && (session.lastUsed || session.updatedAt || session.created);
+  if (typeof v === 'number') return v;
+  const t = Date.parse(v || '');
+  return Number.isFinite(t) ? t : 0;
+}
 // Delegation ledger: INC-id (e.g. "INC-917") -> array of delegation records, oldest→newest.
 // The LAST entry is the current/primary delegation (the session the user delegated to most
 // recently); the history is kept so a re-delegated ticket still shows every owner.
@@ -1528,6 +1564,91 @@ function ghToken() {
 const OPENAI_KEY = cfg('OPENAI_API_KEY');
 const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).replace(/\/$/, '');
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
+const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
+
+function isPlaceholderTitle(title) {
+  return /^(New (Claude |Codex )?chat|Claude chat|Codex chat)$/i.test(String(title || '').trim());
+}
+function sanitizeTitle(title, max = 60) {
+  let s = String(title || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  s = s.replace(/^["'`]+|["'`.!?]+$/g, '').replace(/^title:\s*/i, '').trim();
+  if (!s || isPlaceholderTitle(s)) return '';
+  return s.slice(0, max).trim();
+}
+const TITLE_STOP = new Set('a an and are as at be but by can could do does for from get have how i if in into is it like make me of on or our please should so that the this to we when with you your'.split(' '));
+function fallbackTitleFromPrompt(prompt) {
+  let s = String(prompt || '')
+    .replace(/^\[(Image|File) attached at .+?\]\s*/gmi, ' ')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[#>*_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  s = s
+    .replace(/^(please\s+)?(can|could|would)\s+you\s+/i, '')
+    .replace(/^i\s+(think|guess|want|wanna|would like)\s+/i, '')
+    .replace(/^let'?s\s+/i, '')
+    .trim();
+  const words = s.split(/\s+/)
+    .map((w) => w.replace(/^[^\w-]+|[^\w-]+$/g, ''))
+    .filter((w) => w && !TITLE_STOP.has(w.toLowerCase()));
+  const picked = (words.length ? words : s.split(/\s+/)).slice(0, 5);
+  const out = picked.map((w) => w ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
+  return sanitizeTitle(out || 'Codex chat');
+}
+async function aiTitleFromPrompt(prompt) {
+  if (!OPENAI_KEY || !String(prompt || '').trim()) return '';
+  try {
+    const r = await fetch(`${OPENAI_ENDPOINT}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({
+        model: BOX_TITLE_MODEL,
+        temperature: 0.2,
+        max_tokens: 24,
+        messages: [
+          { role: 'system', content: 'Write a concise 2-5 word chat title. Output only the title, no quotes or punctuation.' },
+          { role: 'user', content: String(prompt || '').slice(0, 4000) },
+        ],
+      }),
+    });
+    if (!r.ok) return '';
+    const j = await r.json();
+    return sanitizeTitle(j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content);
+  } catch { return ''; }
+}
+function setCodexGeneratedTitle(id, title) {
+  const clean = sanitizeTitle(title);
+  if (!id || !clean) return false;
+  const names = loadNames();
+  if (names[id]) return false; // manual rename wins
+  const state = loadCodex();
+  const prev = state.sessions && state.sessions[id];
+  if (!prev) return false;
+  prev.title = clean;
+  prev.titleGeneratedAt = Date.now();
+  prev.updatedAt = new Date().toISOString();
+  state.sessions[id] = prev;
+  saveCodex(state);
+  return true;
+}
+function refreshCodexTitle(s, prompt, initialTitle) {
+  const fallback = sanitizeTitle(initialTitle) || fallbackTitleFromPrompt(prompt);
+  (async () => {
+    const title = (await aiTitleFromPrompt(prompt)) || fallback;
+    if (!title || title === fallback) return;
+    const apply = () => {
+      const realId = s.sessionId || null;
+      const id = realId || s.provKey || s.key;
+      if (!id || !setCodexGeneratedTitle(id, title)) return false;
+      s.title = title;
+      if (realId) bcast(s, { type: 'session', id: realId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title });
+      return true;
+    };
+    if (!apply()) setTimeout(apply, 1000);
+  })();
+}
 
 // Is the `codex` CLI installed? (Codex chats are optional.) Cached after first probe.
 let _codexAvail = null;
@@ -1698,6 +1819,7 @@ app.get('/api/linear/:id/detail', requireAuth, async (req, res) => {
       state: it.state, assignee: it.assignee ? it.assignee.displayName : null,
       labels: (it.labels.nodes || []).map((l) => ({ name: l.name, color: l.color })),
       comments: (it.comments.nodes || []).map((c) => ({ body: c.body, createdAt: c.createdAt, user: c.user ? c.user.displayName : 'someone' })),
+      attachments: (it.attachments.nodes || []).map((a) => ({ url: a.url, title: a.title })),
       delegations: loadDelegations()[it.identifier] || [],
       pr,
     });
@@ -1904,7 +2026,7 @@ app.get('/api/linear/:id/sessions', requireAuth, (req, res) => {
   // codex sessions live in one JSON store keyed by id
   try {
     for (const [sid, s] of Object.entries(loadCodex().sessions || {})) {
-      const n = (JSON.stringify(s.messages || '').match(new RegExp(id, 'g')) || []).length;
+      const n = codexSessionMentionCount(s, id);
       if (n) counts[sid] = (counts[sid] || 0) + n;
     }
   } catch {}
@@ -1915,7 +2037,7 @@ app.get('/api/linear/:id/sessions', requireAuth, (req, res) => {
     if (sid === exclude) continue;
     if (codex[sid]) {
       const c = codex[sid];
-      sessions.push({ id: sid, title: names[sid] || c.title || 'Codex session', agent: 'codex', cwd: c.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: c.updatedAt ? Date.parse(c.updatedAt) : 0, mentions: counts[sid] });
+      sessions.push({ id: sid, title: names[sid] || c.title || 'Codex session', agent: 'codex', cwd: c.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: codexSessionMtime(c), mentions: counts[sid] });
       continue;
     }
     const file = jsonlPath(sid);
@@ -1980,7 +2102,10 @@ app.get('/api/sessions/:id/linear', requireAuth, async (req, res) => {
     const c = (loadCodex().sessions || {})[id];
     if (c) for (const m of (c.messages || [])) {
       if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
-      tallyIssues(typeof m.text === 'string' ? m.text : (typeof m.content === 'string' ? m.content : ''), counts);
+      const txt = codexMessageText(m);
+      if (!txt) continue;
+      if (m.role === 'user' && (INC_INJECT_RE.test(txt) || /New since your last turn|Needs your input/.test(txt))) continue;
+      tallyIssues(txt, counts);
     }
   } catch {}
   // Keep tickets with a real signal: mentioned ≥2× in dialogue (drops one-off passing
@@ -2623,6 +2748,10 @@ function runCodexTurn(s, msg, resolve) {
   s.cxLastFlush = 0;
   let lastError = '';
   const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const isNewCodexSession = !s.sessionId;
+  const explicitTitle = isNewCodexSession ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNewCodexSession ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNewCodexSession && initialTitle) s.title = initialTitle;
   // PROVISIONAL REGISTRATION — make a brand-new Codex chat durable + visible the instant the user
   // hits send, before (or even if never) codex emits `thread.started`. Keyed by the box's internal
   // `new-…` key, carrying the user's message and shown as "working" (RUNNING). On `thread.started`
@@ -2631,9 +2760,10 @@ function runCodexTurn(s, msg, resolve) {
   // a resume already has s.sessionId, so it's untouched.
   if (!s.sessionId) {
     s.provKey = s.key;
-    ensureCodexSession(s.provKey, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
     appendCodexMessage(s.provKey, 'user', userText);
     RUNNING.add(s.provKey);
+    if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
   const finish = () => {
     if (done) return; done = true;
@@ -2679,10 +2809,10 @@ function runCodexTurn(s, msg, resolve) {
         if (provKey && provKey !== s.sessionId) { RUNNING.delete(provKey); migrateCodexSession(provKey, s.sessionId); }
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
         if (!provKey) appendCodexMessage(s.sessionId, 'user', userText); // provisional path already appended it
         persist(s);
-        bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '' });
+        bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
       } else if (ev.type === 'text') {
         // Codex streams each agent_message as a complete, self-contained chunk. When
         // two arrive back-to-back (no tool between) we must separate them with a blank

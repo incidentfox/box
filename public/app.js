@@ -101,6 +101,7 @@ function toast(m, ms = 2200, action) {
   t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms);
 }
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const isPlaceholderChatTitle = (s) => /^New (Claude |Codex )?chat$/i.test(String(s || '').trim());
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
   if (r.status === 401) { throw new Error('unauthorized'); }   // never auto-logout — token is long & annoying to re-enter
@@ -117,7 +118,7 @@ function applyConfig() {
   const f = (CFG && CFG.features) || {};
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   setVis('boardBtn', !!f.linear);       // header Linear-board button
-  setVis('attnTabLinear', !!f.linear);  // "Linear" sub-tab in the needs-attention panel
+  setVis('attnTabLinear', !!f.linear);  // Linear tab in the needs-attention panel
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
 function atBottom() { const m = $('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
@@ -1138,6 +1139,11 @@ function isDelegationMarker(body) {
 // loaded (description + every real comment + labels + the agents that touched it). This
 // gets baked into the delegation prompt so the agent doesn't have to go re-fetch the
 // Linear ticket and is GUARANTEED the context/comments we already hold.
+function fmtIssueDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString();
+}
 function buildIssueContext(d, sessions) {
   const L = [`# ${d.identifier} — ${d.title}`];
   const meta = [];
@@ -1147,20 +1153,41 @@ function buildIssueContext(d, sessions) {
   const labels = (d.labels || []).map((l) => l.name).filter((n) => !/^agent[:-]/.test(n));
   if (labels.length) meta.push(`Labels: ${labels.join(', ')}`);
   if (meta.length) L.push(meta.join(' · '));
+  const dates = [`Created: ${fmtIssueDate(d.createdAt) || d.createdAt || 'unknown'}`, `Updated: ${fmtIssueDate(d.updatedAt) || d.updatedAt || 'unknown'}`];
+  L.push(dates.join(' · '));
   if (d.url) L.push(`Linear: ${d.url}`);
   if (d.pr) L.push(`PR: ${d.pr.url} (${d.pr.state || 'open'})`);
   L.push('', '## Description', (d.description && d.description.trim()) ? d.description.trim() : '(no description)');
+  const attachments = (d.attachments || []).filter((a) => a && (a.url || a.title));
+  if (attachments.length) {
+    L.push('', `## Attachments (${attachments.length})`);
+    for (const a of attachments) L.push(`- ${a.title || a.url}${a.url && a.title ? `: ${a.url}` : ''}`);
+  }
   const cmts = (d.comments || []).filter((c) => !isDelegationMarker(c.body));
   if (cmts.length) {
     L.push('', `## Comments (${cmts.length}) — context already gathered; read these before re-deriving anything`);
-    for (const c of cmts) L.push('', `### ${c.user || 'someone'} · ${relTime(Date.parse(c.createdAt))}`, (c.body || '').trim());
+    for (const c of cmts) L.push('', `### ${c.user || 'someone'} · ${fmtIssueDate(c.createdAt) || c.createdAt || 'unknown time'}`, (c.body || '').trim());
   }
   if (sessions && sessions.length) {
     L.push('', '## Agents that have already worked on this');
-    for (const s of sessions.slice(0, 8)) L.push(`- ${s.title} (${s.agent}, ${s.mentions}× mentions, last active ${relTime(s.mtime)})`);
+    for (const s of sessions.slice(0, 8)) L.push(`- ${s.title} (${s.agent}, ${s.mentions}× mentions, last active ${fmtIssueDate(s.mtime) || relTime(s.mtime)})`);
     L.push('If you are one of these, you already hold the full transcript — keep using that context.');
   }
   return L.join('\n');
+}
+function buildIssueDelegationPrompt(d, sessions) {
+  const slug = d.identifier.toLowerCase();
+  return `Work the Linear issue ${d.identifier}: "${d.title}".
+
+Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
+
+${buildIssueContext(d, sessions)}
+
+How to work it:
+- Do not edit a shared clone. Create an isolated git worktree for your branch off the latest default branch. Use a unique branch name for this ticket, for example:
+  git worktree add ../${slug} -b agent/${slug} && cd ../${slug}
+- Implement and verify the change, open or refresh the PR, and post the PR link as a comment on ${d.identifier}.
+- When done, set ${d.identifier} to In Review, or comment your status and blockers.`;
 }
 // Wait for a freshly-spawned chat's session id to resolve (the RC bridge reports it via
 // the {type:'session'} WS event a beat after spawn). Keyed to this chat so navigating
@@ -1197,7 +1224,7 @@ ${buildIssueContext(d, curIssueSessions)}
 
 How to continue:
 - If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
-  git worktree add ../${d.identifier.toLowerCase()} -b claude/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
+  git worktree add ../${d.identifier.toLowerCase()} -b agent/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
 - Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
   enqueueText(cont, { displayText: `↻ Continue ${d.identifier}: ${d.title}` });
@@ -1205,19 +1232,7 @@ How to continue:
   toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
 }
 async function spawnIssueAgent(d, agent) {
-  const slug = d.identifier.toLowerCase();
-  const branchPrefix = agent === 'codex' ? 'codex' : 'claude';
-  const seed = `Work the Linear issue ${d.identifier}: "${d.title}".
-
-Everything you need about this ticket is below — description, every comment (the context we've already gathered), and the agents that already touched it. Read it before re-deriving anything; don't go re-fetch the Linear ticket.
-
-${buildIssueContext(d, curIssueSessions)}
-
-How to work it:
-- Do NOT edit a shared clone — create an isolated git worktree for your branch off the latest default branch:
-  git worktree add ../${slug} -b ${branchPrefix}/${slug} && cd ../${slug}
-- Implement + verify it runs, open a PR, and post the PR link as a comment on ${d.identifier}.
-- When done, set ${d.identifier} to In Review (or comment your status / blockers).`;
+  const seed = buildIssueDelegationPrompt(d, curIssueSessions);
   const title = `${d.identifier}: ${d.title}`.slice(0, 60);
   setAgent(agent);
   await openChat({ id: null, title, cwd: defaultCwd, agent });
@@ -1672,8 +1687,7 @@ const toolVerb = (name) => TOOL_VERB[name] || name;
 let running = false;     // a turn is currently running for this session
 let recording = false;   // mic is recording (live transcription in progress)
 let attnMode = false;    // the needs-attention reply page is open → composer is Send-only (never Stop)
-let attnShowAll = false; // Status tab: show ALL inbox entries (incl. done/answered), not just open
-let attnLinear = false;  // Linear tab: show the INC issues THIS session has touched
+let attnLinear = true;   // Linear tab: show the INC issues this session touched, or the global board queue
 function refreshButton() {
   const hasText = !!($('input').value.trim() || images.length);
   const btn = $('sendBtn');
@@ -1829,7 +1843,7 @@ function onSync(o) {
   if (o.agent && o.sessionId) setAgent(o.agent);
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
-  if (o.title && cur.title === 'New chat') { cur.title = o.title; $('chatTitle').textContent = o.title; }
+  if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; $('chatTitle').textContent = o.title; }
   if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
   if (o.context) { cur.context = o.context; renderContextMeter(); }
@@ -1900,7 +1914,7 @@ function finishTurn(o) {
   live = null; killGhostIndicators();
   running = false; refreshButton();
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
-  if (cur.title === 'New chat' && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); $('chatTitle').textContent = cur.title; }
+  if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); $('chatTitle').textContent = cur.title; }
   maybeScroll();
 }
 
@@ -2454,7 +2468,7 @@ function openApprovalsSheet() {
 // Rename any chat (from the in-chat header button OR the swipe Edit button) without
 // having to open it. Updates the open-chat header too if it's the same session.
 function renameChat(s, onDone) {
-  const cleanCur = (s.title && !/^New (Claude |Codex )?chat$/.test(s.title)) ? s.title : '';
+  const cleanCur = (s.title && !isPlaceholderChatTitle(s.title)) ? s.title : '';
   const inner = $('sheetInner'); inner.innerHTML = '<h3>Rename chat</h3>';
   const inp = document.createElement('input'); inp.className = 'sheetInput'; inp.value = cleanCur; inp.placeholder = 'Chat name';
   inner.appendChild(inp);
@@ -2605,7 +2619,11 @@ $('archiveBtn').onclick = async () => {
   if (s.archived) { await doArchive(s, false); return; }
   openArchiveConfirm(s, { leaveChat: true });
 };
-$('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key }); showAttention(); };
+$('attnBtn').onclick = () => {
+  attnLinear = !!(((CFG && CFG.features) || {}).linear);
+  navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
+  showAttention();
+};
 $('copyChatBtn').onclick = () => {
   const TURNS = 10;
   const msgs = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')];
@@ -2620,8 +2638,7 @@ $('copyChatBtn').onclick = () => {
   if (!lines.length) { toast('No messages yet'); return; }
   navigator.clipboard.writeText(lines.join('\n\n')).then(() => toast(`Copied ${lines.length} messages`)).catch(() => {});
 };
-$('attnTabInput').onclick = () => { attnShowAll = false; attnLinear = false; showAttention(); };
-$('attnTabStatus').onclick = () => { attnShowAll = true; attnLinear = false; showAttention(); };
+$('attnTabStatus').onclick = () => { attnLinear = false; showAttention(); };
 $('attnTabLinear') && ($('attnTabLinear').onclick = () => { attnLinear = true; showAttention(); });
 $('attnList').addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('.attnDismiss'); if (b) { e.preventDefault(); e.stopPropagation(); dismissAttn(b.dataset.key, b.dataset.title, b.dataset.identifier); } });
 function closeAttention() {
@@ -2648,6 +2665,32 @@ function attnCard(it) {
 }
 const attnKey = (it) => `${it.date || ''}|${it.title || ''}`;
 const attnDismissedSet = () => { try { return new Set(JSON.parse(LS.getItem('attn_dismissed') || '[]')); } catch { return new Set(); } };
+function attnSection(markdown, heading) {
+  const m = String(markdown || '').match(new RegExp(`(^##\\s*${heading}[\\s\\S]*?)(?=^##\\s|\\s*$)`, 'im'));
+  return m ? m[1].trim() : '';
+}
+function attnSectionBody(section) {
+  return String(section || '').replace(/^##[^\n]*\n?/i, '').trim();
+}
+function hasUsefulAttnSection(section) {
+  const body = attnSectionBody(section)
+    .replace(/\*\*/g, '')
+    .replace(/[_`]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!body) return false;
+  return !/^\(?\s*(none|n\/a|nothing|no blockers?|all clear)\s*\)?[.!]*$/.test(body);
+}
+function buildBriefMarkdown(markdown) {
+  const needs = attnSection(markdown, 'needs your input');
+  const inProgress = attnSection(markdown, 'in progress');
+  const done = attnSection(markdown, 'done recently');
+  const parts = [];
+  if (hasUsefulAttnSection(needs)) parts.push(needs);
+  if (hasUsefulAttnSection(inProgress)) parts.push(inProgress);
+  if (hasUsefulAttnSection(done)) parts.push(done);
+  return { markdown: parts.join('\n\n').trim(), hasNeeds: hasUsefulAttnSection(needs) };
+}
 // Items are Linear issues (label needs-me). Dismiss = actually resolve the issue
 // (move it to Done) via the existing /api/linear/:id/done endpoint, so it clears for
 // every session — not just hidden locally. Falls back to local-hide if there's no
@@ -2664,16 +2707,13 @@ async function dismissAttn(key, title, identifier) {
   showAttention();
 }
 async function showAttention() {
-  // Per-session view: GET /api/sessions/:id/attention → this session's own status doc
-  // (server stores it per session id, so concurrent ~/development chats don't clobber).
-  // Falls back to the global needs-me Linear inbox (via /api/needs-attention) with the card UI.
+  // Linear is the default surface because it is the durable work queue. Brief is the
+  // per-session status doc, merged into one page instead of split across empty tabs.
   const perSession = cur.id;
   const seg = $('attnSeg');
   if (seg) seg.classList.remove('hidden');
-  // 3-way tab active state
-  $('attnTabInput') && $('attnTabInput').classList.toggle('active', !attnShowAll && !attnLinear);
-  $('attnTabStatus') && $('attnTabStatus').classList.toggle('active', attnShowAll && !attnLinear);
   $('attnTabLinear') && $('attnTabLinear').classList.toggle('active', attnLinear);
+  $('attnTabStatus') && $('attnTabStatus').classList.toggle('active', !attnLinear);
   if (attnLinear) {
     await renderSessionLinear(perSession);
   } else if (perSession) {
@@ -2681,38 +2721,31 @@ async function showAttention() {
     let markdown = null;
     try { const d = await (await api(`/api/sessions/${cur.id}/attention`)).json(); markdown = d.markdown || null; } catch {}
     if (markdown) {
-      const hasNeeds = /^##\s*needs your input/im.test(markdown) && !/^##\s*needs your input\s*\n\s*\n/im.test(markdown);
+      const brief = buildBriefMarkdown(markdown);
+      const hasNeeds = brief.hasNeeds;
       setAttnBadge(hasNeeds ? 1 : 0);
-      let display = markdown;
-      if (!attnShowAll) {
-        // "Needs input" tab — show only the ## Needs your input section
-        const m = markdown.match(/^(##\s*needs your input[\s\S]*?)(?=^##\s|\s*$)/im);
-        display = m ? m[1].trim() : (hasNeeds ? markdown : '');
-      }
-      if (display) {
-        const lead = attnShowAll
-          ? 'Full session status — updated every 5 turns automatically.'
-          : 'What this session needs from you — reply below to unblock it.';
-        $('attnList').innerHTML = `<div class="attnLead">${lead}</div><div class="attnMd">${md(display)}</div>`;
+      if (brief.markdown) {
+        const lead = hasNeeds
+          ? 'Session brief — blockers first. Reply below to unblock it.'
+          : 'Session brief — no blocker detected; recent status is below.';
+        $('attnList').innerHTML = `<div class="attnLead">${lead}</div><div class="attnMd">${md(brief.markdown)}</div>`;
       } else {
-        $('attnList').innerHTML = '<div class="attnEmpty">🎉 Nothing blocking — all clear.</div>';
+        $('attnList').innerHTML = '<div class="attnEmpty">Nothing useful in the session brief yet.</div>';
       }
     } else {
       setAttnBadge(0);
-      $('attnList').innerHTML = '<div class="attnEmpty">No status yet — will appear after a few turns.</div>';
+      $('attnList').innerHTML = '<div class="attnEmpty">No brief yet — it will appear after a few turns.</div>';
     }
   } else {
     // Global fallback: needs-me Linear inbox with card UI
     let all = [];
     try { const d = await (await api('/api/needs-attention')).json(); all = d.items || []; setAttnBadge((d.items || []).filter((i) => i.open).length); } catch {}
     const dis = attnDismissedSet();
-    const items = all.filter((i) => attnShowAll ? !dis.has(attnKey(i)) : (i.open && !dis.has(attnKey(i))));
-    const lead = attnShowAll
-      ? `Everything tracked across sessions. 🔴 needs you · 🟡 heads-up · 🟢 answered · ⚪ done.`
-      : `${items.length} thing${items.length === 1 ? '' : 's'} need your input. Reply below.`;
+    const items = all.filter((i) => !dis.has(attnKey(i)));
+    const lead = `Cross-session queue. Reply below, or resolve a card when it no longer needs you.`;
     $('attnList').innerHTML = items.length
       ? `<div class="attnLead">${lead}</div>` + items.map(attnCard).join('')
-      : (attnShowAll ? '<div class="attnEmpty">Nothing tracked yet.</div>' : '<div class="attnEmpty">🎉 All clear — nothing needs your input right now.</div>');
+      : '<div class="attnEmpty">Nothing tracked yet.</div>';
   }
   $('messages').classList.add('hidden');
   $('attnPanel').classList.remove('hidden');
@@ -2727,11 +2760,11 @@ async function showAttention() {
 // "Linear" tab of the bell — the INC issues THIS session has referenced (most first),
 // resolved to title + workflow state. Tap a row to open the in-app issue workspace.
 async function renderSessionLinear(perSession) {
-  if (!perSession) { $('attnList').innerHTML = '<div class="attnEmpty">Open a session to see the Linear issues it has worked on.</div>'; return; }
+  if (!perSession) { await renderLinearQueuePreview(); return; }
   $('attnList').innerHTML = '<div class="attnLead">Loading…</div>';
   let issues = [];
   try { const d = await (await api(`/api/sessions/${perSession}/linear`)).json(); issues = d.issues || []; } catch {}
-  if (!issues.length) { $('attnList').innerHTML = '<div class="attnEmpty">No Linear issues referenced in this session yet.</div>'; return; }
+  if (!issues.length) { await renderLinearQueuePreview('No Linear issue is tied to this session yet. Here is the active queue.'); return; }
   const STYPE = { completed: '#3aa55e', canceled: '#9aa', started: '#e0a23a', unstarted: '#5b8def', backlog: '#9aa', triage: '#e0533a' };
   const rows = issues.map((it) => {
     const stCol = it.state ? (STYPE[it.state.type] || '#9aa') : '#9aa';
@@ -2750,6 +2783,39 @@ async function renderSessionLinear(perSession) {
     };
   });
 }
+async function renderLinearQueuePreview(prefix) {
+  $('attnList').innerHTML = '<div class="attnLead">Loading…</div>';
+  let d = null;
+  try { d = await (await api('/api/linear-board')).json(); } catch {}
+  const issues = [];
+  for (const col of ((d && d.columns) || [])) {
+    if (col.recent) continue;
+    for (const t of (col.issues || [])) issues.push({ ...t, stateName: col.name, stateType: col.type });
+  }
+  if (!issues.length) {
+    $('attnList').innerHTML = '<div class="attnEmpty">No open Linear issues.</div>';
+    return;
+  }
+  issues.sort((a, b) => (a.stateType === 'started' ? -1 : b.stateType === 'started' ? 1 : 0) || (Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0)));
+  const rows = issues.slice(0, 12).map((it) => {
+    const [plabel, pcolor] = PRIO[it.priority] || [];
+    const sub = [it.stateName, plabel, it.assignee && `@${it.assignee}`].filter(Boolean).join(' · ');
+    return `<div class="sessRow linRow" data-id="${esc(it.id)}"><span class="sessIc">◎</span>`
+      + `<div class="sessMain"><div class="sessTitle">${esc(it.id)} · ${esc(it.title || '(untitled)')}</div>`
+      + `<div class="sessSub">${pcolor ? `<span class="attnDot" style="background:${pcolor}"></span>` : ''}${esc(sub)}</div></div>`
+      + `<span class="sessGo">→</span></div>`;
+  }).join('');
+  const lead = prefix || 'Active Linear queue — tap an issue to open it.';
+  $('attnList').innerHTML = `<div class="attnLead">${esc(lead)}</div>${rows}`;
+  $('attnList').querySelectorAll('.linRow').forEach((row) => {
+    row.onclick = () => {
+      issueOrigin = cur.id
+        ? { kind: 'chat', chat: { id: cur.id, title: cur.title, cwd: cur.cwd, agent: cur.agent, settings: cur.settings } }
+        : { kind: 'board' };
+      openIssue(row.dataset.id);
+    };
+  });
+}
 function setAttnBadge(n) {
   const b = $('attnBadge'); if (!b) return;
   if (n > 0) { b.textContent = n; b.classList.remove('hidden'); } else b.classList.add('hidden');
@@ -2759,7 +2825,7 @@ async function refreshAttnBadge() {
     // Per-session: badge = 1 if ATTENTION.md exists with a non-empty "Needs your input" section
     try {
       const d = await (await api(`/api/sessions/${cur.id}/attention`)).json();
-      const hasNeeds = d.markdown && /^##\s*needs your input/im.test(d.markdown) && !/^##\s*needs your input\s*\n\s*\n/im.test(d.markdown);
+      const hasNeeds = d.markdown && buildBriefMarkdown(d.markdown).hasNeeds;
       setAttnBadge(hasNeeds ? 1 : 0);
     } catch { setAttnBadge(0); }
   } else {
