@@ -697,6 +697,37 @@ function appendCodexMessage(id, role, text, extra = {}) {
   state.sessions[id] = prev;
   saveCodex(state);
 }
+// codex hands errors back in several shapes (a plain string, or a JSON envelope like
+// {error:{message}} / {message}). Pull out the human-readable bit before we persist it as a note,
+// so a failed turn reads "model X does not exist" instead of a truncated JSON blob.
+function cleanCodexError(raw) {
+  let s = String(raw == null ? '' : raw).trim();
+  try { const o = JSON.parse(s); s = (o && o.error && o.error.message) || (o && o.message) || s; } catch {}
+  return s.replace(/\s+/g, ' ').slice(0, 200);
+}
+// A brand-new Codex chat has no thread id until codex emits `thread.started` — which can be a few
+// seconds away, or NEVER (codex OOM/startup failure, or a malformed invocation). We register a
+// PROVISIONAL entry keyed by the box's internal `new-…` key the instant the turn starts so the chat
+// is visible + the first message is durable immediately; when the real thread id arrives we migrate
+// the entry (with its messages/title/preview) onto it. Idempotent: a no-op if the source is gone.
+function migrateCodexSession(fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return null;
+  const state = loadCodex();
+  const prev = state.sessions[fromId];
+  if (!prev) return null;
+  const dest = state.sessions[toId] || {};
+  state.sessions[toId] = {
+    ...prev, ...dest,
+    id: toId,
+    title: (dest.title && dest.title !== 'Codex chat') ? dest.title : (prev.title || dest.title || 'Codex chat'),
+    messages: (dest.messages && dest.messages.length) ? dest.messages : (prev.messages || []),
+    preview: dest.preview || prev.preview || '',
+    created: prev.created || dest.created || Date.now(),
+  };
+  delete state.sessions[fromId];
+  saveCodex(state);
+  return state.sessions[toId];
+}
 
 // Build the stripped {text|tool} parts a history reload renders, from the live turn's
 // curParts (heavy tool results/detail dropped — history only shows the chip label).
@@ -2474,6 +2505,20 @@ function runCodexTurn(s, msg, resolve) {
   // counter reset on restart).
   s.cxTurnId = `${Date.now()}-${++CODEX_TURN_SEQ}`;
   s.cxLastFlush = 0;
+  let lastError = '';
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  // PROVISIONAL REGISTRATION — make a brand-new Codex chat durable + visible the instant the user
+  // hits send, before (or even if never) codex emits `thread.started`. Keyed by the box's internal
+  // `new-…` key, carrying the user's message and shown as "working" (RUNNING). On `thread.started`
+  // it's migrated onto the real thread id; if codex dies first the entry stays as a recoverable,
+  // retry-in-place chat instead of vanishing with the message. Only for a brand-new chat (no id yet);
+  // a resume already has s.sessionId, so it's untouched.
+  if (!s.sessionId) {
+    s.provKey = s.key;
+    ensureCodexSession(s.provKey, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+    appendCodexMessage(s.provKey, 'user', userText);
+    RUNNING.add(s.provKey);
+  }
   const finish = () => {
     if (done) return; done = true;
     clearTimeout(s.turnTimer); s.proc = null;
@@ -2481,7 +2526,19 @@ function runCodexTurn(s, msg, resolve) {
     // uses, so a reload renders like the live view). The row was already being written
     // incrementally below; this just clears the `live` flag — or writes it once for a
     // turn so short nothing flushed mid-stream.
-    if (s.sessionId) flushCodexAssistant(s, { finalize: true });
+    if (s.sessionId) {
+      flushCodexAssistant(s, { finalize: true });
+      // A turn that errored out (e.g. model_not_found, rate limit) only ever bcast the error to the
+      // live view — reopening the chat later showed silence. Persist a short note so the failure is
+      // visible in history too.
+      if (lastError && !s.canceled) appendCodexMessage(s.sessionId, 'assistant', `⚠️ Codex error: ${lastError}`);
+    } else if (s.provKey) {
+      // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
+      // entry already holds the user's message, so the chat stays in the list and is retryable in
+      // place; clear its "working" state and leave a note explaining what happened.
+      RUNNING.delete(s.provKey);
+      if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
+    }
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
@@ -2497,11 +2554,17 @@ function runCodexTurn(s, msg, resolve) {
     settings: (s.settings || {}).codex || DEFAULT_SETTINGS.codex,
     onEvent: (ev) => {
       if (ev.type === 'session' && ev.id) {
+        const provKey = s.provKey || null;
         s.sessionId = ev.id; s.agent = 'codex';
         ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+        // Migrate the provisional entry (and its already-appended user message) onto the real
+        // thread id, then drop its working marker. provKey is cleared so finish() treats this as a
+        // normal (registered) turn.
+        if (provKey && provKey !== s.sessionId) { RUNNING.delete(provKey); migrateCodexSession(provKey, s.sessionId); }
+        s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-        appendCodexMessage(s.sessionId, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
+        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText); // provisional path already appended it
         persist(s);
         bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '' });
       } else if (ev.type === 'text') {
@@ -2541,12 +2604,13 @@ function runCodexTurn(s, msg, resolve) {
         const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
         bcast(s, ev);
       } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = cleanCodexError(ev.msg);
         bcast(s, ev);
       }
     },
   });
   s.proc.on('close', finish);
-  s.proc.on('error', (e) => { bcast(s, { type: 'error', msg: String(e.message || e) }); finish(); });
+  s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
 // resume persisted, non-empty queues on startup (after a restart) so a queued message is never
 // lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
