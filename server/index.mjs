@@ -305,6 +305,29 @@ function killSessionBridge(id) {
   return { killed: pids.length };
 }
 
+function restoreSessionBridge(id) {
+  if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { started: false, reason: 'bad-id' };
+  try {
+    if ((loadCodex().sessions || {})[id]) return { started: false, reason: 'codex-on-demand' };
+  } catch {}
+  const file = findSessionFile(id);
+  if (!file) return { started: false, reason: 'history-not-found' };
+  try {
+    const s = rt(id);
+    s.sessionId = id;
+    s.agent = s.agent || 'claude';
+    s.cwd = s.cwd || decodeCwd(dirname(file)) || DEFAULT_CWD;
+    persist(s);
+    const rec = rcEngine.open(id, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    if (rec && rec.blocked) return { started: false, reason: rec.reason || 'blocked' };
+    ensureTail(s);
+    LIVE_BRIDGES.set(id, { rcName: rcName(s), cwd: s.cwd, pid: rec && rec.pid ? rec.pid : null });
+    return { started: true };
+  } catch (e) {
+    return { started: false, reason: String((e && e.message) || e).slice(-160) };
+  }
+}
+
 // Dream-cycle / meta sessions all open with the SAME boilerplate prompt, so the
 // title is identical for every one. When we detect a meta-prompt, pull the ACTUAL
 // subject out of the embedded "SESSION TRANSCRIPT:" (the session being distilled)
@@ -1189,10 +1212,11 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
   saveArchived(set); saveArchivedAt(at);
   // Archiving = done with it → kill its remote-control bridge so it stops consuming a
-  // claude process + heartbeating. Opening the card later just respawns the bridge.
+  // claude process + heartbeating. Unarchiving explicitly warms a fresh bridge below.
   let killed = 0;
   if (on) { try { killed = killSessionBridge(id).killed; } catch {} }
-  res.json({ ok: true, archived: on, killed });
+  const restored = on ? null : restoreSessionBridge(id);
+  res.json({ ok: true, archived: on, killed, restored });
 });
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
 // Natural-language queries are expanded into a few targeted searches, then merged and reranked.
@@ -1233,7 +1257,9 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
 });
 app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
-  res.json(sessionHistory(req.params.id, { before }));
+  const h = sessionHistory(req.params.id, { before });
+  h.archived = loadArchived().has(req.params.id);
+  res.json(h);
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
@@ -2816,7 +2842,7 @@ wss.on('connection', (ws) => {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', archived: s.sessionId ? loadArchived().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });

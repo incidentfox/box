@@ -210,6 +210,7 @@ const ICONS = {
   copy: SVG('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', { w: 2 }),
   trash: SVG('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h2a2 2 0 0 1 2 2v2"/>', { w: 1.9 }),
   archive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>', { w: 1.9 }),
+  unarchive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M12 17v-6M8.5 14.5L12 11l3.5 3.5"/>', { w: 1.9 }),
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
@@ -490,8 +491,8 @@ function attachSwipeActions(card, front, s) {
   return { close, isOpen: () => open };
 }
 function confirmArchive(s) {
-  // No confirm dialog (it got annoying) — archive immediately; the Undo toast is the safety net.
-  doArchive(s, !s.archived);
+  if (s.archived) return doArchive(s, false);
+  openArchiveConfirm(s);
 }
 function openArchiveSheet(s) {
   openSheet(s.title, [
@@ -502,11 +503,21 @@ function openArchiveSheet(s) {
   ]);
 }
 async function doArchive(s, on) {
-  try { await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) }); } catch {}
-  s.archived = on;
-  if (on) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
-  else toast('📤 Unarchived');
+  let j = null;
+  try {
+    const r = await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'archive failed');
+  } catch {
+    toast(on ? 'Archive failed' : 'Unarchive failed', 2600);
+    return null;
+  }
+  s.archived = !!j.archived;
+  if (cur && cur.id === s.id) { cur.archived = s.archived; updateArchiveButton(); }
+  if (s.archived) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
+  else toast(j.restored && j.restored.started ? '📤 Unarchived and reconnected' : '📤 Unarchived');
   fetchSessions(curFilter);
+  return j;
 }
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
@@ -1379,11 +1390,12 @@ function connectWS() {
 }
 async function openChat(s) {
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   $('chatTitle').textContent = cur.title;
+  updateArchiveButton();
   renderContextMeter();
   $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
@@ -1395,6 +1407,7 @@ async function openChat(s) {
   if (s.id) {
     const h = await (await api(`/api/sessions/${s.id}/history`)).json();
     cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
+    if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
     cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
     cur.context = h.context || cur.context; renderContextMeter();
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
@@ -1445,10 +1458,7 @@ async function renderLinearBar(inc, sessionId) {
     const r = await (await api(`/api/linear/${inc}/done`, { method: 'POST' })).json();
     toast(r.ok ? `✅ ${inc} → Done` : (r.error || 'failed'), 3000); renderLinearBar(inc, sessionId);
   });
-  if (sessionId) btn('Archive', 'arch', async () => {
-    try { await api(`/api/sessions/${sessionId}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-    toast('🗄 archived'); if (ws) ws.close(); openSessions();
-  });
+  if (sessionId) btn('Archive', 'arch', async () => openArchiveConfirm({ id: sessionId, title: cur.title, archived: false }, { leaveChat: true }));
   bar.appendChild(actions);
 }
 // Back from the chat, kept in lock-step with the browser history stack: the
@@ -1820,6 +1830,7 @@ function onSync(o) {
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
   if (o.title && cur.title === 'New chat') { cur.title = o.title; $('chatTitle').textContent = o.title; }
+  if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
   if (o.context) { cur.context = o.context; renderContextMeter(); }
   // Remove stale live bubble from DOM before recreating it below (prevents duplicate
@@ -2561,12 +2572,38 @@ $('myMsgsBtn').onclick = async () => {
    voice button) handles the reply. Back returns to the chat. Items are shown as clean cards. */
 // Paint bell icon (attnBtn has a badge child, so we use insertAdjacentHTML not data-icon/paintIcons)
 $('attnBtn').insertAdjacentHTML('afterbegin', ICONS.bell);
+function updateArchiveButton() {
+  const b = $('archiveBtn'); if (!b) return;
+  const isArchived = !!(cur && cur.archived);
+  b.dataset.icon = isArchived ? 'unarchive' : 'archive';
+  b.title = isArchived ? 'Unarchive this conversation' : 'Archive this conversation';
+  b.setAttribute('aria-label', b.title);
+  b._painted = 0; b.innerHTML = ''; paintIcons(b.parentElement || document);
+}
+function openArchiveConfirm(s, opts = {}) {
+  const inner = $('sheetInner');
+  inner.innerHTML = '<h3>Archive chat?</h3><p class="sheetText">This moves the chat to Archived and stops its running Claude bridge so it no longer consumes box resources. You can unarchive it later from Archived or from this chat.</p>';
+  const rows = [
+    { ic: '🗄', label: 'Archive', desc: 'Stop the bridge and move it out of active chats', fn: async () => {
+      const j = await doArchive(s, true);
+      if (j && opts.leaveChat) { if (ws) ws.close(); openSessions(); }
+    } },
+    { ic: '✕', label: 'Cancel', fn: () => {} },
+  ];
+  for (const r of rows) {
+    const el = document.createElement('div');
+    el.className = 'sheetRow' + (r.label === 'Archive' ? ' danger' : '');
+    el.innerHTML = `<span class="ic">${r.ic || ''}</span><div><div>${esc(r.label)}</div>${r.desc ? `<div class="muted" style="font-size:12.5px">${esc(r.desc)}</div>` : ''}</div>`;
+    el.onclick = () => { closeSheet(); r.fn(); };
+    inner.appendChild(el);
+  }
+  $('sheet').classList.remove('hidden');
+}
 $('archiveBtn').onclick = async () => {
   if (!cur.id) return toast('Nothing to archive yet');
-  const sid = cur.id;   // no confirm — archive now, offer Undo via toast
-  try { await api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-  toast('🗄 Archived', 6000, { label: 'Undo', fn: () => { api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: false }) }).catch(() => {}); if (curFilter) fetchSessions(curFilter); } });
-  if (ws) ws.close(); openSessions();
+  const s = { id: cur.id, title: cur.title, archived: !!cur.archived };
+  if (s.archived) { await doArchive(s, false); return; }
+  openArchiveConfirm(s, { leaveChat: true });
 };
 $('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key }); showAttention(); };
 $('copyChatBtn').onclick = () => {
