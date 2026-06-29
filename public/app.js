@@ -581,7 +581,9 @@ async function runSessSearch() {
   const seq = ++sessSearchSeq;
   const box = $('sessResults'); box.innerHTML = '<p class="empty">Searching…</p>';
   let results = [];
-  try { results = (await (await api('/api/session-search?q=' + encodeURIComponent(q))).json()).results || []; } catch {}
+  const params = new URLSearchParams({ q });
+  if (cur.id) params.set('exclude', cur.id);
+  try { results = (await (await api('/api/session-search?' + params.toString())).json()).results || []; } catch {}
   if (seq !== sessSearchSeq || sessQuery !== q) return;   // a newer query already fired
   box.innerHTML = '';
   if (!results.length) { box.innerHTML = `<p class="empty">No chats match “${esc(q)}”.</p>`; return; }
@@ -599,10 +601,14 @@ function sessResultRow(s) {
     + (s.preview ? `<div class="sresSnip"></div>` : '');
   row.querySelector('.sresTitle').textContent = s.title || 'session';
   row.querySelector('.sresAge').textContent = s.age || '';
-  row.querySelector('.sresMeta').textContent = shortCwd(s.cwd);
+  row.querySelector('.sresMeta').textContent = [shortCwd(s.cwd), searchMatchLabel(s)].filter(Boolean).join(' · ');
   if (s.preview) row.querySelector('.sresSnip').textContent = stripMd(s.preview);
   row.onclick = () => { sessSearchClose(); openChat({ id: s.id, title: s.title, agent, cwd: s.cwd }); };
   return row;
+}
+function searchMatchLabel(s) {
+  if (!s || !s.matchedQuery || s.matchKind === 'exact') return '';
+  return `matched ${s.matchKind}: ${s.matchedQuery}`;
 }
 
 /* ---------- pipelines health panel ---------- */
