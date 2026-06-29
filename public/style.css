@@ -443,9 +443,11 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .sheet { position: fixed; top: 0; left: 0; right: 0; height: var(--app-h); max-height: var(--app-h); overflow: hidden; background: rgba(0,0,0,.35); z-index: 30; display: flex; align-items: flex-end; }
 .sheetInner { width: 100%; background: var(--bg); border-radius: 18px 18px 0 0; padding: 8px 0 calc(10px + var(--safe-b)); max-height: calc(var(--app-h) - 12px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; }
 .sheetInner h3 { text-align: center; font-size: 15px; margin: 12px 0; color: var(--muted); font-weight: 600; }
+.sheetText { margin: 0 22px 10px; color: var(--muted); font-size: 13.5px; line-height: 1.42; text-align: center; }
 .sheetRow { display: flex; align-items: center; gap: 14px; padding: 15px 22px; font-size: 16px; }
 .sheetRow .ic { font-size: 20px; width: 26px; text-align: center; }
 .sheetRow.sel { color: var(--accent); font-weight: 600; }
+.sheetRow.danger { color: #b94b31; font-weight: 600; }
 .sheetRow + .sheetRow { border-top: 1px solid var(--line); }
 .sheetInput { width: calc(100% - 44px); margin: 6px 22px 12px; padding: 12px 14px; font-size: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); outline: none; }
 
