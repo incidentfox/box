@@ -664,6 +664,31 @@ function codexMessageText(m) {
   }
   return out.join('\n').trim();
 }
+function codexMessageTs(m) {
+  return m && (m.ts || m.timestamp || m.createdAt || m.created || null);
+}
+function codexUserMessagesFromSession(session) {
+  const messages = [];
+  for (const m of ((session && session.messages) || [])) {
+    if (!m || m.role !== 'user') continue;
+    const text = codexMessageText(m);
+    if (!text) continue;
+    messages.push({ text, ts: codexMessageTs(m) });
+  }
+  return messages;
+}
+function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
+  const safeTitle = title || 'conversation';
+  const header = `# ${safeTitle}\n\nExported ${messages.length} messages\n\n`;
+  const assistantName = agent === 'codex' ? 'Codex' : 'Claude';
+  const body = messages.map((m) => {
+    const role = m.role === 'user' ? '**You**' : `**${assistantName}**`;
+    const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
+    const tools = (m.parts || []).filter((p) => p.t === 'tool').map((p) => `\`[${p.name}]\``).join(' ');
+    return `${role}\n\n${text || ''}${tools ? (text ? '\n\n' : '') + tools : ''}`.trim();
+  }).filter((s) => s.length > 10).join('\n\n---\n\n');
+  return header + body;
+}
 function codexSessionMentionCount(session, issueId) {
   let n = 0;
   for (const m of ((session && session.messages) || [])) {
@@ -827,7 +852,7 @@ function appendCodexMessage(id, role, text, extra = {}) {
   const now = Date.now();
   const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, created: now, messages: [] };
   const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
-  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  prev.messages = [...(prev.messages || []), { role, parts, ts: extra.ts || now }].slice(-160);
   const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
   if (role === 'user' && (!prev.title || prev.title === 'Codex chat')) prev.title = plain.slice(0, 80) || 'Codex chat';
   if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
@@ -989,7 +1014,7 @@ function flushCodexAssistant(s, { finalize = false } = {}) {
   if (!prev) return;
   const msgs = prev.messages ? [...prev.messages] : [];
   const last = msgs[msgs.length - 1];
-  const row = { role: 'assistant', parts, turnId: s.cxTurnId };
+  const row = { role: 'assistant', parts, turnId: s.cxTurnId, ts: (last && last.live && last.turnId === s.cxTurnId && last.ts) || Date.now() };
   if (!finalize) row.live = true;
   if (last && last.role === 'assistant' && last.live && last.turnId === s.cxTurnId) msgs[msgs.length - 1] = row;
   else msgs.push(row);
@@ -1407,6 +1432,8 @@ app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
+  const codex = (loadCodex().sessions || {})[req.params.id];
+  if (codex) return res.json({ messages: codexUserMessagesFromSession(codex) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
   const messages = [];
@@ -1433,6 +1460,15 @@ app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
 });
 // Export full conversation as markdown (up to 50MB of JSONL)
 app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
+  const codex = (loadCodex().sessions || {})[req.params.id];
+  if (codex) {
+    const title = codex.title || 'Codex chat';
+    const messages = enrichCodexHistory(req.params.id, codex.messages || []);
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'codex', messages }));
+  }
   const file = findSessionFile(req.params.id);
   if (!file) return res.status(404).end();
   try {
@@ -1448,17 +1484,10 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
     }
     const messages = parseJsonlMessages(raw);
     const title = sessionTitle(file) || req.params.id.slice(0, 8);
-    const header = `# ${title}\n\nExported ${messages.length} messages\n\n`;
-    const body = messages.map((m) => {
-      const role = m.role === 'user' ? '**You**' : '**Claude**';
-      const text = m.parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
-      const tools = m.parts.filter((p) => p.t === 'tool').map((p) => `\`[${p.name}]\``).join(' ');
-      return `${role}\n\n${text || ''}${tools ? (text ? '\n\n' : '') + tools : ''}`.trim();
-    }).filter((s) => s.length > 10).join('\n\n---\n\n');
     const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
-    res.send(header + body);
+    res.send(conversationMarkdown({ title, agent: 'claude', messages }));
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 // Per-session attention file: ~/.factory/session-attention/<sessionId>.md (auto-updated after turns)
