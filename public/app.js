@@ -1121,6 +1121,11 @@ function isDelegationMarker(body) {
 // loaded (description + every real comment + labels + the agents that touched it). This
 // gets baked into the delegation prompt so the agent doesn't have to go re-fetch the
 // Linear ticket and is GUARANTEED the context/comments we already hold.
+function fmtIssueDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString();
+}
 function buildIssueContext(d, sessions) {
   const L = [`# ${d.identifier} — ${d.title}`];
   const meta = [];
@@ -1130,20 +1135,41 @@ function buildIssueContext(d, sessions) {
   const labels = (d.labels || []).map((l) => l.name).filter((n) => !/^agent[:-]/.test(n));
   if (labels.length) meta.push(`Labels: ${labels.join(', ')}`);
   if (meta.length) L.push(meta.join(' · '));
+  const dates = [`Created: ${fmtIssueDate(d.createdAt) || d.createdAt || 'unknown'}`, `Updated: ${fmtIssueDate(d.updatedAt) || d.updatedAt || 'unknown'}`];
+  L.push(dates.join(' · '));
   if (d.url) L.push(`Linear: ${d.url}`);
   if (d.pr) L.push(`PR: ${d.pr.url} (${d.pr.state || 'open'})`);
   L.push('', '## Description', (d.description && d.description.trim()) ? d.description.trim() : '(no description)');
+  const attachments = (d.attachments || []).filter((a) => a && (a.url || a.title));
+  if (attachments.length) {
+    L.push('', `## Attachments (${attachments.length})`);
+    for (const a of attachments) L.push(`- ${a.title || a.url}${a.url && a.title ? `: ${a.url}` : ''}`);
+  }
   const cmts = (d.comments || []).filter((c) => !isDelegationMarker(c.body));
   if (cmts.length) {
     L.push('', `## Comments (${cmts.length}) — context already gathered; read these before re-deriving anything`);
-    for (const c of cmts) L.push('', `### ${c.user || 'someone'} · ${relTime(Date.parse(c.createdAt))}`, (c.body || '').trim());
+    for (const c of cmts) L.push('', `### ${c.user || 'someone'} · ${fmtIssueDate(c.createdAt) || c.createdAt || 'unknown time'}`, (c.body || '').trim());
   }
   if (sessions && sessions.length) {
     L.push('', '## Agents that have already worked on this');
-    for (const s of sessions.slice(0, 8)) L.push(`- ${s.title} (${s.agent}, ${s.mentions}× mentions, last active ${relTime(s.mtime)})`);
+    for (const s of sessions.slice(0, 8)) L.push(`- ${s.title} (${s.agent}, ${s.mentions}× mentions, last active ${fmtIssueDate(s.mtime) || relTime(s.mtime)})`);
     L.push('If you are one of these, you already hold the full transcript — keep using that context.');
   }
   return L.join('\n');
+}
+function buildIssueDelegationPrompt(d, sessions) {
+  const slug = d.identifier.toLowerCase();
+  return `Work the Linear issue ${d.identifier}: "${d.title}".
+
+Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
+
+${buildIssueContext(d, sessions)}
+
+How to work it:
+- Do not edit a shared clone. Create an isolated git worktree for your branch off the latest default branch. Use a unique branch name for this ticket, for example:
+  git worktree add ../${slug} -b agent/${slug} && cd ../${slug}
+- Implement and verify the change, open or refresh the PR, and post the PR link as a comment on ${d.identifier}.
+- When done, set ${d.identifier} to In Review, or comment your status and blockers.`;
 }
 // Wait for a freshly-spawned chat's session id to resolve (the RC bridge reports it via
 // the {type:'session'} WS event a beat after spawn). Keyed to this chat so navigating
@@ -1180,7 +1206,7 @@ ${buildIssueContext(d, curIssueSessions)}
 
 How to continue:
 - If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
-  git worktree add ../${d.identifier.toLowerCase()} -b claude/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
+  git worktree add ../${d.identifier.toLowerCase()} -b agent/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
 - Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
   enqueueText(cont, { displayText: `↻ Continue ${d.identifier}: ${d.title}` });
@@ -1188,19 +1214,7 @@ How to continue:
   toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
 }
 async function spawnIssueAgent(d, agent) {
-  const slug = d.identifier.toLowerCase();
-  const branchPrefix = agent === 'codex' ? 'codex' : 'claude';
-  const seed = `Work the Linear issue ${d.identifier}: "${d.title}".
-
-Everything you need about this ticket is below — description, every comment (the context we've already gathered), and the agents that already touched it. Read it before re-deriving anything; don't go re-fetch the Linear ticket.
-
-${buildIssueContext(d, curIssueSessions)}
-
-How to work it:
-- Do NOT edit a shared clone — create an isolated git worktree for your branch off the latest default branch:
-  git worktree add ../${slug} -b ${branchPrefix}/${slug} && cd ../${slug}
-- Implement + verify it runs, open a PR, and post the PR link as a comment on ${d.identifier}.
-- When done, set ${d.identifier} to In Review (or comment your status / blockers).`;
+  const seed = buildIssueDelegationPrompt(d, curIssueSessions);
   const title = `${d.identifier}: ${d.title}`.slice(0, 60);
   setAgent(agent);
   await openChat({ id: null, title, cwd: defaultCwd, agent });

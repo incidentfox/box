@@ -1582,6 +1582,7 @@ app.get('/api/linear/:id/detail', requireAuth, async (req, res) => {
       state: it.state, assignee: it.assignee ? it.assignee.displayName : null,
       labels: (it.labels.nodes || []).map((l) => ({ name: l.name, color: l.color })),
       comments: (it.comments.nodes || []).map((c) => ({ body: c.body, createdAt: c.createdAt, user: c.user ? c.user.displayName : 'someone' })),
+      attachments: (it.attachments.nodes || []).map((a) => ({ url: a.url, title: a.title })),
       delegations: loadDelegations()[it.identifier] || [],
       pr,
     });
