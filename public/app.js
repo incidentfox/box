@@ -269,6 +269,31 @@ if (themeMq) {
 applyTheme();
 
 /* ---------- markdown (compact, for chat bubbles) ---------- */
+const ABS_PATH_RE = /(^|[\s([])((?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))[^\s<>"'`)]{2,})/g;
+const PREVIEW_IMG_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)(?:[?#].*)?$/i;
+function cleanPreviewPath(raw) {
+  let path = String(raw || '');
+  let suffix = '';
+  while (/[.,;:!?]$/.test(path)) { suffix = path.slice(-1) + suffix; path = path.slice(0, -1); }
+  return { path, suffix };
+}
+function displayPath(path) {
+  return String(path || '').replace(/^\/home\/factory/, '~');
+}
+function pathPreviewHtml(rawPath) {
+  const { path, suffix } = cleanPreviewPath(rawPath);
+  if (!path || path.length < 3) return esc(rawPath || '');
+  const expanded = path.startsWith('~') ? '/home/factory' + path.slice(1) : path;
+  const shown = displayPath(path);
+  const name = shown.split('/').filter(Boolean).pop() || shown;
+  if (PREVIEW_IMG_EXT_RE.test(path)) {
+    return `<span class="pathPreview pathPreviewImg" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+      `<img src="${esc(rawFileUrl(expanded))}" alt="${esc(name)}" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
+      `<span class="pathPreviewText">${esc(shown)}</span></span>${esc(suffix)}`;
+  }
+  return `<span class="pathPreview" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+    `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(shown)}</span></span>${esc(suffix)}`;
+}
 function md(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
   let html = '', i = 0, list = null;
@@ -298,6 +323,7 @@ function md(src) {
     t = t.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
     t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     t = t.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank">$2</a>');
+    t = t.replace(ABS_PATH_RE, (_, pre, path) => pre + pathPreviewHtml(path));
     return t.replace(/(\d+)/g, (_, n) => `<code>${safeEsc(codes[+n] ?? '')}</code>`);
   };
   const isTableRow = (ln) => /^\|.+\|$/.test(ln.trim());
@@ -2965,12 +2991,34 @@ $('expClose').onclick = () => {
   else $('explorer').classList.add('hidden');
 };
 $('expUp').onclick = () => browseExp(parentOf(expPath));
+function normalizeJumpPath(path) {
+  path = String(path || '').trim();
+  if (!path) return '';
+  if (path === '~') return '/home/factory';
+  if (path.startsWith('~')) return '/home/factory' + path.slice(1);
+  return path;
+}
+function openJumpPath() {
+  const p = normalizeJumpPath($('expJumpInput').value);
+  if (!p) return;
+  browseExp(p);
+}
+$('expJump').onsubmit = (e) => {
+  e.preventDefault();
+  openJumpPath();
+};
+$('expJump').querySelector('button').onclick = (e) => {
+  e.preventDefault();
+  openJumpPath();
+};
 async function browseExp(path) {
   $('expReader').classList.add('hidden'); $('expList').classList.remove('hidden');
+  path = normalizeJumpPath(path);
   let d; try { d = await (await api('/api/fs?path=' + encodeURIComponent(path))).json(); } catch { return; }
   if (d.error) return toast(d.error);
   if (d.type === 'file') { showMedia(path); return; }
   expPath = d.path; $('expPath').textContent = shortCwd(d.path);
+  $('expJumpInput').value = d.path;
   const list = $('expList'); list.innerHTML = '';
   for (const e of d.entries) {
     const row = document.createElement('div'); row.className = 'row';
@@ -3020,8 +3068,11 @@ const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic']
 const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
 function openFile(path) { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); showMedia(path); }
 function showMedia(path) {
+  path = normalizeJumpPath(path);
   $('expList').classList.add('hidden'); $('expReader').classList.remove('hidden'); paintIcons($('expReader'));
   $('readerName').textContent = path.split('/').pop();
+  $('expPath').textContent = shortCwd(path);
+  $('expJumpInput').value = path;
   $('readerAt').onclick = () => insertRef(path);
   const ext = (path.split('.').pop() || '').toLowerCase();
   const body = $('readerBody'); body.innerHTML = ''; body.classList.remove('astext');
@@ -3571,9 +3622,15 @@ async function stopRec(useIt) {
   const lb = $('lightbox'), track = $('lbTrack'), count = $('lbCount');
   let srcs = [];
   $('messages').addEventListener('click', (e) => {
-    const img = e.target.closest && e.target.closest('.umgs img'); if (!img) return;
-    const all = [...$('messages').querySelectorAll('.umgs img')];
+    const img = e.target.closest && e.target.closest('.umgs img, .pathPreviewImg img, .mdImg'); if (!img) return;
+    const all = [...$('messages').querySelectorAll('.umgs img, .pathPreviewImg img, .mdImg')];
     openAt(all.map((i) => i.src), all.indexOf(img));
+  });
+  $('messages').addEventListener('click', (e) => {
+    const card = e.target.closest && e.target.closest('.pathPreview');
+    if (!card || e.target.closest('img')) return;
+    e.preventDefault();
+    openFile(card.dataset.path);
   });
   $('lbClose').onclick = close;
   $('lbDownload').onclick = () => {

@@ -360,6 +360,15 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 /* inline images in md() output (attention panel screenshots, etc.) */
 .mdImg { display: block; max-width: min(340px, 90vw); width: 100%; height: auto; border-radius: 10px; margin: 8px 0 4px; border: 1px solid var(--line); cursor: zoom-in; }
 .msg .body .mdImg { max-width: min(300px, 80vw); }
+.pathPreview { display: inline-flex; align-items: center; gap: 7px; max-width: min(360px, 88vw); padding: 7px 9px; margin: 4px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); cursor: pointer; vertical-align: middle; box-sizing: border-box; }
+.pathPreview:active { opacity: .72; }
+.pathPreviewIcon { flex: none; opacity: .65; width: 16px; height: 16px; display: grid; place-items: center; }
+.pathPreviewIcon svg { width: 16px; height: 16px; }
+.pathPreviewText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pathPreviewImg { display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding: 7px; }
+.pathPreviewImg img { display: block; max-width: min(300px, 80vw); max-height: 240px; width: auto; height: auto; object-fit: contain; border-radius: 8px; border: 1px solid var(--line); background: var(--subtle); }
+.pathPreviewImg .pathPreviewText { padding: 0 2px 1px; }
+.pathMissing { opacity: .62; }
 .thinking { color: var(--muted); font-style: italic; font-size: 14px; margin-bottom: 6px; white-space: pre-wrap; }
 .toolchip { display: block; background: none; border: 0; border-radius: 0; padding: 4px 1px; margin: 1px 0; font-size: 14px; line-height: 1.35; color: var(--muted); font-family: -apple-system, "Inter", system-ui, sans-serif; }
 .toolchip .tchipHead { display: flex; align-items: center; gap: 7px; }
@@ -481,6 +490,10 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 
 /* file explorer */
 .explorer { position: fixed; inset: 0; z-index: 25; background: var(--bg); display: flex; flex-direction: column; }
+.expJump { display: flex; align-items: center; gap: 8px; padding: 8px 14px 10px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.expJump input { flex: 1; min-width: 0; height: 36px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); padding: 0 11px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; }
+.expJump input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.expJump button { flex: none; height: 36px; border: 0; border-radius: 10px; background: var(--accent); color: white; padding: 0 13px; font-size: 13px; font-weight: 700; }
 /* my messages overlay */
 #myMsgsOverlay { z-index: 26; }
 .myMsgsList { display: flex; flex-direction: column; gap: 0; }
