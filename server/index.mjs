@@ -959,10 +959,12 @@ function validateDirectory(dir) {
 const DEFAULT_CONTEXT_WINDOWS = {
   codex: 258400,
   claude: 1000000,
+  gemini: 1000000,   // Gemini 2.5 / 3.x all expose a ~1M-token context window
 };
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
   if (agent === 'codex') return DEFAULT_CONTEXT_WINDOWS.codex;
+  if (agent === 'gemini') return DEFAULT_CONTEXT_WINDOWS.gemini;
   if (!m) return DEFAULT_CONTEXT_WINDOWS.claude;
   if (m.includes('opus-4-8') || m.includes('opus')) return 1000000;
   return 200000;
@@ -1289,6 +1291,7 @@ function ensureGeminiSession(id, attrs = {}) {
     settings: normalizeSettings(attrs.settings || prev.settings || {}),
     parentId: attrs.parentId || prev.parentId || null,
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context != null ? attrs.context : (prev.context || null),
   };
   saveGemini(state);
   return state.sessions[id];
@@ -1307,6 +1310,43 @@ function appendGeminiMessage(id, role, text, extra = {}) {
   prev.updatedAt = now;
   state.sessions[id] = prev;
   saveGemini(state);
+}
+// Persist the in-flight Gemini assistant turn AS IT STREAMS (same crash-safety as Codex's
+// flushCodexAssistant): upsert ONE "live" assistant row keyed by the turn id, carrying the
+// ordered {text|tool} parts so a reload renders tools too; finalize drops the live flag.
+let GEMINI_TURN_SEQ = 0;
+function flushGeminiAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadGemini();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.gmTurnId, ts: (last && last.live && last.turnId === s.gmTurnId && last.ts) || Date.now() };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.live && last.turnId === s.gmTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  prev.updatedAt = Date.now();
+  state.sessions[s.sessionId] = prev;
+  saveGemini(state);
+}
+// Live context occupancy from the CLI's per-turn `result` stats (input_tokens = the last
+// request's input, the figure the meter wants). Persist it so a reload keeps the meter.
+function updateGeminiContext(id, info) {
+  const used = (info && Number(info.input_tokens)) || 0;
+  const ctx = normalizeContext({ agent: 'gemini', model: (info && info.model) || '', usedTokens: used, source: used ? 'reported' : 'estimated' });
+  if (id) {
+    const state = loadGemini();
+    const prev = state.sessions[id];
+    if (prev) { prev.context = ctx; prev.lastUsed = Date.now(); state.sessions[id] = prev; saveGemini(state); }
+  }
+  return ctx;
 }
 function ensureAgySession(id, attrs = {}) {
   if (!id) return null;
@@ -1685,7 +1725,7 @@ function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) return { messages: enrichCodexHistory(id, (codex.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
   const gemini = (loadGemini().sessions || {})[id];
-  if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext({ agent: 'gemini' }) };
+  if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const agy = (loadAgy().sessions || {})[id];
   if (agy) return { messages: (agy.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: agy.cwd || DEFAULT_CWD, agent: 'agy', settings: normalizeSettings(agy.settings || {}), parentId: agy.parentId || null, parentTitle: agy.parentTitle || '', context: normalizeContext({ agent: 'agy' }) };
   const file = findSessionFile(id);
@@ -3527,61 +3567,93 @@ function runCodexTurn(s, msg, resolve) {
 s.proc.on('close', finish);
   s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
+// Gemini now runs as a REAL agent via the `gemini` CLI (see gemini-exec-engine.mjs), so a
+// turn streams the same {session,text,tool,tool_result,context} events Codex does — handle
+// them the same way (live tool chips + persisted {text|tool} parts + a live context meter).
+// Session continuity is the CLI's: the box mints the id and the engine does --session-id /
+// --resume, so we no longer replay box-side history into the prompt.
 function runGeminiTurn(s, msg, resolve) {
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
-  const sid = s.sessionId || randomUUID();
+  let done = false;
+  let lastError = '';
+  s.gmTurnId = `${Date.now()}-${++GEMINI_TURN_SEQ}`;
+  s.gmLastFlush = 0;
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
   const isNew = !s.sessionId;
+  const sid = s.sessionId || randomUUID();
+  const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNew && initialTitle) s.title = initialTitle;
   const session = ensureGeminiSession(sid, {
     cwd: s.cwd,
-    title: msg.title || (msg.text || '').slice(0, 80),
+    title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
     lastUsed: Date.now(),
     settings: s.settings,
     parentId: msg.parentId || s.parentId || null,
     parentTitle: msg.parentTitle || s.parentTitle || '',
   });
-  const history = [...(session.messages || [])];
-  appendGeminiMessage(sid, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
+  appendGeminiMessage(sid, 'user', userText, { parts: userParts });
   s.sessionId = sid;
   s.agent = 'gemini';
   ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
   if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-  if (isNew) persist(s);
+  persist(s);
 
-  let done = false;
-  let assistantText = '';
   const finish = () => {
     if (done) return; done = true;
     clearTimeout(s.turnTimer); s.proc = null;
-    if (assistantText.trim()) appendGeminiMessage(s.sessionId, 'assistant', assistantText);
+    if (s.sessionId) {
+      flushGeminiAssistant(s, { finalize: true });
+      // Persist a terminal error so reopening the chat shows the failure, not silence.
+      if (lastError && !s.canceled) appendGeminiMessage(s.sessionId, 'assistant', `⚠️ Gemini error: ${lastError}`);
+    }
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
+  // Agentic Gemini turns can run long (tool loops / many minutes) like Codex — give them the
+  // same generous safety net rather than the short chat timeout.
   s.turnTimer = setTimeout(() => {
     if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
     finish();
-  }, TURN_TIMEOUT_MS);
+  }, CODEX_TURN_TIMEOUT_MS);
   bcast(s, { type: 'session', id: s.sessionId, agent: 'gemini', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || session.title || '' });
   s.proc = geminiEngine.run({
     sessionId: s.sessionId,
+    isNew,
     cwd: s.cwd,
     prompt: msg.text || '',
     images: msg.images || [],
-    history,
     settings: (s.settings || {}).gemini || DEFAULT_SETTINGS.gemini,
     apiKey: GEMINI_KEY,
     onEvent: (ev) => {
-      if (ev.type === 'text') {
-        assistantText += (assistantText ? '\n\n' : '') + (ev.delta || '');
+      if (ev.type === 'session') {
+        // gemini echoes the id we minted; we already registered it, so nothing to migrate.
+        return;
+      } else if (ev.type === 'text') {
+        pushTextPart(s, ev.delta || '');
+        if (s.sessionId) { s.gmLastFlush = Date.now(); flushGeminiAssistant(s); }
         bcast(s, { type: 'text', delta: ev.delta || '' });
+      } else if (ev.type === 'context') {
+        s.context = updateGeminiContext(s.sessionId, ev.info);
+        persist(s);
+        bcast(s, { type: 'context', context: s.context });
+      } else if (ev.type === 'tool') {
+        s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        const now = Date.now();
+        if (s.sessionId && (!s.gmLastFlush || now - s.gmLastFlush > 2000)) { s.gmLastFlush = now; flushGeminiAssistant(s); }
+        bcast(s, ev);
+      } else if (ev.type === 'tool_result') {
+        const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
+        bcast(s, ev);
       } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = String(ev.msg || '').slice(0, 300);
         bcast(s, ev);
       }
     },
   });
-  Promise.resolve(s.proc && s.proc.promise ? s.proc.promise : s.proc).then(finish).catch((e) => {
-    bcast(s, { type: 'error', msg: String(e && e.message || e).slice(-400) });
-    finish();
-  });
+  s.proc.on('close', finish);
+  s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
 function runAgyTurn(s, msg, resolve) {
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
