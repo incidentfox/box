@@ -556,8 +556,8 @@ function attachSwipeActions(card, front, s) {
   const MAX = 132;            // reveal width = two 66px buttons
   let sx = 0, sy = 0, dx = 0, dragging = false, horiz = false, decided = false, open = false, moved = false;
   const setX = (x) => { front.style.transform = `translateX(${x}px)`; };
-  const close = () => { open = false; front.classList.remove('dragging'); setX(0); if (closeOpenSwipe === close) closeOpenSwipe = null; };
-  const openIt = () => { if (closeOpenSwipe && closeOpenSwipe !== close) closeOpenSwipe(); open = true; front.classList.remove('dragging'); setX(-MAX); closeOpenSwipe = close; };
+  const close = () => { open = false; front.classList.remove('dragging'); card.classList.remove('swiping'); setX(0); if (closeOpenSwipe === close) closeOpenSwipe = null; };
+  const openIt = () => { if (closeOpenSwipe && closeOpenSwipe !== close) closeOpenSwipe(); open = true; front.classList.remove('dragging'); card.classList.add('swiping'); setX(-MAX); closeOpenSwipe = close; };
   front.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) return;
     const t = e.touches[0]; sx = t.clientX; sy = t.clientY; dx = 0; dragging = true; decided = false; horiz = false; moved = false;
@@ -570,6 +570,7 @@ function attachSwipeActions(card, front, s) {
       if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
       decided = true; horiz = Math.abs(dx) > Math.abs(dy) * 1.2;
       if (!horiz) front.classList.remove('dragging'); // vertical → let the list scroll
+      else card.classList.add('swiping');             // horizontal → reveal the action buttons
     }
     if (!horiz) return;
     moved = true; e.preventDefault();             // own the horizontal gesture
