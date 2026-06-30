@@ -1291,7 +1291,7 @@ How to continue:
   git worktree add ../${d.identifier.toLowerCase()} -b ${agentBranch(s.agent)}/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
 - Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
-  enqueueText(cont, { displayText: `↻ Continue ${d.identifier}: ${d.title}` });
+  enqueueText(cont);
   await recordDelegation(d.identifier, { agent: s.agent, kind: 'resume', sessionId: s.id, sessionTitle: s.title });
   toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
 }
@@ -1300,7 +1300,7 @@ async function spawnIssueAgent(d, agent) {
   const title = `${d.identifier}: ${d.title}`.slice(0, 60);
   setAgent(agent);
   await openChat({ id: null, title, cwd: defaultCwd, agent });
-  enqueueText(seed, { displayText: `🤖 Work ${d.identifier}: ${d.title}`, title });
+  enqueueText(seed, { title });
   toast(`Dispatching ${AGENT_LABEL[agent]} agent...`);
   await recordDelegation(d.identifier, { agent, kind: 'new', sessionTitle: title, key: cur.key });
   toast(`Dispatched ${d.identifier} to ${AGENT_LABEL[agent]}`);
@@ -2503,7 +2503,7 @@ function openStatusSheet() {
 }
 function reviewCurrent() {
   if (cur.agent !== 'codex') return toast('/review is Codex-only in Box right now');
-  enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.', { displayText: '/review' });
+  enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.');
 }
 function insertToken(text, tok) {
   const t = $('input'); t.value = t.value.slice(0, tok.start) + text + t.value.slice(tok.end);
