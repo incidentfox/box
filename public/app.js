@@ -117,7 +117,13 @@ function renderRoute(s) {
     }
   } finally { navSuppress = false; }
 }
-window.addEventListener('popstate', (e) => renderRoute(e.state));
+window.addEventListener('popstate', (e) => {
+  // A bottom sheet is open: the Back gesture / browser Back should dismiss the sheet
+  // (it pushed its own history entry in showSheet) and leave the screen underneath
+  // untouched — not navigate away and strand the drawer on top of the next screen.
+  if (!$('sheet').classList.contains('hidden')) { closeSheet(); return; }
+  renderRoute(e.state);
+});
 function toast(m, ms = 2200, action) {
   const t = $('toast'); t.innerHTML = '';
   const label = document.createElement('span'); label.textContent = m; t.appendChild(label);
@@ -691,7 +697,7 @@ function openTextEditor({ title, text, meta, save, reset, resetLabel = 'Reset to
     };
     inner.appendChild(rr);
   }
-  $('sheet').classList.remove('hidden');
+  showSheet();
   setTimeout(() => ta.focus(), 0);
 }
 function promptVarDesc(t) {
@@ -783,7 +789,7 @@ function openPathSheet(title, value, placeholder, onSave, opts = {}) {
     reset.onclick = async () => { err.textContent = ''; try { await opts.onReset(); closeSheet(); } catch (e) { err.textContent = String(e.message || e); } };
     inner.appendChild(reset);
   }
-  $('sheet').classList.remove('hidden');
+  showSheet();
   setTimeout(() => { inp.focus(); inp.select(); }, 0);
 }
 function openDefaultWorkspaceSheet() {
@@ -3447,7 +3453,15 @@ function showSheet() {
   resetSheetDrag();
   const inner = $('sheetInner');
   if (inner) inner.scrollTop = 0;
-  $('sheet').classList.remove('hidden');
+  const sheet = $('sheet');
+  const wasHidden = sheet.classList.contains('hidden');
+  sheet.classList.remove('hidden');
+  // Wire the sheet into the history stack so the phone's Back gesture / browser Back
+  // dismisses the SHEET itself instead of navigating the screen underneath it (which
+  // left the drawer stuck on top of the homepage). One pushed entry per fresh open;
+  // the popstate handler pops it back off. (Closing via tap/swipe/Escape leaves the
+  // spent entry in place — harmless: it just re-renders the same screen.)
+  if (wasHidden) { try { history.pushState({ ...(history.state || {}), _sheet: true }, ''); } catch {} }
 }
 function closeSheet() { resetSheetDrag(); $('sheet').classList.add('hidden'); }
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
