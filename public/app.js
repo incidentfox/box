@@ -7,11 +7,33 @@ let ws = null;
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
+  gemini: { model: 'gemini-3.5-flash' },
+  agy: { model: '' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
-const AGENT_LABEL = { claude: 'Claude', codex: 'Codex' };
-const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000 };
-let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: LS.getItem('box_agent') || 'claude', parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
+const AGENT_META = {
+  claude: { label: 'Claude', icon: '⌘' },
+  codex: { label: 'Codex', icon: '◆' },
+  gemini: { label: 'Gemini', icon: '✦' },
+  agy: { label: 'Antigravity', icon: '△' },
+};
+const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) => [k, v.label]));
+const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000 };
+const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
+const agentIcon = (agent) => (AGENT_META[agent] && AGENT_META[agent].icon) || '⌘';
+const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy') ? agent : 'claude';
+const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : 'claude');
+const agentModelLabel = (agent, rawModel) => {
+  const raw = String(rawModel || '');
+  if (!raw) return '';
+  const found = (agent === 'codex' ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
+  if (found) return found.label;
+  if (agent === 'agy') return raw ? raw.replace(/-/g, ' ') : 'Antigravity default';
+  if (agent === 'gemini') return raw.replace(/^gemini-/, 'Gemini ').replace(/-/g, ' ');
+  if (agent === 'codex') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
+  return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
+};
+let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -115,7 +137,7 @@ async function api(path, opts = {}) {
 }
 // Client bootstrap (filled from /api/config): $HOME for path-shortening + which optional
 // integrations are wired, so we can hide the Board / Linear UI when they aren't set up.
-let CFG = { home: '', ownerName: 'you', features: { linear: false, brain: false, voice: false, codex: false } };
+let CFG = { home: '', ownerName: 'you', features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false } };
 async function loadConfig() {
   try { CFG = await (await api('/api/config')).json(); } catch {}
   applyConfig();
@@ -429,7 +451,7 @@ function sessionCard(s) {
        <div class="srow">
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
-	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent === 'codex' ? '<span class="agentTag codex">Codex</span>' : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sMore" type="button" title="More actions (rename / archive)" aria-label="More actions">⋯</button></div>
+	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sMore" type="button" title="More actions (rename / archive)" aria-label="More actions">⋯</button></div>
            <div class="sl"></div>
          </div>
        </div>
@@ -529,6 +551,7 @@ async function doArchive(s, on) {
 }
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
+const agentEnabled = (agent) => agent === 'claude' || agent === 'codex' || !!((CFG.features || {})[agent]);
 function fmtTokens(n) {
   n = Math.max(0, Math.round(Number(n) || 0));
   if (n >= 1000000) return (n / 1000000).toFixed(n < 10000000 ? 1 : 0).replace(/\.0$/, '') + 'M';
@@ -536,7 +559,7 @@ function fmtTokens(n) {
   return String(n);
 }
 function currentContext() {
-  const agent = cur.agent === 'codex' ? 'codex' : 'claude';
+  const agent = agentType(cur.agent);
   const cx = cur.context || {};
   const win = Number(cx.windowTokens) || DEFAULT_CONTEXT_WINDOW[agent];
   const used = Math.max(0, Math.round(Number(cx.usedTokens) || 0));
@@ -556,10 +579,15 @@ function renderContextMeter() {
   el.title = `${cx.usedTokens.toLocaleString()} / ${cx.windowTokens.toLocaleString()} tokens${estimated ? ' (estimated)' : ''}`;
   el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
 }
-$('newBtn').onclick = () => openSheet('New chat', [
-  { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
-  { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
-]);
+$('newBtn').onclick = () => {
+  const rows = [
+    { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
+    { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
+  ];
+  if (agentEnabled('gemini')) rows.push({ ic: '✦', label: 'Gemini', desc: 'Run Gemini on the box', fn: () => { setAgent('gemini'); openChat({ id: null, title: 'New Gemini chat', cwd: defaultCwd, agent: 'gemini' }); } });
+  if (agentEnabled('agy')) rows.push({ ic: '△', label: 'Antigravity', desc: 'Use the local agy CLI / AI Pro route', fn: () => { setAgent('agy'); openChat({ id: null, title: 'New Antigravity chat', cwd: defaultCwd, agent: 'agy' }); } });
+  openSheet('New chat', rows);
+};
 $('themeBtn').onclick = toggleTheme;
 if ($('contextMeter')) $('contextMeter').onclick = openStatusSheet;
 
@@ -748,7 +776,7 @@ function ticketCard(t) {
   if (t.delegation) {
     const dg = t.delegation;
     const el = document.createElement('div'); el.className = 'tktDeleg';
-    const who = dg.sessionTitle || (dg.agent === 'codex' ? 'Codex agent' : 'Claude agent');
+    const who = dg.sessionTitle || `${agentLabel(dg.agent)} agent`;
     el.innerHTML = `<span class="tktDelegIc">🤖</span><span class="tktDelegTxt"></span>${dg.sessionId ? '<span class="tktDelegGo">→</span>' : ''}`;
     el.querySelector('.tktDelegTxt').textContent = `delegated · ${who}`;
     if (dg.sessionId) { el.classList.add('clk'); el.onclick = (e) => { e.stopPropagation(); openChat({ id: dg.sessionId, title: who, agent: dg.agent }); }; }
@@ -1019,7 +1047,7 @@ function renderIssueSessions(list) {
   for (const s of list) {
     const row = document.createElement('div'); row.className = 'sessRow';
     const deleg = s.id && s.id === delegId;
-    row.innerHTML = `<span class="sessIc">${s.agent === 'codex' ? '◆' : '⌘'}</span><div class="sessMain"><div class="sessTitle"></div><div class="sessSub"></div></div><span class="sessGo">→</span>`;
+    row.innerHTML = `<span class="sessIc">${agentIcon(s.agent)}</span><div class="sessMain"><div class="sessTitle"></div><div class="sessSub"></div></div><span class="sessGo">→</span>`;
     row.querySelector('.sessTitle').textContent = s.title;
     row.querySelector('.sessSub').textContent = `${s.agent}${s.category === 'auto' ? ' · auto' : ''} · ${s.mentions}× · ${relTime(s.mtime)}${deleg ? ' · 🤖 delegated' : ''}`;
     if (deleg) row.classList.add('sessDeleg');
@@ -1050,9 +1078,9 @@ function renderIssue(d) {
   // the agent the user delegated this to — highlighted + one tap into the session
   const dl = latestDeleg(d.delegations);
   if (dl) {
-    const who = dl.sessionTitle || (dl.agent === 'codex' ? 'Codex agent' : 'Claude agent');
+    const who = dl.sessionTitle || `${agentLabel(dl.agent)} agent`;
     const card = document.createElement('div'); card.className = 'delegCard' + (dl.sessionId ? ' clk' : '');
-    card.innerHTML = `<div class="delegHd">🤖 Delegated to</div><div class="delegRow"><span class="sessIc">${dl.agent === 'codex' ? '◆' : '⌘'}</span><div class="sessMain"><div class="delegName"></div><div class="delegSub"></div></div>${dl.sessionId ? '<span class="sessGo">→</span>' : ''}</div>`;
+    card.innerHTML = `<div class="delegHd">🤖 Delegated to</div><div class="delegRow"><span class="sessIc">${agentIcon(dl.agent)}</span><div class="sessMain"><div class="delegName"></div><div class="delegSub"></div></div>${dl.sessionId ? '<span class="sessGo">→</span>' : ''}</div>`;
     card.querySelector('.delegName').textContent = who;
     card.querySelector('.delegSub').textContent = `${dl.agent}${dl.kind === 'resume' ? ' · resumed' : ''} · delegated ${relTime(dl.ts)}`;
     if (dl.sessionId) card.onclick = () => openChat({ id: dl.sessionId, title: who, agent: dl.agent });
@@ -1132,8 +1160,10 @@ function delegateIssue(d) {
   for (const s of (curIssueSessions || []).slice(0, 4)) {
     rows.push({ ic: '↻', label: `Resume: ${s.title}`.slice(0, 46), desc: `${s.agent} · ${s.mentions}× · ${relTime(s.mtime)} — continue with full context`, fn: () => resumeIssueSession(s, d) });
   }
-  rows.push({ ic: '⌘', label: 'New Claude agent', desc: 'Fresh Claude Code session', fn: () => spawnIssueAgent(d, 'claude') });
-  rows.push({ ic: '◆', label: 'New Codex agent', desc: 'Fresh Codex session on the box', fn: () => spawnIssueAgent(d, 'codex') });
+  rows.push({ ic: agentIcon('claude'), label: 'New Claude agent', desc: 'Fresh Claude Code session', fn: () => spawnIssueAgent(d, 'claude') });
+  rows.push({ ic: agentIcon('codex'), label: 'New Codex agent', desc: 'Fresh Codex session on the box', fn: () => spawnIssueAgent(d, 'codex') });
+  if (agentEnabled('gemini')) rows.push({ ic: agentIcon('gemini'), label: 'New Gemini agent', desc: 'Fresh Gemini session on the box', fn: () => spawnIssueAgent(d, 'gemini') });
+  if (agentEnabled('agy')) rows.push({ ic: agentIcon('agy'), label: 'New Antigravity agent', desc: 'Fresh agy session on the box', fn: () => spawnIssueAgent(d, 'agy') });
   openSheet(`Delegate ${d.identifier}`, rows);
 }
 // Our own delegation breadcrumb comments — filtered out of the context we hand back to
@@ -1182,7 +1212,7 @@ function buildIssueContext(d, sessions) {
   }
   return L.join('\n');
 }
-function buildIssueDelegationPrompt(d, sessions) {
+function buildIssueDelegationPrompt(d, sessions, agent = 'claude') {
   const slug = d.identifier.toLowerCase();
   return `Work the Linear issue ${d.identifier}: "${d.title}".
 
@@ -1192,7 +1222,7 @@ ${buildIssueContext(d, sessions)}
 
 How to work it:
 - Do not edit a shared clone. Create an isolated git worktree for your branch off the latest default branch. Use a unique branch name for this ticket, for example:
-  git worktree add ../${slug} -b agent/${slug} && cd ../${slug}
+  git worktree add ../${slug} -b ${agentBranch(agent)}/${slug} && cd ../${slug}
 - Implement and verify the change, open or refresh the PR, and post the PR link as a comment on ${d.identifier}.
 - When done, set ${d.identifier} to In Review, or comment your status and blockers.`;
 }
@@ -1231,7 +1261,7 @@ ${buildIssueContext(d, curIssueSessions)}
 
 How to continue:
 - If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
-  git worktree add ../${d.identifier.toLowerCase()} -b agent/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
+  git worktree add ../${d.identifier.toLowerCase()} -b ${agentBranch(s.agent)}/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
 - Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
   enqueueText(cont, { displayText: `↻ Continue ${d.identifier}: ${d.title}` });
@@ -1239,7 +1269,7 @@ How to continue:
   toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
 }
 async function spawnIssueAgent(d, agent) {
-  const seed = buildIssueDelegationPrompt(d, curIssueSessions);
+  const seed = buildIssueDelegationPrompt(d, curIssueSessions, agent);
   const title = `${d.identifier}: ${d.title}`.slice(0, 60);
   setAgent(agent);
   await openChat({ id: null, title, cwd: defaultCwd, agent });
@@ -1448,7 +1478,7 @@ async function openChat(s) {
     addSwitchDivider(s.carryFrom || 'previous agent', cur.agent === 'codex' ? 'Codex' : 'Claude');
     scrollBottom();
   } else {
-    addNote(cur.parentId ? `Forked from ${cur.parentTitle || cur.parentId.slice(0, 8)}. The first turn includes parent context.` : `New ${cur.agent === 'codex' ? 'Codex' : 'Claude'} chat in ${shortCwd(cur.cwd)} — say anything to begin.`);
+    addNote(cur.parentId ? `Forked from ${cur.parentTitle || cur.parentId.slice(0, 8)}. The first turn includes parent context.` : `New ${agentLabel(cur.agent)} chat in ${shortCwd(cur.cwd)} — say anything to begin.`);
     renderContextMeter();
   }
   connectWS();
@@ -1733,7 +1763,7 @@ function renderQueue(items) {
   for (const q of all) {
     const imgs = Array.isArray(q.images) ? q.images : [];
     const el = document.createElement('div'); el.className = 'qchip' + (q.running ? ' running' : '');
-    el.innerHTML = `${q.agent === 'codex' ? '<span class="qmode">codex</span>' : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qt"></span><span class="qx"></span>`;
+    el.innerHTML = `${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qt"></span><span class="qx"></span>`;
     if (imgs.length) { const th = el.querySelector('.qthumbs'); imgs.forEach((p) => { const im = document.createElement('img'); im.src = imgUrl(p); th.appendChild(im); }); }
     el.querySelector('.qt').textContent = q.text || (imgs.length ? `${imgs.length} image${imgs.length > 1 ? 's' : ''}` : '');
     const x = el.querySelector('.qx'); x.innerHTML = ICONS.close;
@@ -1939,6 +1969,8 @@ function finishTurn(o) {
 function normalizeSettings(settings) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
+    gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
+    agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
 }
@@ -2107,37 +2139,39 @@ $('input').addEventListener('input', () => { autoGrow(); onType(); updateSend();
 /* ---------- mode (normal / bash) ---------- */
 function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').title = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
 $('modeChip').onclick = () => openSheet('Mode', [
-  { ic: '⌗', label: 'normal', sel: cur.mode === 'normal', desc: `Chat with ${cur.agent === 'codex' ? 'Codex' : 'Claude'}`, fn: () => setMode('normal') },
+  { ic: '⌗', label: 'normal', sel: cur.mode === 'normal', desc: `Chat with ${agentLabel(cur.agent)}`, fn: () => setMode('normal') },
   { ic: '⌘', label: 'bash', sel: cur.mode === 'bash', desc: 'Run commands on the box', fn: () => setMode('bash') },
 ]);
 function refreshAgentChip() {
-  const isCodex = cur.agent === 'codex';
-  const cfg = isCodex ? (cur.settings || {}).codex : (cur.settings || {}).claude;
-  const rawModel = (cfg && cfg.model) || (isCodex ? 'gpt-5.5' : 'opus');
-  const effort = isCodex ? (cfg && cfg.reasoningEffort) : (cfg && cfg.effort);
-  // compact display name
-  const modelName = isCodex
-    ? rawModel.replace(/^gpt-/, '').replace(/-codex$/, 'c')
-    : rawModel.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
+  const agent = agentType(cur.agent);
+  const cfg = (cur.settings || {})[agent];
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.5' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : 'opus');
+  const effort = agent === 'codex' ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
+  const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
-  $('agentChip').classList.toggle('codex', isCodex);
+  $('agentChip').classList.toggle('codex', agent === 'codex');
+  $('agentChip').classList.toggle('gemini', agent === 'gemini');
+  $('agentChip').classList.toggle('agy', agent === 'agy');
 }
 function setAgent(agent) {
-  cur.agent = agent === 'codex' ? 'codex' : 'claude';
+  cur.agent = agentType(agent);
   LS.setItem('box_agent', cur.agent);
   refreshAgentChip();
   renderContextMeter();
 }
 $('agentChip').onclick = () => {
   const rows = [
-    { ic: '⌘', label: 'Claude', sel: cur.agent !== 'codex', desc: 'Remote-control Claude Code', fn: () => setAgent('claude') },
-    { ic: '◆', label: 'Codex', sel: cur.agent === 'codex', desc: 'Run Codex on the box', fn: () => setAgent('codex') },
+    { ic: agentIcon('claude'), label: 'Claude', sel: cur.agent === 'claude', desc: 'Remote-control Claude Code', fn: () => setAgent('claude') },
+    { ic: agentIcon('codex'), label: 'Codex', sel: cur.agent === 'codex', desc: 'Run Codex on the box', fn: () => setAgent('codex') },
   ];
+  if (agentEnabled('gemini') || cur.agent === 'gemini') rows.push({ ic: agentIcon('gemini'), label: 'Gemini', sel: cur.agent === 'gemini', desc: 'Run Gemini on the box', fn: () => setAgent('gemini') });
+  if (agentEnabled('agy') || cur.agent === 'agy') rows.push({ ic: agentIcon('agy'), label: 'Antigravity', sel: cur.agent === 'agy', desc: 'Use local agy / AI Pro', fn: () => setAgent('agy') });
   if (cur.id) {
-    rows[0].desc = cur.agent === 'codex' ? 'Continue this transcript in Claude' : 'Current agent';
-    rows[0].fn = () => (cur.agent === 'codex' ? continueWithAgent('claude') : openModelSheet());
-    rows[1].desc = cur.agent === 'codex' ? 'Current agent' : 'Continue this transcript in Codex';
-    rows[1].fn = () => (cur.agent === 'codex' ? openModelSheet() : continueWithAgent('codex'));
+    for (const row of rows) {
+      const target = row.label === 'Antigravity' ? 'agy' : row.label.toLowerCase();
+      row.desc = cur.agent === target ? 'Current agent' : `Continue this transcript in ${row.label}`;
+      row.fn = () => (cur.agent === target ? openModelSheet() : continueWithAgent(target));
+    }
     rows.push({ ic: '', label: 'Model settings', desc: 'Change options for the active agent', fn: () => openModelSheet() });
   }
   openSheet('Agent', rows);
@@ -2242,7 +2276,7 @@ const BUILTIN_CMDS = {
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
-    { name: 'review', desc: 'Review the current diff', send: true },
+    { name: 'review', desc: 'Review the current diff', action: 'review' },
   ],
   codex: [
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
@@ -2256,9 +2290,27 @@ const BUILTIN_CMDS = {
     { name: 'diff', desc: 'Show the working-tree diff', send: true },
     { name: 'review', desc: 'Review the current working-tree diff', action: 'review' },
   ],
+  gemini: [
+    { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
+    { name: 'model', desc: 'Switch the Gemini model', action: 'model' },
+    { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
+    { name: 'clear', desc: 'Clear conversation history', send: true },
+    { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'review', desc: 'Review the current diff', send: true },
+    { name: 'new', desc: 'Start a fresh Gemini thread', action: 'new' },
+  ],
+  agy: [
+    { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
+    { name: 'model', desc: 'Switch the Antigravity model', action: 'model' },
+    { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
+    { name: 'clear', desc: 'Clear conversation history', send: true },
+    { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'review', desc: 'Review the current diff', send: true },
+    { name: 'new', desc: 'Start a fresh Antigravity thread', action: 'new' },
+  ],
 };
 async function showCommands(tok) {
-  const agent = cur.agent === 'codex' ? 'codex' : 'claude';
+  const agent = agentType(cur.agent);
   let list = (BUILTIN_CMDS[agent] || []).map((c) => ({ ...c, kind: 'builtin' }));
   if (!commandsCache[agent]) commandsCache[agent] = (await (await api('/api/commands?agent=' + agent)).json()).commands;
   list = list.concat(commandsCache[agent]);
@@ -2317,8 +2369,8 @@ function buildSwitchPrompt(source, targetAgent, messages) {
   // Carry the prior conversation at high fidelity (last ~60 turns, ~40k chars) so the
   // hand-off feels like the SAME session continuing — not a fresh chat with a summary.
   const transcript = compactTranscript(messages, 40000, 60);
-  const sourceAgent = source.agent === 'codex' ? 'Codex' : 'Claude';
-  const target = targetAgent === 'codex' ? 'Codex' : 'Claude';
+  const sourceAgent = agentLabel(agentType(source.agent));
+  const target = agentLabel(agentType(targetAgent));
   return `You are continuing a Box mobile conversation in ${target} after switching from ${sourceAgent}.
 
 Source thread: ${source.title}
@@ -2333,7 +2385,8 @@ ${transcript || '(No source transcript was available.)'}
 For this first turn, briefly acknowledge that ${target} has the prior context and is ready to continue. Do not run commands or edit files until the next user instruction.`;
 }
 async function continueWithAgent(targetAgent) {
-  targetAgent = targetAgent === 'codex' ? 'codex' : 'claude';
+  targetAgent = agentType(targetAgent);
+  if (!agentEnabled(targetAgent) && targetAgent !== cur.agent) return toast(`${AGENT_LABEL[targetAgent]} is not configured`);
   if (running) return toast('Wait for the current turn to finish before switching');
   if (!cur.id) { setAgent(targetAgent); return toast(`${AGENT_LABEL[targetAgent]} selected`); }
   if (targetAgent === cur.agent) return openModelSheet();
@@ -2344,10 +2397,10 @@ async function continueWithAgent(targetAgent) {
     id: cur.id,
     title: cur.title || 'Box chat',
     cwd: h.cwd || cur.cwd || defaultCwd,
-    agent: cur.agent === 'codex' ? 'codex' : 'claude',
+    agent: agentType(cur.agent),
   };
   // Don't stack "Codex: Claude: …" titles across repeated switches.
-  const baseTitle = source.title.replace(/^(Claude|Codex):\s*/, '');
+  const baseTitle = source.title.replace(/^(Claude|Codex|Gemini|Antigravity):\s*/, '');
   const title = `${AGENT_LABEL[targetAgent]}: ${baseTitle}`.slice(0, 80);
   const messages = h.messages || [];
   const prompt = buildSwitchPrompt(source, targetAgent, messages);
@@ -2375,17 +2428,20 @@ async function forkCurrent() {
 }
 function openStatusSheet() {
   cur.settings = normalizeSettings(cur.settings);
-  const cfg = cur.agent === 'codex' ? cur.settings.codex : cur.settings.claude;
+  const agent = agentType(cur.agent);
+  const cfg = cur.settings[agent];
   const cx = currentContext();
   const rows = [
     { ic: '', label: 'Thread', desc: cur.id || 'New unsaved chat', fn: () => {} },
-    { ic: '', label: 'Agent', desc: cur.agent === 'codex' ? 'Codex' : 'Claude', fn: () => {} },
+    { ic: '', label: 'Agent', desc: agentLabel(agent), fn: () => {} },
     { ic: '', label: 'State', desc: running ? 'Running' : 'Idle', fn: () => {} },
     { ic: '', label: 'Context', desc: `${cx.percent}% · ${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${cx.source !== 'reported' ? ' est' : ''}`, fn: () => {} },
     { ic: '', label: 'Workspace', desc: shortCwd(cur.cwd || defaultCwd), fn: () => {} },
   ];
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });
-  if (cur.agent === 'codex') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: () => {} });
+  if (agent === 'codex') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: () => {} });
+  else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: () => {} });
+  else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: () => {} });
   else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: () => {} });
   if (cur.id) rows.push({
     ic: cur.agent === 'codex' ? '⌘' : '◆',
@@ -2421,9 +2477,10 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
   if (cmd.action === 'fork') return forkCurrent();
-  if (cmd.action === 'new') return openChat({ id: null, title: 'New Codex chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings });
+  if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
+  if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.');
   if (cmd.action === 'review') return reviewCurrent();
-  if (cmd.kind === 'skill' && cur.agent === 'codex') return enqueueText(`Use the ${cmd.name} skill.`);
+  if (cmd.kind === 'skill' && (cur.agent === 'codex' || cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(`Use the ${cmd.name} skill.`);
   enqueueText('/' + cmd.name);
 }
 function renderSuggest(items) {
@@ -2439,6 +2496,18 @@ const CODEX_MODELS = [
   { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Faster everyday work' },
   { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: 'Previous Codex model' },
   { id: 'gpt-5.2', label: 'GPT-5.2', desc: 'Older fallback' },
+];
+const GEMINI_MODELS = [
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', desc: 'Fast and low cost' },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', desc: 'Stronger reasoning' },
+];
+const AGY_MODELS = [
+  { id: '', label: 'Antigravity default', desc: 'Use the signed-in agy default model' },
+  { id: 'Gemini 3.5 Flash (Low)', label: 'Gemini 3.5 Flash Low', desc: 'Fastest Gemini route through agy' },
+  { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash Medium', desc: 'Balanced Gemini route through agy' },
+  { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash High', desc: 'Deeper Gemini route through agy' },
+  { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro Low', desc: 'Faster Pro route through agy' },
+  { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro High', desc: 'Stronger Pro route through agy' },
 ];
 const CODEX_EFFORTS = [
   { id: 'low', label: 'Low', desc: 'Fastest' },
@@ -2463,7 +2532,7 @@ function settingRow(item, selected, fn) {
 }
 function openModelSheet() {
   cur.settings = normalizeSettings(cur.settings);
-  const agent = cur.agent === 'codex' ? 'codex' : 'claude';
+  const agent = agentType(cur.agent);
   const cfg = cur.settings[agent];
   const rows = [];
   if (agent === 'codex') {
@@ -2472,6 +2541,18 @@ function openModelSheet() {
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
     for (const e of CODEX_EFFORTS) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.codex.reasoningEffort = e.id; sendSettings(); toast(`Codex effort: ${e.label}`); openModelSheet(); }));
     return openSheet('Codex model', rows);
+  }
+  if (agent === 'gemini') {
+    rows.push({ ic: '', label: 'Model', desc: 'Used on the next Gemini turn in this Box chat', fn: () => openModelSheet() });
+    for (const m of GEMINI_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.gemini.model = m.id; sendSettings(); toast(`Gemini model: ${m.label}`); openModelSheet(); }));
+    openSheet('Gemini model', rows);
+    return;
+  }
+  if (agent === 'agy') {
+    rows.push({ ic: '', label: 'Model', desc: 'Passed to agy --model on the next turn', fn: () => openModelSheet() });
+    for (const m of AGY_MODELS) rows.push(settingRow(m, (cfg.model || '') === m.id, () => { cur.settings.agy.model = m.id; sendSettings(); toast(`Antigravity model: ${m.label}`); openModelSheet(); }));
+    openSheet('Antigravity model', rows);
+    return;
   }
   rows.push({ ic: '', label: 'Model', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
   for (const m of CLAUDE_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.claude.model = m.id; sendSettings(); toast(`Claude model: ${m.label}`); openModelSheet(); }));

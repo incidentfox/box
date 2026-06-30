@@ -409,8 +409,14 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 	#agentDot { width: 8px; height: 8px; border-radius: 50%; background: #8d7b68; }
 	.chip.agent.codex #agentDot { background: #1f6feb; }
 	.chip.agent.codex { background: #e7f0fb; color: #1f4f9c; }
+	.chip.agent.gemini #agentDot { background: #0f9d58; }
+	.chip.agent.gemini { background: #e8f7ef; color: #16724a; }
+	.chip.agent.agy #agentDot { background: #8a4fd6; }
+	.chip.agent.agy { background: #f0e9fb; color: #6b35a8; }
 	.agentTag { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; border-radius: 8px; padding: 1px 6px; background: #efe9df; color: #7a6a4a; }
 	.agentTag.codex { background: #e7f0fb; color: #1f6feb; }
+	.agentTag.gemini { background: #e8f7ef; color: #16724a; }
+	.agentTag.agy { background: #f0e9fb; color: #6b35a8; }
 	.agentTag.fork { background: #edf7ef; color: #2f7d4d; }
 	.iconbtn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: var(--subtle-2); color: var(--ink); flex: none; }
 .iconbtn svg { width: 21px; height: 21px; }
@@ -665,6 +671,10 @@ html[data-theme="dark"] .agentTag.codex,
 html[data-theme="dark"] .chip.agent.codex,
 html[data-theme="dark"] .lbState.open,
 html[data-theme="dark"] .lbState.started { background: #18304c; color: #8dbdff; }
+html[data-theme="dark"] .agentTag.gemini,
+html[data-theme="dark"] .chip.agent.gemini { background: #17351f; color: #82d993; }
+html[data-theme="dark"] .agentTag.agy,
+html[data-theme="dark"] .chip.agent.agy { background: #2d2142; color: #c3a2ff; }
 html[data-theme="dark"] .agentTag.fork,
 html[data-theme="dark"] .pipeFlag.dec-filed,
 html[data-theme="dark"] .lbState.completed,
