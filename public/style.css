@@ -481,6 +481,8 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .sheetRow.danger { color: #b94b31; font-weight: 600; }
 .sheetRow + .sheetRow { border-top: 1px solid var(--line); }
 .sheetInput { width: calc(100% - 44px); margin: 6px 22px 12px; padding: 12px 14px; font-size: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); outline: none; }
+.sheetTextarea { width: calc(100% - 44px); min-height: min(48vh, 520px); margin: 6px 22px 12px; padding: 12px 14px; font-size: 13px; line-height: 1.45; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--ink); outline: none; resize: vertical; }
+.sheetTextarea:focus, .sheetInput:focus { border-color: var(--accent); }
 
 /* in-flight loading indicator */
 .loading { display: inline-flex; align-items: center; gap: 5px; padding: 4px 0; }
