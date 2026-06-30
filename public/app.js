@@ -6,7 +6,7 @@ let ws = null;
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
+  codex: { model: 'gpt-5.5', reasoningEffort: 'high', sandbox: 'off' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   claude: { model: 'opus', effort: 'xhigh' },
@@ -137,7 +137,7 @@ async function api(path, opts = {}) {
 }
 // Client bootstrap (filled from /api/config): $HOME for path-shortening + which optional
 // integrations are wired, so we can hide the Board / Linear UI when they aren't set up.
-let CFG = { home: '', ownerName: 'you', features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false } };
+let CFG = { home: '', ownerName: 'you', defaultCwd: '', appSettings: { defaultCwd: '', envDefaultCwd: '', defaultAgent: 'claude', codexSandbox: 'off' }, features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false } };
 async function loadConfig() {
   try { CFG = await (await api('/api/config')).json(); } catch {}
   applyConfig();
@@ -147,6 +147,9 @@ function applyConfig() {
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   setVis('boardBtn', !!f.linear);       // header Linear-board button
   setVis('attnTabLinear', !!f.linear);  // Linear tab in the needs-attention panel
+  if (CFG.defaultCwd) defaultCwd = CFG.defaultCwd;
+  if (CFG.appSettings && CFG.appSettings.codexSandbox) DEFAULT_SETTINGS.codex.sandbox = CFG.appSettings.codexSandbox;
+  if (!LS.getItem('box_agent') && cur && !cur.id) { cur.agent = configuredDefaultAgent(); refreshAgentChip(); }
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
 function atBottom() { const m = $('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
@@ -244,6 +247,7 @@ const ICONS = {
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
   search: SVG('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', { w: 2 }),
+  settings: SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1A1.7 1.7 0 0 0 10 3V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1A1.7 1.7 0 0 0 21 10h0a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', { w: 1.8 }),
 };
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { if (!el._painted) { el.innerHTML = ICONS[el.dataset.icon] || ''; el._painted = 1; } }); }
 
@@ -579,6 +583,100 @@ async function doArchive(s, on) {
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
 const agentEnabled = (agent) => agent === 'claude' || agent === 'codex' || !!((CFG.features || {})[agent]);
+function configuredDefaultAgent() {
+  const raw = (CFG && CFG.appSettings && CFG.appSettings.defaultAgent) || 'claude';
+  const agent = agentType(raw);
+  return agentEnabled(agent) ? agent : 'claude';
+}
+const CODEX_SANDBOXES = [
+  { id: 'off', label: 'Box YOLO', desc: 'Full access, no approval prompts' },
+  { id: 'workspace-write', label: 'Workspace write', desc: 'Constrain Codex to the workspace' },
+  { id: 'read-only', label: 'Read only', desc: 'Inspect without editing files' },
+];
+function sandboxLabel(id) {
+  const hit = CODEX_SANDBOXES.find((s) => s.id === id);
+  return hit ? hit.label : (id || 'Box YOLO');
+}
+async function saveAppSettings(patch) {
+  const r = await api('/api/app-settings', { method: 'POST', body: JSON.stringify(patch) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'settings save failed');
+  CFG.appSettings = j; CFG.defaultCwd = j.defaultCwd;
+  defaultCwd = j.defaultCwd || defaultCwd;
+  DEFAULT_SETTINGS.codex.sandbox = j.codexSandbox || 'off';
+  return j;
+}
+function openPathSheet(title, value, placeholder, onSave, opts = {}) {
+  const inner = $('sheetInner'); inner.innerHTML = `<h3>${esc(title)}</h3>`;
+  if (opts.text) { const p = document.createElement('p'); p.className = 'sheetText'; p.textContent = opts.text; inner.appendChild(p); }
+  const inp = document.createElement('input'); inp.className = 'sheetInput'; inp.value = value || ''; inp.placeholder = placeholder || '~/development'; inp.autocomplete = 'off'; inp.spellcheck = false;
+  inner.appendChild(inp);
+  const err = document.createElement('p'); err.className = 'err sheetErr'; inner.appendChild(err);
+  const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div>Save</div>';
+  save.onclick = async () => {
+    err.textContent = '';
+    try { await onSave(inp.value.trim()); closeSheet(); }
+    catch (e) { err.textContent = String(e.message || e); }
+  };
+  inner.appendChild(save);
+  if (opts.resetLabel && opts.onReset) {
+    const reset = document.createElement('div'); reset.className = 'sheetRow'; reset.innerHTML = `<span class="ic"></span><div><div>${esc(opts.resetLabel)}</div>${opts.resetDesc ? `<div class="muted" style="font-size:12.5px">${esc(opts.resetDesc)}</div>` : ''}</div>`;
+    reset.onclick = async () => { err.textContent = ''; try { await opts.onReset(); closeSheet(); } catch (e) { err.textContent = String(e.message || e); } };
+    inner.appendChild(reset);
+  }
+  $('sheet').classList.remove('hidden');
+  setTimeout(() => { inp.focus(); inp.select(); }, 0);
+}
+function openDefaultWorkspaceSheet() {
+  const s = (CFG && CFG.appSettings) || {};
+  openPathSheet('Default workspace', s.defaultCwd || defaultCwd, '~/development', async (path) => {
+    const next = await saveAppSettings({ defaultCwd: path });
+    if (!cur.cwd) cur.cwd = next.defaultCwd;
+    toast(`Default workspace: ${shortCwd(next.defaultCwd)}`);
+    fetchSessions(curFilter);
+  }, {
+    text: 'New chats start here. Existing chats keep their own workspace.',
+    resetLabel: s.envDefaultCwd && s.defaultCwd !== s.envDefaultCwd ? 'Use install default' : '',
+    resetDesc: s.envDefaultCwd ? shortCwd(s.envDefaultCwd) : '',
+    onReset: async () => { const next = await saveAppSettings({ defaultCwd: '' }); toast(`Default workspace: ${shortCwd(next.defaultCwd)}`); fetchSessions(curFilter); },
+  });
+}
+function openDefaultAgentSheet() {
+  const curDefault = configuredDefaultAgent();
+  const rows = ['claude', 'codex', 'gemini', 'agy'].filter(agentEnabled).map((agent) => ({
+    ic: agentIcon(agent),
+    label: agentLabel(agent),
+    desc: agent === curDefault ? 'Current default for new chats' : 'Use for new chats',
+    sel: agent === curDefault,
+    fn: () => saveAppSettings({ defaultAgent: agent }).then(() => {
+      LS.setItem('box_agent', agent);
+      setAgent(agent);
+      toast(`Default agent: ${agentLabel(agent)}`);
+    }).catch((e) => toast(String(e.message || e))),
+  }));
+  openSheet('Default agent', rows);
+}
+function openDefaultCodexSandboxSheet() {
+  const active = ((CFG && CFG.appSettings && CFG.appSettings.codexSandbox) || DEFAULT_SETTINGS.codex.sandbox || 'off');
+  openSheet('Default Codex permissions', CODEX_SANDBOXES.map((s) => ({
+    ic: s.id === active ? '✓' : '',
+    label: s.label,
+    desc: s.desc,
+    sel: s.id === active,
+    fn: () => saveAppSettings({ codexSandbox: s.id }).then(() => {
+      toast(`Codex default: ${s.label}`);
+    }).catch((e) => toast(String(e.message || e))),
+  })));
+}
+function openAppSettings() {
+  const s = (CFG && CFG.appSettings) || {};
+  openSheet('Settings', [
+    { ic: '⌂', label: 'Default workspace', desc: shortCwd(s.defaultCwd || defaultCwd), fn: openDefaultWorkspaceSheet },
+    { ic: agentIcon(configuredDefaultAgent()), label: 'Default agent', desc: agentLabel(configuredDefaultAgent()), fn: openDefaultAgentSheet },
+    { ic: '◆', label: 'Codex permissions', desc: sandboxLabel(s.codexSandbox || DEFAULT_SETTINGS.codex.sandbox || 'off'), fn: openDefaultCodexSandboxSheet },
+    { ic: document.documentElement.dataset.theme === 'dark' ? '☀' : '☾', label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Dark' : 'Light', fn: toggleTheme },
+  ]);
+}
 function fmtTokens(n) {
   n = Math.max(0, Math.round(Number(n) || 0));
   if (n >= 1000000) return (n / 1000000).toFixed(n < 10000000 ? 1 : 0).replace(/\.0$/, '') + 'M';
@@ -607,14 +705,23 @@ function renderContextMeter() {
   el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
 }
 $('newBtn').onclick = () => {
-  const rows = [
-    { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
-    { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
-  ];
-  if (agentEnabled('gemini')) rows.push({ ic: '✦', label: 'Gemini', desc: 'Run Gemini on the box', fn: () => { setAgent('gemini'); openChat({ id: null, title: 'New Gemini chat', cwd: defaultCwd, agent: 'gemini' }); } });
-  if (agentEnabled('agy')) rows.push({ ic: '△', label: 'Antigravity', desc: 'Use the local agy CLI / AI Pro route', fn: () => { setAgent('agy'); openChat({ id: null, title: 'New Antigravity chat', cwd: defaultCwd, agent: 'agy' }); } });
+  const labels = {
+    codex: ['Run Codex on the box', 'New Codex chat'],
+    claude: ['Remote-control Claude Code', 'New Claude chat'],
+    gemini: ['Run Gemini on the box', 'New Gemini chat'],
+    agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
+  };
+  const def = configuredDefaultAgent();
+  const order = [def, 'codex', 'claude', 'gemini', 'agy'].filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
+  const rows = order.map((agent) => ({
+    ic: agentIcon(agent),
+    label: agentLabel(agent),
+    desc: agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0],
+    fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: defaultCwd, agent }); },
+  }));
   openSheet('New chat', rows);
 };
+if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
 $('themeBtn').onclick = toggleTheme;
 if ($('contextMeter')) $('contextMeter').onclick = openStatusSheet;
 
@@ -1896,7 +2003,7 @@ function onServer(o) {
   // the WS later reconnects mid-first-turn, onSync re-adds the user bubble (guarded only by
   // !cur.hadHistory) → the message renders twice. Marking it now suppresses that re-add.
   if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; $('chatTitle').textContent = o.title; } return; }
-  if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); return; }
+  if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); if (o.cwd) cur.cwd = o.cwd; refreshAgentChip(); return; }
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
   // force-queue + Stop), so the message doesn't render twice.
@@ -1940,6 +2047,7 @@ function onSync(o) {
   if (o.agent && o.sessionId) setAgent(o.agent);
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
+  if (o.cwd) cur.cwd = o.cwd;
   if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; $('chatTitle').textContent = o.title; }
   if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
@@ -2026,7 +2134,7 @@ function normalizeSettings(settings) {
 function sendSettings() {
   cur.settings = normalizeSettings(cur.settings);
   refreshAgentChip();
-  const payload = { type: 'settings', key: cur.key, settings: cur.settings };
+  const payload = { type: 'settings', key: cur.key, settings: cur.settings, cwd: cur.cwd };
   connectWS();
   const go = () => { try { ws.send(JSON.stringify(payload)); } catch {} };
   if (ws.readyState === 1) go();
@@ -2317,6 +2425,8 @@ async function onType() {
 // and custom commands are loaded from /api/commands?agent=...
 const BUILTIN_CMDS = {
   claude: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
     { name: 'switch', desc: 'Move THIS chat to another Claude account', action: 'switch-account' },
@@ -2328,6 +2438,8 @@ const BUILTIN_CMDS = {
     { name: 'review', desc: 'Review the current diff', action: 'review' },
   ],
   codex: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Codex model / reasoning effort', action: 'model' },
     { name: 'permissions', desc: 'Change approval & sandbox mode', action: 'approvals' },
@@ -2340,6 +2452,8 @@ const BUILTIN_CMDS = {
     { name: 'review', desc: 'Review the current working-tree diff', action: 'review' },
   ],
   gemini: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Gemini model', action: 'model' },
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
@@ -2349,6 +2463,8 @@ const BUILTIN_CMDS = {
     { name: 'new', desc: 'Start a fresh Gemini thread', action: 'new' },
   ],
   agy: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Antigravity model', action: 'model' },
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
@@ -2475,6 +2591,16 @@ async function forkCurrent() {
   enqueueText(prompt, { parentId: parent.id, parentTitle: parent.title, title: childTitle, displayText: `Forked from ${parent.title}` });
   toast('Fork created');
 }
+function openChatWorkspaceSheet() {
+  openPathSheet('Chat workspace', cur.cwd || defaultCwd, '~/development', async (path) => {
+    const want = path || defaultCwd;
+    const d = await (await api('/api/fs?path=' + encodeURIComponent(want))).json();
+    if (d.type !== 'dir') throw new Error('not a directory');
+    cur.cwd = d.path;
+    sendSettings();
+    toast(`Chat workspace: ${shortCwd(cur.cwd)}`);
+  }, { text: 'This chat uses this directory for files, bash, and the next agent turn.' });
+}
 function openStatusSheet() {
   cur.settings = normalizeSettings(cur.settings);
   const agent = agentType(cur.agent);
@@ -2485,10 +2611,13 @@ function openStatusSheet() {
     { ic: '', label: 'Agent', desc: agentLabel(agent), fn: () => {} },
     { ic: '', label: 'State', desc: running ? 'Running' : 'Idle', fn: () => {} },
     { ic: '', label: 'Context', desc: `${cx.percent}% · ${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${cx.source !== 'reported' ? ' est' : ''}`, fn: () => {} },
-    { ic: '', label: 'Workspace', desc: shortCwd(cur.cwd || defaultCwd), fn: () => {} },
+    { ic: '⌂', label: 'Workspace', desc: shortCwd(cur.cwd || defaultCwd), fn: openChatWorkspaceSheet },
   ];
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });
-  if (agent === 'codex') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: () => {} });
+  if (agent === 'codex') {
+    rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: openModelSheet });
+    rows.push({ ic: '◆', label: 'Permissions', desc: sandboxLabel(cfg.sandbox || 'off'), fn: openApprovalsSheet });
+  }
   else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: () => {} });
   else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: () => {} });
   else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: () => {} });
@@ -2521,6 +2650,8 @@ function runSlashCommand(cmd, tok) {
   $('input').blur();
   if (cmd.action === 'accounts') return openAccounts();
   if (cmd.action === 'switch-account') return openAccountSwitch();
+  if (cmd.action === 'settings') return openAppSettings();
+  if (cmd.action === 'workspace') return openChatWorkspaceSheet();
   if (cmd.action === 'model') return openModelSheet();
   if (cmd.action === 'theme') return toggleTheme();
   if (cmd.action === 'approvals') return openApprovalsSheet();
@@ -2610,9 +2741,19 @@ function openModelSheet() {
   openSheet('Claude model', rows);
 }
 function openApprovalsSheet() {
-  openSheet('Codex approvals', [
-    { ic: '✓', label: 'Box YOLO', desc: 'danger-full-access, never ask; current Box default', fn: () => toast('Box YOLO already active') },
-  ]);
+  cur.settings = normalizeSettings(cur.settings);
+  const active = (cur.settings.codex && cur.settings.codex.sandbox) || DEFAULT_SETTINGS.codex.sandbox || 'off';
+  openSheet('Codex permissions', CODEX_SANDBOXES.map((s) => ({
+    ic: s.id === active ? '✓' : '',
+    label: s.label,
+    desc: s.desc,
+    sel: s.id === active,
+    fn: () => {
+      cur.settings.codex.sandbox = s.id;
+      sendSettings();
+      toast(`Codex permissions: ${s.label}`);
+    },
+  })));
 }
 
 /* ---------- rename ---------- */
@@ -3686,7 +3827,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 80;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 81;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {

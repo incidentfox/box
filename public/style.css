@@ -474,6 +474,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .sheetInner::before { content: ''; display: block; width: 36px; height: 5px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 42%, transparent); margin: 4px auto 1px; }
 .sheetInner h3 { text-align: center; font-size: 15px; margin: 12px 0; color: var(--muted); font-weight: 600; }
 .sheetText { margin: 0 22px 10px; color: var(--muted); font-size: 13.5px; line-height: 1.42; text-align: center; }
+.sheetErr { margin: -4px 22px 8px; min-height: 18px; }
 .sheetRow { display: flex; align-items: center; gap: 14px; padding: 15px 22px; font-size: 16px; }
 .sheetRow .ic { font-size: 20px; width: 26px; text-align: center; }
 .sheetRow.sel { color: var(--accent); font-weight: 600; }
