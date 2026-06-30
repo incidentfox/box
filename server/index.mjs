@@ -700,6 +700,9 @@ const saveArchived = (set) => { writeJsonAtomic(ARCH_FILE, [...set]); invalidate
 const ARCH_AT_FILE = join(STATE_DIR, 'archived-at.json');   // { sessionId: archivedAtMs } — additive sidecar
 const loadArchivedAt = () => { try { const o = JSON.parse(readFileSync(ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
 const saveArchivedAt = (m) => { writeJsonAtomic(ARCH_AT_FILE, m); invalidateSessionLists(); };
+const FAVORITES_FILE = join(STATE_DIR, 'favorites.json');
+const loadFavorites = () => { try { return new Set(JSON.parse(readFileSync(FAVORITES_FILE, 'utf8'))); } catch { return new Set(); } };
+const saveFavorites = (set) => { writeJsonAtomic(FAVORITES_FILE, [...set]); invalidateSessionLists(); };
 // Resuming an archived chat brings it back to life: when the user sends a new message we
 // un-archive it so it rejoins the active feed AND the reconcile reaper (which tears down
 // bridges for archived sessions, see reconcileLiveBridges) leaves its freshly-spawned bridge
@@ -1220,6 +1223,14 @@ function migrateCodexSession(fromId, toId) {
   };
   delete state.sessions[fromId];
   saveCodex(state);
+  try {
+    const fav = loadFavorites();
+    if (fav.has(fromId)) {
+      fav.delete(fromId);
+      fav.add(toId);
+      saveFavorites(fav);
+    }
+  } catch {}
   return state.sessions[toId];
 }
 
@@ -1428,6 +1439,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const names = loadNames();
   const archived = loadArchived();
   const archivedAt = loadArchivedAt();
+  const favorites = loadFavorites();
   const files = [];
   const seenIds = new Set();
   for (const dir of eachProjectDir()) {
@@ -1487,11 +1499,12 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // counts over ALL sessions. Auto sessions are tallied only under `auto` (and
   // `archived` if archived) so they never inflate All/Working/Needs input/Live.
   // autoSub breaks the auto total into subcategories for the Automated sub-tabs.
-  const counts = { all: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, auto: 0 };
+  const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
+    if (favorites.has(f.id)) counts.favorites++;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
   saveAutoCat();
@@ -1500,6 +1513,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const [fbase, fsub] = String(filter || 'all').split(':');
   let cand;
   if (filter === 'archived') cand = items.filter((f) => archived.has(f.id));
+  else if (filter === 'favorites') cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && favorites.has(f.id));
   else if (fbase === 'auto') cand = items.filter((f) => !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
   else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && statusOf(f.id) === filter);
   else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
@@ -1529,6 +1543,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       preview: s.preview || (scan.get(s.id) && scan.get(s.id).preview) || (s.file ? sessionPreview(s.file) : ''),
       parentId: s.parentId || null, parentTitle: s.parentTitle || '',
       live: !!r || !!lb || cxLive, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
+      favorite: favorites.has(s.id),
       status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : 'main',
       subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
@@ -1540,7 +1555,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // right at the top), falling back to last-activity for legacy archives with no
   // recorded archive time. Every other view keeps live-pinned-then-recent order.
   if (filter === 'archived') out.sort((a, b) => (b.archivedAt - a.archivedAt) || (b.mtime - a.mtime));
-  else out.sort((a, b) => (b.pinned - a.pinned) || (b.mtime - a.mtime));
+  else out.sort((a, b) => (b.favorite - a.favorite) || (b.pinned - a.pinned) || (b.mtime - a.mtime));
   counts.autoSub = autoSub;
   return { sessions: out, counts };
 }
@@ -1771,6 +1786,14 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const restored = on ? null : restoreSessionBridge(id);
   res.json({ ok: true, archived: on, killed, restored });
 });
+app.post('/api/sessions/:id/favorite', requireAuth, (req, res) => {
+  const set = loadFavorites();
+  const id = req.params.id;
+  const on = !(req.body && req.body.favorite === false);
+  if (on) set.add(id); else set.delete(id);
+  saveFavorites(set);
+  res.json({ ok: true, favorite: on });
+});
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
 // Natural-language queries are expanded into a few targeted searches, then merged and reranked.
 app.get('/api/session-search', requireAuth, async (req, res) => {
@@ -1813,6 +1836,7 @@ app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   const h = sessionHistory(req.params.id, { before });
   h.messages = compactHistoryMessages(h.messages || []);
   h.archived = loadArchived().has(req.params.id);
+  h.favorite = loadFavorites().has(req.params.id);
   res.json(h);
 });
 // All user messages from the full JSONL (for the "my messages" browser)
@@ -3727,7 +3751,7 @@ wss.on('connection', (ws) => {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
