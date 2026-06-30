@@ -109,7 +109,10 @@ fi
 if command -v claude >/dev/null 2>&1; then
   ok "claude CLI present ($(claude --version 2>/dev/null | head -1))"
   # Logged in? Box drives the user's logged-in CLI (no API key needed on a subscription).
-  if [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  # Creds live in ~/.claude/.credentials.json on Linux, but in the macOS Keychain on Mac —
+  # so a file-only check gives a false "not logged in" on macOS. Check the Keychain too.
+  if [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     || { [ "$OS" = "Darwin" ] && security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1; }; then
     ok "claude appears logged in"
   else
     warn "claude is installed but NOT logged in"
@@ -147,6 +150,14 @@ else
   warn "npm install failed — last lines (full log: $NPM_LOG):"
   tail -n 15 "$NPM_LOG" | sed 's/^/      /'
 fi
+# prebuild-install can unpack node-pty's `spawn-helper` without its execute bit, so every
+# PTY spawn then fails at runtime with "posix_spawnp failed" (the whole app looks dead).
+# Restore +x on whichever prebuilt/built helper exists (idempotent, both arches).
+_fixed_sh=0
+for sh in node_modules/node-pty/prebuilds/*/spawn-helper node_modules/node-pty/build/Release/spawn-helper; do
+  [ -f "$sh" ] && { chmod +x "$sh" 2>/dev/null; _fixed_sh=1; }
+done
+[ "$_fixed_sh" = 1 ] && ok "node-pty spawn-helper executable"
 # node-pty is the ONE native dependency and the usual point of failure. Verify it
 # actually loads (a swallowed build error otherwise surfaces later as a dead app).
 if node -e 'require("node-pty")' >/dev/null 2>&1; then
