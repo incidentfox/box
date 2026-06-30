@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { spawn, execSync, execFile } from 'node:child_process';
 import {
   readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, unlinkSync,
-  openSync, readSync, closeSync, renameSync,
+  openSync, readSync, closeSync, renameSync, chmodSync,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
@@ -122,6 +122,152 @@ const appDefaultCwd = () => (APP_SETTINGS.defaultCwd && validateDirectory(APP_SE
 const appDefaultAgent = () => APP_SETTINGS.defaultAgent || 'claude';
 const appCodexSandbox = () => APP_SETTINGS.codexSandbox || String(cfg('CODEX_SANDBOX') || 'off').trim().toLowerCase() || 'off';
 let DEFAULT_CWD = appDefaultCwd();
+const PROMPT_OVERRIDES_FILE = join(STATE_DIR, 'prompt-overrides.json');
+const PROMPT_TEMPLATES = {
+  'linear-delegation': {
+    title: 'Linear delegation',
+    desc: 'Seed prompt for a fresh agent dispatched from a Linear issue.',
+    vars: ['issueId', 'issueTitle', 'issueContext', 'branchSlug', 'agentBranch'],
+    default: `Work the Linear issue {{issueId}}: "{{issueTitle}}".
+
+Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
+
+{{issueContext}}
+
+How to work it:
+- Do not edit a shared clone. Create an isolated git worktree for your branch off the latest default branch. Use a unique branch name for this ticket, for example:
+  git worktree add ../{{branchSlug}} -b {{agentBranch}}/{{branchSlug}} && cd ../{{branchSlug}}
+- Implement and verify the change, open or refresh the PR, and post the PR link as a comment on {{issueId}}.
+- When done, set {{issueId}} to In Review, or comment your status and blockers.`,
+  },
+  'linear-resume': {
+    title: 'Linear resume',
+    desc: 'Prompt sent when resuming an existing session from a Linear issue.',
+    vars: ['issueId', 'issueTitle', 'issueContext', 'branchSlug', 'agentBranch'],
+    default: `Continue working on {{issueId}}: "{{issueTitle}}".
+
+You worked on this earlier — pick up where you left off. The full CURRENT ticket context (description, every comment, and who else touched it) is included below so you don't need to re-fetch the Linear ticket:
+
+{{issueContext}}
+
+How to continue:
+- If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
+  git worktree add ../{{branchSlug}} -b {{agentBranch}}/{{branchSlug}} && cd ../{{branchSlug}}
+- Finish the work, open/refresh the PR, and post the PR link + a status comment on {{issueId}}.`,
+  },
+  'fork-thread': {
+    title: 'Fork thread',
+    desc: 'Seed prompt for a child Codex thread forked from a parent chat.',
+    vars: ['parentTitle', 'parentId', 'workspace', 'transcript'],
+    default: `You are a forked child Codex thread created in the Box mobile app.
+
+Parent thread: {{parentTitle}}
+Parent id: {{parentId}}
+Workspace: {{workspace}}
+
+Use the transcript below as prior context for this child branch. Treat this as a separate branch: do not assume future parent-thread messages are visible here, and do not write back to the parent. Do not run commands or edit files in this seed turn.
+
+Parent transcript:
+{{transcript}}
+
+For this seed turn, briefly acknowledge that the fork is ready and mention the parent thread title. Wait for the next user instruction.`,
+  },
+  'switch-agent': {
+    title: 'Switch agent',
+    desc: 'Seed prompt when continuing a chat in another agent.',
+    vars: ['targetAgent', 'sourceAgent', 'sourceTitle', 'sourceId', 'workspace', 'transcript'],
+    default: `You are continuing a Box mobile conversation in {{targetAgent}} after switching from {{sourceAgent}}.
+
+Source thread: {{sourceTitle}}
+Source id: {{sourceId}}
+Workspace: {{workspace}}
+
+Use the transcript below as prior context. Continue as the same working conversation, but do not assume future messages in the source thread are visible here unless they are pasted later.
+
+Source transcript:
+{{transcript}}
+
+For this first turn, briefly acknowledge that {{targetAgent}} has the prior context and is ready to continue. Do not run commands or edit files until the next user instruction.`,
+  },
+  'review-current': {
+    title: 'Review command',
+    desc: 'Prompt inserted by the built-in /review command.',
+    vars: [],
+    default: 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.',
+  },
+  'attention-status': {
+    title: 'Morning brief status',
+    desc: 'Server-side prompt used to update per-session Needs input / In progress / Done briefs.',
+    vars: ['ownerName', 'existingDocBlock', 'imageSection', 'recentTurns', 'imageRule', 'doneImageHint'],
+    default: `You are maintaining a morning-briefing status doc for {{ownerName}} so {{ownerName}} can orient after being away, without reading the full chat.
+
+{{existingDocBlock}}{{imageSection}}RECENT CONVERSATION (last 20 turns — use this to update the doc):
+{{recentTurns}}
+
+Output ONLY the updated markdown — no preamble, no commentary. Rules:
+- KEEP existing "Needs your input" items unless the new conversation clearly resolves them
+- REMOVE or move to "Done recently" any item explicitly completed in the new turns
+- ADD new blocking items or decisions discovered in the new turns
+- If the new turns are just idle checks / heartbeats with no new information, output the existing doc mostly unchanged
+- Omit a section only if it genuinely has nothing to say
+{{imageRule}}
+
+## Needs your input
+For each open decision or question blocking progress, write:
+
+**[Topic label]**
+- *Question:* Exactly what needs to be decided or answered — specific, not vague
+- *Context:* 1–2 sentences: what's already done, what's at stake, what options exist if relevant
+- *Why now:* why it's blocking (skip if obvious)
+
+## In progress
+- [item] — [what specifically is happening and current state]
+
+## Done recently
+- [item] — [what was completed and its outcome]{{doneImageHint}}
+
+Be specific enough that {{ownerName}} can act or reply without reading the chat. List all sub-questions under a topic, not just the topic label.`,
+  },
+};
+function loadPromptOverrides() {
+  try {
+    const o = JSON.parse(readFileSync(PROMPT_OVERRIDES_FILE, 'utf8'));
+    return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+  } catch { return {}; }
+}
+let PROMPT_OVERRIDES = loadPromptOverrides();
+function promptTemplateList() {
+  return Object.entries(PROMPT_TEMPLATES).map(([id, tpl]) => ({
+    id,
+    title: tpl.title,
+    desc: tpl.desc,
+    vars: tpl.vars,
+    default: tpl.default,
+    value: typeof PROMPT_OVERRIDES[id] === 'string' ? PROMPT_OVERRIDES[id] : tpl.default,
+    overridden: typeof PROMPT_OVERRIDES[id] === 'string',
+  }));
+}
+function renderTemplate(id, vars = {}) {
+  const tpl = PROMPT_TEMPLATES[id];
+  const raw = (tpl && typeof PROMPT_OVERRIDES[id] === 'string') ? PROMPT_OVERRIDES[id] : (tpl && tpl.default) || '';
+  return raw.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => String(vars[key] ?? ''));
+}
+const HOOK_SPECS = [
+  { id: 'inject-time', title: 'Inject current time', file: 'inject-time.sh', event: 'UserPromptSubmit' },
+  { id: 'surface-attention', title: 'Surface needs-you items', file: 'surface-attention.sh', event: 'SessionStart' },
+  { id: 'skip-automated', title: 'Skip automated sessions helper', file: '_skip-automated.sh', event: 'helper' },
+];
+const hookSpec = (id) => HOOK_SPECS.find((h) => h.id === id || h.file === id);
+const defaultHookPath = (spec) => join(ROOT, 'harness', 'hooks', spec.file);
+const liveHookPath = (spec) => join(HOME, '.claude', 'hooks', spec.file);
+function hookPayload(spec) {
+  const live = liveHookPath(spec);
+  const fallback = defaultHookPath(spec);
+  const path = existsSync(live) ? live : fallback;
+  let content = ''; try { content = readFileSync(path, 'utf8'); } catch {}
+  let defaultContent = ''; try { defaultContent = readFileSync(fallback, 'utf8'); } catch {}
+  return { id: spec.id, title: spec.title, file: spec.file, event: spec.event, path, livePath: live, defaultPath: fallback, source: existsSync(live) ? 'live' : 'repo-default', content, defaultContent, overridden: existsSync(live) && content !== defaultContent };
+}
 const STT_MODELS = cfg('STT_MODEL', 'scribe_v2,scribe_v1').split(',');
 // Voice (speech-to-text) is OPTIONAL. ElevenLabs Scribe is the zero-friction pick;
 // Deepgram nova-3 is the higher-quality batch transcriber. Leave both unset to disable voice.
@@ -2116,6 +2262,48 @@ app.post('/api/app-settings', requireAuth, (req, res) => {
   writeJsonAtomic(APP_SETTINGS_FILE, APP_SETTINGS);
   res.json(appSettingsPayload());
 });
+app.get('/api/prompt-templates', requireAuth, (req, res) => res.json({ templates: promptTemplateList(), overridesFile: PROMPT_OVERRIDES_FILE }));
+app.post('/api/prompt-templates/:id', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  if (!PROMPT_TEMPLATES[id]) return res.status(404).json({ error: 'unknown prompt template' });
+  const value = String((req.body && req.body.value) || '').replace(/\r\n/g, '\n').trimEnd();
+  if (!value.trim()) return res.status(400).json({ error: 'template cannot be blank' });
+  PROMPT_OVERRIDES = { ...PROMPT_OVERRIDES, [id]: value };
+  writeJsonAtomic(PROMPT_OVERRIDES_FILE, PROMPT_OVERRIDES);
+  res.json({ ok: true, template: promptTemplateList().find((t) => t.id === id) });
+});
+app.post('/api/prompt-templates/:id/reset', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  if (!PROMPT_TEMPLATES[id]) return res.status(404).json({ error: 'unknown prompt template' });
+  if (Object.prototype.hasOwnProperty.call(PROMPT_OVERRIDES, id)) {
+    const next = { ...PROMPT_OVERRIDES }; delete next[id]; PROMPT_OVERRIDES = next;
+    writeJsonAtomic(PROMPT_OVERRIDES_FILE, PROMPT_OVERRIDES);
+  }
+  res.json({ ok: true, template: promptTemplateList().find((t) => t.id === id) });
+});
+app.get('/api/hooks', requireAuth, (req, res) => res.json({ hooks: HOOK_SPECS.map(hookPayload) }));
+app.post('/api/hooks/:id', requireAuth, (req, res) => {
+  const spec = hookSpec(String(req.params.id || ''));
+  if (!spec) return res.status(404).json({ error: 'unknown hook' });
+  const value = String((req.body && req.body.content) || '').replace(/\r\n/g, '\n').trimEnd() + '\n';
+  if (!value.trim()) return res.status(400).json({ error: 'hook cannot be blank' });
+  const live = liveHookPath(spec);
+  mkdirSync(dirname(live), { recursive: true });
+  writeFileSync(live, value);
+  try { chmodSync(live, 0o755); } catch {}
+  res.json({ ok: true, hook: hookPayload(spec) });
+});
+app.post('/api/hooks/:id/reset', requireAuth, (req, res) => {
+  const spec = hookSpec(String(req.params.id || ''));
+  if (!spec) return res.status(404).json({ error: 'unknown hook' });
+  const fallback = defaultHookPath(spec);
+  if (!existsSync(fallback)) return res.status(404).json({ error: 'default hook missing' });
+  const live = liveHookPath(spec);
+  mkdirSync(dirname(live), { recursive: true });
+  writeFileSync(live, readFileSync(fallback, 'utf8'));
+  try { chmodSync(live, 0o755); } catch {}
+  res.json({ ok: true, hook: hookPayload(spec) });
+});
 
 // Let a private overlay register extra routes / run init (business endpoints, etc.).
 if (overlay.routes) { try { overlay.routes(app, { requireAuth, HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.routes failed:', e && e.message); } }
@@ -2915,37 +3103,14 @@ ${recentImgs.map(({ paths, caption }) => `- ${paths.join(', ')}${caption ? `\n  
   const imgRule = allowedImgPaths.length
     ? `- For a "Done recently" item with a matching screenshot, you MAY embed ONE inline using a path copied EXACTLY from the RECENT VERIFICATION SCREENSHOTS list above: ![short description](EXACT_PATH_FROM_LIST). Use ONLY paths from that list. NEVER invent a path, NEVER put a website/http(s) URL inside ![](…) (those are not images), NEVER use a placeholder like /path/to/x.png. If no listed screenshot fits the item, omit the image.`
     : `- Do NOT embed any images: no screenshots are available. NEVER invent an image path and NEVER put a website/http(s) URL or a placeholder inside ![](…).`;
-  const prompt = `You are maintaining a morning-briefing status doc for ${OWNER_NAME} so ${OWNER_NAME} can orient after being away, without reading the full chat.
-
-${existing ? `EXISTING STATUS DOC (current best knowledge — refine it, don't discard it):
-${existing}
-
-` : ''}${imgSection}RECENT CONVERSATION (last 20 turns — use this to update the doc):
-${turns}
-
-Output ONLY the updated markdown — no preamble, no commentary. Rules:
-- KEEP existing "Needs your input" items unless the new conversation clearly resolves them
-- REMOVE or move to "Done recently" any item explicitly completed in the new turns
-- ADD new blocking items or decisions discovered in the new turns
-- If the new turns are just idle checks / heartbeats with no new information, output the existing doc mostly unchanged
-- Omit a section only if it genuinely has nothing to say
-${imgRule}
-
-## Needs your input
-For each open decision or question blocking progress, write:
-
-**[Topic label]**
-- *Question:* Exactly what needs to be decided or answered — specific, not vague
-- *Context:* 1–2 sentences: what's already done, what's at stake, what options exist if relevant
-- *Why now:* why it's blocking (skip if obvious)
-
-## In progress
-- [item] — [what specifically is happening and current state]
-
-## Done recently
-- [item] — [what was completed and its outcome]${allowedImgPaths.length ? '\n  ![description](exact path copied from the screenshots list above — omit this line entirely if none fits)' : ''}
-
-Be specific enough that ${OWNER_NAME} can act or reply without reading the chat. List all sub-questions under a topic, not just the topic label.`;
+  const prompt = renderTemplate('attention-status', {
+    ownerName: OWNER_NAME,
+    existingDocBlock: existing ? `EXISTING STATUS DOC (current best knowledge — refine it, don't discard it):\n${existing}\n\n` : '',
+    imageSection: imgSection,
+    recentTurns: turns,
+    imageRule: imgRule,
+    doneImageHint: allowedImgPaths.length ? '\n  ![description](exact path copied from the screenshots list above — omit this line entirely if none fits)' : '',
+  });
   // Generate via the OpenAI API (cheap model) instead of `claude -p` — saves Claude/Max
   // tokens on this high-frequency mundane refresh (the user 2026-06-22).
   (async () => {

@@ -164,6 +164,9 @@ respawns it):
 When an integration isn't configured, its UI hides itself — Box stays a clean chat app.
 Runtime defaults that are safe to change live, including default workspace, default agent,
 and Codex permission mode, are also available from the in-app Settings sheet.
+The same Settings sheet includes **Prompts & hooks** for viewing/editing the built-in
+dispatch/review/fork/status prompts and the known Box hook scripts. Prompt overrides live in
+`~/.cc-mobile/prompt-overrides.json`; hook edits are written to `~/.claude/hooks/`.
 
 ## The harness (optional, recommended)
 

@@ -137,9 +137,11 @@ async function api(path, opts = {}) {
 }
 // Client bootstrap (filled from /api/config): $HOME for path-shortening + which optional
 // integrations are wired, so we can hide the Board / Linear UI when they aren't set up.
-let CFG = { home: '', ownerName: 'you', defaultCwd: '', appSettings: { defaultCwd: '', envDefaultCwd: '', defaultAgent: 'claude', codexSandbox: 'off' }, features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false } };
+let CFG = { home: '', ownerName: 'you', defaultCwd: '', appSettings: { defaultCwd: '', envDefaultCwd: '', defaultAgent: 'claude', codexSandbox: 'off' }, features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false }, promptTemplates: [], hooks: [] };
 async function loadConfig() {
   try { CFG = await (await api('/api/config')).json(); } catch {}
+  try { CFG.promptTemplates = (await (await api('/api/prompt-templates')).json()).templates || []; } catch { CFG.promptTemplates = []; }
+  try { CFG.hooks = (await (await api('/api/hooks')).json()).hooks || []; } catch { CFG.hooks = []; }
   applyConfig();
 }
 function applyConfig() {
@@ -597,6 +599,18 @@ function sandboxLabel(id) {
   const hit = CODEX_SANDBOXES.find((s) => s.id === id);
   return hit ? hit.label : (id || 'Box YOLO');
 }
+function templateById(id) {
+  return ((CFG && CFG.promptTemplates) || []).find((t) => t.id === id);
+}
+function renderPromptTemplate(id, fallback, vars = {}) {
+  const tpl = templateById(id);
+  const raw = (tpl && tpl.value) || fallback || '';
+  return raw.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => String(vars[key] ?? ''));
+}
+async function refreshPromptConfig() {
+  try { CFG.promptTemplates = (await (await api('/api/prompt-templates')).json()).templates || []; } catch {}
+  try { CFG.hooks = (await (await api('/api/hooks')).json()).hooks || []; } catch {}
+}
 async function saveAppSettings(patch) {
   const r = await api('/api/app-settings', { method: 'POST', body: JSON.stringify(patch) });
   const j = await r.json().catch(() => ({}));
@@ -605,6 +619,101 @@ async function saveAppSettings(patch) {
   defaultCwd = j.defaultCwd || defaultCwd;
   DEFAULT_SETTINGS.codex.sandbox = j.codexSandbox || 'off';
   return j;
+}
+function openTextEditor({ title, text, meta, save, reset, resetLabel = 'Reset to default' }) {
+  const inner = $('sheetInner'); inner.innerHTML = `<h3>${esc(title)}</h3>`;
+  if (meta) { const p = document.createElement('p'); p.className = 'sheetText'; p.textContent = meta; inner.appendChild(p); }
+  const ta = document.createElement('textarea'); ta.className = 'sheetTextarea'; ta.value = text || ''; ta.spellcheck = false; ta.autocomplete = 'off'; inner.appendChild(ta);
+  const err = document.createElement('p'); err.className = 'err sheetErr'; inner.appendChild(err);
+  const row = document.createElement('div'); row.className = 'sheetRow sel'; row.innerHTML = '<span class="ic">✓</span><div>Save</div>';
+  row.onclick = async () => {
+    err.textContent = '';
+    try { await save(ta.value); closeSheet(); }
+    catch (e) { err.textContent = String(e.message || e); }
+  };
+  inner.appendChild(row);
+  if (reset) {
+    const rr = document.createElement('div'); rr.className = 'sheetRow'; rr.innerHTML = `<span class="ic"></span><div>${esc(resetLabel)}</div>`;
+    rr.onclick = async () => {
+      err.textContent = '';
+      try { await reset(); closeSheet(); }
+      catch (e) { err.textContent = String(e.message || e); }
+    };
+    inner.appendChild(rr);
+  }
+  $('sheet').classList.remove('hidden');
+  setTimeout(() => ta.focus(), 0);
+}
+function promptVarDesc(t) {
+  return (t.vars && t.vars.length) ? `Variables: ${t.vars.map((v) => `{{${v}}}`).join(', ')}` : 'No variables.';
+}
+async function openPromptTemplateEditor(t) {
+  openTextEditor({
+    title: t.title,
+    text: t.value || t.default || '',
+    meta: `${t.desc || ''} ${promptVarDesc(t)}`.trim(),
+    save: async (value) => {
+      const r = await api(`/api/prompt-templates/${encodeURIComponent(t.id)}`, { method: 'POST', body: JSON.stringify({ value }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'prompt save failed');
+      await refreshPromptConfig();
+      toast('Prompt saved');
+    },
+    reset: t.overridden ? async () => {
+      const r = await api(`/api/prompt-templates/${encodeURIComponent(t.id)}/reset`, { method: 'POST', body: '{}' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'prompt reset failed');
+      await refreshPromptConfig();
+      toast('Prompt reset');
+    } : null,
+  });
+}
+async function openPromptTemplateList() {
+  await refreshPromptConfig();
+  const rows = (CFG.promptTemplates || []).map((t) => ({
+    ic: t.overridden ? '✓' : '',
+    label: t.title,
+    desc: `${t.overridden ? 'Edited' : 'Default'} · ${t.desc || ''}`,
+    fn: () => openPromptTemplateEditor(t),
+  }));
+  openSheet('Prompt templates', rows);
+}
+function openHookEditor(h) {
+  openTextEditor({
+    title: h.title,
+    text: h.content || '',
+    meta: `${h.event} · ${h.path}`,
+    save: async (content) => {
+      const r = await api(`/api/hooks/${encodeURIComponent(h.id)}`, { method: 'POST', body: JSON.stringify({ content }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'hook save failed');
+      await refreshPromptConfig();
+      toast('Hook saved');
+    },
+    reset: h.overridden ? async () => {
+      const r = await api(`/api/hooks/${encodeURIComponent(h.id)}/reset`, { method: 'POST', body: '{}' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'hook reset failed');
+      await refreshPromptConfig();
+      toast('Hook reset');
+    } : null,
+  });
+}
+async function openHookList() {
+  await refreshPromptConfig();
+  const rows = (CFG.hooks || []).map((h) => ({
+    ic: h.overridden ? '✓' : '',
+    label: h.title,
+    desc: `${h.overridden ? 'Edited' : h.source} · ${h.file}`,
+    fn: () => openHookEditor(h),
+  }));
+  openSheet('Hooks', rows);
+}
+function openPromptHub() {
+  openSheet('Prompts & hooks', [
+    { ic: '', label: 'Prompt templates', desc: 'Linear dispatch, fork/switch, review, status brief', fn: openPromptTemplateList },
+    { ic: '', label: 'Hooks', desc: 'Known Claude hook scripts installed by Box', fn: openHookList },
+  ]);
 }
 function openPathSheet(title, value, placeholder, onSave, opts = {}) {
   const inner = $('sheetInner'); inner.innerHTML = `<h3>${esc(title)}</h3>`;
@@ -674,6 +783,7 @@ function openAppSettings() {
     { ic: '⌂', label: 'Default workspace', desc: shortCwd(s.defaultCwd || defaultCwd), fn: openDefaultWorkspaceSheet },
     { ic: agentIcon(configuredDefaultAgent()), label: 'Default agent', desc: agentLabel(configuredDefaultAgent()), fn: openDefaultAgentSheet },
     { ic: '◆', label: 'Codex permissions', desc: sandboxLabel(s.codexSandbox || DEFAULT_SETTINGS.codex.sandbox || 'off'), fn: openDefaultCodexSandboxSheet },
+    { ic: '', label: 'Prompts & hooks', desc: 'View and edit built-in prompt text and hook scripts', fn: openPromptHub },
     { ic: document.documentElement.dataset.theme === 'dark' ? '☀' : '☾', label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Dark' : 'Light', fn: toggleTheme },
   ]);
 }
@@ -1348,17 +1458,14 @@ function buildIssueContext(d, sessions) {
 }
 function buildIssueDelegationPrompt(d, sessions, agent = 'claude') {
   const slug = d.identifier.toLowerCase();
-  return `Work the Linear issue ${d.identifier}: "${d.title}".
-
-Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
-
-${buildIssueContext(d, sessions)}
-
-How to work it:
-- Do not edit a shared clone. Create an isolated git worktree for your branch off the latest default branch. Use a unique branch name for this ticket, for example:
-  git worktree add ../${slug} -b ${agentBranch(agent)}/${slug} && cd ../${slug}
-- Implement and verify the change, open or refresh the PR, and post the PR link as a comment on ${d.identifier}.
-- When done, set ${d.identifier} to In Review, or comment your status and blockers.`;
+  const issueContext = buildIssueContext(d, sessions);
+  return renderPromptTemplate('linear-delegation', `Work the Linear issue ${d.identifier}: "${d.title}".\n\n${issueContext}`, {
+    issueId: d.identifier,
+    issueTitle: d.title,
+    issueContext,
+    branchSlug: slug,
+    agentBranch: agentBranch(agent),
+  });
 }
 // Wait for a freshly-spawned chat's session id to resolve (the RC bridge reports it via
 // the {type:'session'} WS event a beat after spawn). Keyed to this chat so navigating
@@ -1387,16 +1494,14 @@ async function recordDelegation(inc, { agent, kind, sessionId, sessionTitle, key
 }
 // Resume the existing session that already has this issue's context and tell it to continue.
 async function resumeIssueSession(s, d) {
-  const cont = `Continue working on ${d.identifier}: "${d.title}".
-
-You worked on this earlier — pick up where you left off. The full CURRENT ticket context (description, every comment, and who else touched it) is included below so you don't need to re-fetch the Linear ticket:
-
-${buildIssueContext(d, curIssueSessions)}
-
-How to continue:
-- If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
-  git worktree add ../${d.identifier.toLowerCase()} -b ${agentBranch(s.agent)}/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
-- Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
+  const issueContext = buildIssueContext(d, curIssueSessions);
+  const cont = renderPromptTemplate('linear-resume', `Continue working on ${d.identifier}: "${d.title}".\n\n${issueContext}`, {
+    issueId: d.identifier,
+    issueTitle: d.title,
+    issueContext,
+    branchSlug: d.identifier.toLowerCase(),
+    agentBranch: agentBranch(s.agent),
+  });
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
   enqueueText(cont);
   await recordDelegation(d.identifier, { agent: s.agent, kind: 'resume', sessionId: s.id, sessionTitle: s.title });
@@ -2426,6 +2531,7 @@ async function onType() {
 const BUILTIN_CMDS = {
   claude: [
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
@@ -2439,6 +2545,7 @@ const BUILTIN_CMDS = {
   ],
   codex: [
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Codex model / reasoning effort', action: 'model' },
@@ -2453,6 +2560,7 @@ const BUILTIN_CMDS = {
   ],
   gemini: [
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Gemini model', action: 'model' },
@@ -2464,6 +2572,7 @@ const BUILTIN_CMDS = {
   ],
   agy: [
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Antigravity model', action: 'model' },
@@ -2517,18 +2626,12 @@ function compactTranscript(messages, maxChars = 14000, maxMsgs = 28) {
 }
 function buildForkPrompt(parent, messages) {
   const transcript = compactTranscript(messages);
-  return `You are a forked child Codex thread created in the Box mobile app.
-
-Parent thread: ${parent.title}
-Parent id: ${parent.id}
-Workspace: ${parent.cwd}
-
-Use the transcript below as prior context for this child branch. Treat this as a separate branch: do not assume future parent-thread messages are visible here, and do not write back to the parent. Do not run commands or edit files in this seed turn.
-
-Parent transcript:
-${transcript || '(No parent transcript was available.)'}
-
-For this seed turn, briefly acknowledge that the fork is ready and mention the parent thread title. Wait for the next user instruction.`;
+  return renderPromptTemplate('fork-thread', `Forked from ${parent.title}.\n\nParent transcript:\n${transcript || '(No parent transcript was available.)'}`, {
+    parentTitle: parent.title,
+    parentId: parent.id,
+    workspace: parent.cwd,
+    transcript: transcript || '(No parent transcript was available.)',
+  });
 }
 function buildSwitchPrompt(source, targetAgent, messages) {
   // Carry the prior conversation at high fidelity (last ~60 turns, ~40k chars) so the
@@ -2536,18 +2639,14 @@ function buildSwitchPrompt(source, targetAgent, messages) {
   const transcript = compactTranscript(messages, 40000, 60);
   const sourceAgent = agentLabel(agentType(source.agent));
   const target = agentLabel(agentType(targetAgent));
-  return `You are continuing a Box mobile conversation in ${target} after switching from ${sourceAgent}.
-
-Source thread: ${source.title}
-Source id: ${source.id}
-Workspace: ${source.cwd}
-
-Use the transcript below as prior context. Continue as the same working conversation, but do not assume future messages in the source thread are visible here unless they are pasted later.
-
-Source transcript:
-${transcript || '(No source transcript was available.)'}
-
-For this first turn, briefly acknowledge that ${target} has the prior context and is ready to continue. Do not run commands or edit files until the next user instruction.`;
+  return renderPromptTemplate('switch-agent', `Continue this conversation in ${target} with prior context from ${sourceAgent}.\n\nSource transcript:\n${transcript || '(No source transcript was available.)'}`, {
+    targetAgent: target,
+    sourceAgent,
+    sourceTitle: source.title,
+    sourceId: source.id,
+    workspace: source.cwd,
+    transcript: transcript || '(No source transcript was available.)',
+  });
 }
 async function continueWithAgent(targetAgent) {
   targetAgent = agentType(targetAgent);
@@ -2632,7 +2731,7 @@ function openStatusSheet() {
 }
 function reviewCurrent() {
   if (cur.agent !== 'codex') return toast('/review is Codex-only in Box right now');
-  enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.');
+  enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
 }
 function insertToken(text, tok) {
   const t = $('input'); t.value = t.value.slice(0, tok.start) + text + t.value.slice(tok.end);
@@ -2651,6 +2750,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'accounts') return openAccounts();
   if (cmd.action === 'switch-account') return openAccountSwitch();
   if (cmd.action === 'settings') return openAppSettings();
+  if (cmd.action === 'prompts') return openPromptHub();
   if (cmd.action === 'workspace') return openChatWorkspaceSheet();
   if (cmd.action === 'model') return openModelSheet();
   if (cmd.action === 'theme') return toggleTheme();
@@ -2658,7 +2758,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'status') return openStatusSheet();
   if (cmd.action === 'fork') return forkCurrent();
   if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
-  if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.');
+  if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
   if (cmd.action === 'review') return reviewCurrent();
   if (cmd.kind === 'skill' && (cur.agent === 'codex' || cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(`Use the ${cmd.name} skill.`);
   enqueueText('/' + cmd.name);
@@ -3827,7 +3927,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 81;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 82;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
