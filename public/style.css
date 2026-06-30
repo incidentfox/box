@@ -959,11 +959,22 @@ textarea.acctInput { resize: vertical; }
     border-radius: 10px; margin-bottom: 7px; box-shadow: none;
     border: 1px solid transparent;
   }
-  .sCard.current {
-    border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  /* Make the chat you're currently viewing obvious in the desktop sidebar/board:
+     a solid accent border + a bold accent left-stripe + a stronger accent wash +
+     an accent-colored title. The extra selectors re-assert over higher-specificity
+     rules that would otherwise win — the dark-theme border (html[data-theme] .sCard)
+     and the sessions-board tile border (#sessionList .sCard). */
+  .sCard.current,
+  html[data-theme="dark"] .sCard.current,
+  body[data-view="sessions"] #sessionList .sCard.current {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
-  .sCard.current .sCardFront { background: color-mix(in srgb, var(--accent) 7%, var(--card)); }
+  .sCard.current .sCardFront {
+    background: color-mix(in srgb, var(--accent) 14%, var(--card));
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .sCard.current .nm { color: var(--accent); }
   .sCardFront { padding: 11px 12px; border-radius: 10px; }
   .savatar { width: 30px; height: 30px; border-radius: 9px; }
   .savatar .sdot { width: 9px; height: 9px; }
