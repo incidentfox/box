@@ -151,7 +151,7 @@ respawns it):
 |---|---|
 | `CC_AUTH_TOKEN` | The password you type to log in. Auto-generated if blank. |
 | `PORT` | Server port (default `7321`). |
-| `CC_WORKSPACE` | Default directory for new chats / where `/skills` are scanned. |
+| `CC_WORKSPACE` | Install-time fallback for the default directory new chats open in. You can override this later in the app's Settings sheet. |
 | `OWNER_NAME` | Your name, used in the per-session morning brief. |
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
 | `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). |
@@ -162,6 +162,8 @@ respawns it):
 | `DREAM_LOG` | Surface decisions from an external scheduled-agent / issue-filing loop (optional). |
 
 When an integration isn't configured, its UI hides itself — Box stays a clean chat app.
+Runtime defaults that are safe to change live, including default workspace, default agent,
+and Codex permission mode, are also available from the in-app Settings sheet.
 
 ## The harness (optional, recommended)
 

@@ -58,6 +58,7 @@ function findSessionFile(id) {
   return null;
 }
 const STATE_DIR = join(HOME, '.cc-mobile');
+mkdirSync(STATE_DIR, { recursive: true });
 const NAMES_FILE = join(STATE_DIR, 'names.json');
 const UPLOAD_DIR = join(STATE_DIR, 'uploads');
 mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -93,7 +94,34 @@ const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 const PORT = Number(cfg('PORT', 7321));
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
-const DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
+const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
+const APP_SETTINGS_FILE = join(STATE_DIR, 'app-settings.json');
+const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy']);
+const VALID_CODEX_SANDBOX = new Set(['off', 'read-only', 'workspace-write']);
+const expandUserPath = (p) => {
+  const s = String(p || '').trim();
+  if (!s) return '';
+  return resolve(s === '~' ? HOME : s.startsWith('~/') ? join(HOME, s.slice(2)) : s);
+};
+function normalizeAppSettings(raw = {}) {
+  const out = {};
+  const defaultCwd = expandUserPath(raw.defaultCwd);
+  if (defaultCwd) out.defaultCwd = defaultCwd;
+  const agent = String(raw.defaultAgent || '').trim().toLowerCase();
+  if (VALID_APP_AGENTS.has(agent)) out.defaultAgent = agent;
+  const sandbox = String(raw.codexSandbox || '').trim().toLowerCase();
+  if (VALID_CODEX_SANDBOX.has(sandbox)) out.codexSandbox = sandbox;
+  return out;
+}
+function loadAppSettings() {
+  try { return normalizeAppSettings(JSON.parse(readFileSync(APP_SETTINGS_FILE, 'utf8'))); }
+  catch { return {}; }
+}
+let APP_SETTINGS = loadAppSettings();
+const appDefaultCwd = () => (APP_SETTINGS.defaultCwd && validateDirectory(APP_SETTINGS.defaultCwd)) ? APP_SETTINGS.defaultCwd : ENV_DEFAULT_CWD;
+const appDefaultAgent = () => APP_SETTINGS.defaultAgent || 'claude';
+const appCodexSandbox = () => APP_SETTINGS.codexSandbox || String(cfg('CODEX_SANDBOX') || 'off').trim().toLowerCase() || 'off';
+let DEFAULT_CWD = appDefaultCwd();
 const STT_MODELS = cfg('STT_MODEL', 'scribe_v2,scribe_v1').split(',');
 // Voice (speech-to-text) is OPTIONAL. ElevenLabs Scribe is the zero-friction pick;
 // Deepgram nova-3 is the higher-quality batch transcriber. Leave both unset to disable voice.
@@ -745,10 +773,14 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
+  codex: { model: 'gpt-5.5', reasoningEffort: 'high', sandbox: appCodexSandbox() },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   claude: { model: 'opus', effort: 'xhigh' },
+};
+const refreshRuntimeDefaults = () => {
+  DEFAULT_CWD = appDefaultCwd();
+  DEFAULT_SETTINGS.codex.sandbox = appCodexSandbox();
 };
 function normalizeSettings(settings = {}) {
   return {
@@ -757,6 +789,23 @@ function normalizeSettings(settings = {}) {
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
+}
+function appSettingsPayload() {
+  return {
+    defaultCwd: DEFAULT_CWD,
+    envDefaultCwd: ENV_DEFAULT_CWD,
+    defaultAgent: appDefaultAgent(),
+    codexSandbox: appCodexSandbox(),
+    settingsFile: APP_SETTINGS_FILE,
+  };
+}
+function validateDirectory(dir) {
+  try {
+    const st = statSync(dir);
+    return st.isDirectory();
+  } catch {
+    return false;
+  }
 }
 const DEFAULT_CONTEXT_WINDOWS = {
   codex: 258400,
@@ -1563,7 +1612,7 @@ const requireAuth = (req, res, next) => (authOk(req) ? next() : res.status(401).
 app.post('/api/login', (req, res) =>
   (req.body && req.body.token) === AUTH_TOKEN ? res.json({ ok: true }) : res.status(401).json({ error: 'bad token' }));
 
-app.get('/api/sessions', requireAuth, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD }); });
+app.get('/api/sessions', requireAuth, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD, defaultAgent: appDefaultAgent() }); });
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const set = loadArchived(); const at = loadArchivedAt();
   const id = req.params.id; const on = !(req.body && req.body.archived === false);
@@ -2025,6 +2074,8 @@ const LINEAR_ENABLED = !!((LINEAR_KEY_RAW || linearLite) && LINEAR_TEAM_ID);
 app.get('/api/config', requireAuth, (req, res) => res.json({
   home: HOME,
   ownerName: OWNER_NAME,
+  defaultCwd: DEFAULT_CWD,
+  appSettings: appSettingsPayload(),
   features: {
     linear: LINEAR_ENABLED,
     brain: !!findBrainDir(),
@@ -2036,6 +2087,35 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
   // Display names for Automated-tab sub-buckets; a private overlay can add its own.
   subLabels: overlay.subLabels || {},
 }));
+app.get('/api/app-settings', requireAuth, (req, res) => res.json(appSettingsPayload()));
+app.post('/api/app-settings', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const next = { ...APP_SETTINGS };
+  if (Object.prototype.hasOwnProperty.call(body, 'defaultCwd')) {
+    const dir = expandUserPath(body.defaultCwd);
+    if (!dir) delete next.defaultCwd;
+    else {
+      if (!validateDirectory(dir)) return res.status(400).json({ error: 'directory not found' });
+      next.defaultCwd = dir;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'defaultAgent')) {
+    const agent = String(body.defaultAgent || '').trim().toLowerCase();
+    if (!agent) delete next.defaultAgent;
+    else if (VALID_APP_AGENTS.has(agent)) next.defaultAgent = agent;
+    else return res.status(400).json({ error: 'invalid default agent' });
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'codexSandbox')) {
+    const sandbox = String(body.codexSandbox || '').trim().toLowerCase();
+    if (!sandbox) delete next.codexSandbox;
+    else if (VALID_CODEX_SANDBOX.has(sandbox)) next.codexSandbox = sandbox;
+    else return res.status(400).json({ error: 'invalid Codex sandbox' });
+  }
+  APP_SETTINGS = normalizeAppSettings(next);
+  refreshRuntimeDefaults();
+  writeJsonAtomic(APP_SETTINGS_FILE, APP_SETTINGS);
+  res.json(appSettingsPayload());
+});
 
 // Let a private overlay register extra routes / run init (business endpoints, etc.).
 if (overlay.routes) { try { overlay.routes(app, { requireAuth, HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.routes failed:', e && e.message); } }
@@ -3482,18 +3562,20 @@ wss.on('connection', (ws) => {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', archived: s.sessionId ? loadArchived().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
     } else if (m.type === 'settings') {
       const s = rt(m.key);
       s.settings = normalizeSettings(m.settings || s.settings || {});
+      const nextCwd = expandUserPath(m.cwd);
+      if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;
       persist(s);
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
-      bcast(s, { type: 'settings', settings: s.settings });
+      bcast(s, { type: 'settings', settings: s.settings, cwd: s.cwd || null });
     } else if (m.type === 'dequeue') { dequeue(m.key, m.qid); }
     else if (m.type === 'cancel') { cancelCurrent(m.key); }
     else if (m.type === 'answer_waiting') { answerWaiting(m.key, m.sel || {}); }
