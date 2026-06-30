@@ -3606,7 +3606,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 72;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 77;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
