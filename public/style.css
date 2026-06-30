@@ -412,7 +412,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .attachRow img { width: 54px; height: 54px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
 .attachRow .x { position: absolute; top: -6px; right: -6px; background: #1a1a1a; color: #fff; width: 19px; height: 19px; border-radius: 50%; font-size: 12px; display: grid; place-items: center; }
 .inputWrap { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 8px 10px 6px; }
-#input { width: 100%; border: none; outline: none; resize: none; background: none; font-size: 16px; line-height: 1.4; max-height: 38vh; padding: 2px 4px; color: var(--ink); }
+#input { width: 100%; border: none; outline: none; resize: none; background: none; font-size: 16px; line-height: 1.5; min-height: 28px; max-height: 38vh; padding: 4px 4px; color: var(--ink); }
 .toolsRow { display: flex; align-items: center; gap: 6px; margin-top: 4px; min-width: 0; }
 	.chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; max-width: 100%; white-space: nowrap; background: var(--subtle-2); border-radius: 16px; padding: 7px 11px; font-size: 13px; font-weight: 600; line-height: 1; color: var(--ink); }
 	.chip svg { width: 15px; height: 15px; }
@@ -983,6 +983,9 @@ textarea.acctInput { resize: vertical; }
     border-color: color-mix(in srgb, var(--line) 82%, var(--ink));
     box-shadow: 0 22px 70px color-mix(in srgb, #000 15%, transparent);
   }
+  /* In the hero, give the empty textarea real height so the caret/input fills
+     the card instead of sitting as a tiny sliver pinned to the top. */
+  #chat.newChatIntro #input { min-height: 46px; padding-top: 6px; }
   #chat.newChatIntro::after {
     content: '';
     flex: 1 1 auto;
