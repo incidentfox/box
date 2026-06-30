@@ -1410,6 +1410,10 @@ function connectWS() {
   ws.onerror = () => { try { ws.close(); } catch {} };
   ws.onclose = () => { if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
 }
+function setNewChatIntro(on) {
+  const chat = $('chat');
+  if (chat) chat.classList.toggle('newChatIntro', !!on);
+}
 async function openChat(s) {
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
@@ -1422,6 +1426,7 @@ async function openChat(s) {
   $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
+  setNewChatIntro(!s.id && !(s.carry && s.carry.length));
   // Linear-agent session → show an approval bar (merge PR / mark done / archive)
   const inc = (s.subcat === 'linear' || /linear-dispatch/.test(s.cwd || '')) && (String(s.cwd || '') + ' ' + (s.title || '')).match(/INC-\d+/);
   renderLinearBar(inc ? inc[0] : null, s.id);
@@ -1786,6 +1791,7 @@ function userAttachmentGrid(paths) {
   return r;
 }
 function addUser(text, images) {
+  setNewChatIntro(false);
   lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
@@ -1986,6 +1992,7 @@ function submit() {
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
   $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); images = []; renderAttach();
+  setNewChatIntro(false);
   enqueueText(text, { images: imgPaths });
   // If they were answering on the needs-attention page, drop back to the chat to watch it land.
   if (!$('attnPanel').classList.contains('hidden')) closeAttention();

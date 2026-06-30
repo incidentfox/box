@@ -894,6 +894,36 @@ textarea.acctInput { resize: vertical; }
   .sMore:hover, .sMore:focus-visible { opacity: 1; background: var(--subtle-2); color: var(--ink); }
 
   .contextMeter { height: 30px; }
+  #chat.newChatIntro .contextMeter {
+    display: none;
+  }
+  #chat.newChatIntro .messages {
+    flex: 1 1 0;
+    justify-content: flex-end;
+    overflow: hidden;
+    padding-bottom: 14px;
+  }
+  #chat.newChatIntro .messages > .muted {
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  #chat.newChatIntro .composer {
+    flex: none;
+    border-top: 0;
+    background: transparent;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  #chat.newChatIntro .inputWrap {
+    border-radius: 18px;
+    box-shadow: 0 14px 44px rgba(0,0,0,.08);
+  }
+  #chat.newChatIntro::after {
+    content: '';
+    flex: 1 1 0;
+    min-height: 48px;
+  }
   .messages {
     padding: 18px var(--desktop-pad) 12px;
     gap: 16px; align-items: stretch;
