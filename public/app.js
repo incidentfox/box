@@ -538,8 +538,19 @@ function renderSessionList() {
     list.appendChild(sessionCard(s));
   }
 }
+// Keep the sidebar's "currently-viewing" highlight on the open chat. sessionCard()
+// only sets .current at render time, but on desktop the sidebar persists while you
+// switch chats — so without this the highlight stays stuck on the chat you left.
+// Re-target it from the live cur.id whenever the open chat changes.
+function syncCurrentCard() {
+  const list = $('sessionList'); if (!list) return;
+  for (const c of list.querySelectorAll('.sCard')) {
+    c.classList.toggle('current', !!(cur && cur.id) && c.dataset.sid === cur.id);
+  }
+}
 function sessionCard(s) {
   const el = document.createElement('div'); el.className = 'sCard';
+  el.dataset.sid = s.id || '';   // lets syncCurrentCard() re-target the .current highlight without a re-render
   if (cur && cur.id && s.id === cur.id) el.classList.add('current');
   const agent = s.agent || 'claude';
   const sub = s.parentId ? `Fork of ${s.parentTitle || s.parentId.slice(0, 8)}` : (s.note ? s.note : shortCwd(s.cwd));
@@ -1779,6 +1790,7 @@ async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
+  syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
