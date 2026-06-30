@@ -2420,6 +2420,16 @@ function sendSettings() {
 
 /* send = enqueue (server owns the queue; it persists + auto-sends even if you leave) */
 function enqueueText(text, opts = {}) {
+  // Sending a message resumes the chat, which the server un-archives (runWorker →
+  // unarchiveOnResume). Reflect that locally so the UI stops showing it as Archived:
+  // clear the flag + repaint the button, and if we're viewing the Archived filter,
+  // switch to All so the now-active chat stays visible/selected instead of vanishing.
+  if (cur && cur.archived) {
+    cur.archived = false;
+    updateArchiveButton();
+    const s = allSessions.find((x) => x.id === cur.id); if (s) s.archived = false;
+    fetchSessions(curFilter === 'archived' ? 'all' : curFilter);
+  }
   const payload = { type: 'enqueue', key: cur.key, text, images: opts.images || [], mode: cur.mode, agent: cur.agent || 'claude', cwd: cur.cwd };
   if (opts.force) payload.force = true;  // take-over: spawn the box's bridge even though a foreign owner is live
   if (opts.displayText != null) payload.displayText = opts.displayText;
@@ -3173,7 +3183,15 @@ function openArchiveConfirm(s, opts = {}) {
   const rows = [
     { ic: '🗄', label: 'Archive', desc: 'Stop the bridge and move it out of active chats', fn: async () => {
       const j = await doArchive(s, true);
-      if (j && opts.leaveChat) { if (ws) ws.close(); openSessions(); }
+      if (j && opts.leaveChat) {
+        if (ws) ws.close();
+        // Desktop keeps the sidebar mounted, so don't bounce to the full-screen list —
+        // just deselect (a fresh new chat has no id, so syncCurrentCard clears the
+        // highlight) and drop an empty new chat into the right pane. Mobile has no
+        // side-by-side layout, so dropping back to the list is the expected result there.
+        if (isDesktopShell()) openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent });
+        else openSessions();
+      }
     } },
     { ic: '✕', label: 'Cancel', fn: () => {} },
   ];
