@@ -279,19 +279,32 @@ applyTheme();
 /* ---------- markdown (compact, for chat bubbles) ---------- */
 const ABS_PATH_RE = /(^|[\s([])((?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))[^\s<>"'`)]{2,})/g;
 const PREVIEW_IMG_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)(?:[?#].*)?$/i;
+const LOCAL_PATH_RE = /^(~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))(?:\/|$)/;
 function cleanPreviewPath(raw) {
   let path = String(raw || '');
   let suffix = '';
   while (/[.,;:!?]$/.test(path)) { suffix = path.slice(-1) + suffix; path = path.slice(0, -1); }
   return { path, suffix };
 }
+function expandBoxPath(path) {
+  path = String(path || '').trim();
+  const home = (CFG && CFG.home) || '/home/factory';
+  if (path === '~') return home;
+  if (path.startsWith('~/')) return home + path.slice(1);
+  return path;
+}
+function decodePathMaybe(path) {
+  try { return decodeURIComponent(path); } catch { return path; }
+}
 function displayPath(path) {
-  return String(path || '').replace(/^\/home\/factory/, '~');
+  const home = (CFG && CFG.home) || '/home/factory';
+  const s = String(path || '');
+  return s === home ? '~' : s.startsWith(home + '/') ? '~' + s.slice(home.length) : s;
 }
 function pathPreviewHtml(rawPath) {
   const { path, suffix } = cleanPreviewPath(rawPath);
   if (!path || path.length < 3) return esc(rawPath || '');
-  const expanded = path.startsWith('~') ? '/home/factory' + path.slice(1) : path;
+  const expanded = expandBoxPath(path);
   const shown = displayPath(path);
   const name = shown.split('/').filter(Boolean).pop() || shown;
   if (PREVIEW_IMG_EXT_RE.test(path)) {
@@ -301,6 +314,18 @@ function pathPreviewHtml(rawPath) {
   }
   return `<span class="pathPreview" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
     `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(shown)}</span></span>${esc(suffix)}`;
+}
+function localPathLinkHtml(label, href) {
+  const path = expandBoxPath(decodePathMaybe(String(href || '')));
+  const name = (String(label || '').trim() || path.split('/').filter(Boolean).pop() || path);
+  if (!LOCAL_PATH_RE.test(path)) return null;
+  if (PREVIEW_IMG_EXT_RE.test(path)) {
+    return `<span class="pathPreview pathPreviewImg" data-path="${esc(path)}" title="${esc(path)}">` +
+      `<img src="${esc(rawFileUrl(path))}" alt="${esc(name)}" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
+      `<span class="pathPreviewText">${esc(name)}</span></span>`;
+  }
+  return `<span class="pathPreview" data-path="${esc(path)}" title="${esc(path)}">` +
+    `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(name)}</span></span>`;
 }
 function md(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
@@ -322,12 +347,16 @@ function md(src) {
       // status model mistook for an image) → render as a labelled link, not a broken <img>.
       if (isHttp && !looksImg) return `<a href="${esc(src)}" target="_blank">${esc(alt || src)}</a>`;
       // A relative/placeholder path (path/to/x.png — no leading slash) never resolves → its label.
-      if (!isHttp && !src.startsWith('/')) return alt ? esc(alt) : '';
-      const url = isHttp ? src : rawFileUrl(src);
+      if (!isHttp && !LOCAL_PATH_RE.test(src)) return alt ? esc(alt) : '';
+      const url = isHttp ? src : rawFileUrl(expandBoxPath(src));
       // onerror: a missing/stale file should vanish, not leave a broken-image placeholder box.
       return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" onerror="this.style.display='none'">`;
     });
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+      const local = localPathLinkHtml(label, href);
+      if (local) return local;
+      return `<a href="${esc(href)}" target="_blank" rel="noopener">${label}</a>`;
+    });
     t = t.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
     t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     t = t.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank">$2</a>');
@@ -2090,7 +2119,7 @@ function clearLoading() { if (live && live.loading) { live.loading.remove(); liv
 function killGhostIndicators() { $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); }
 const imgUrl = (p) => '/api/img?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
 // For arbitrary filesystem paths (e.g. tool Read on an image), use /api/raw which has no dir restriction
-const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
+const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
 // Remember the last user bubble we drew, so a re-echoed copy of the SAME message (e.g. the
 // server's own injected-echo suppression desyncing on a force-queue + Stop, which leaks the
 // echo back as a `remote_user`) can be dropped instead of rendering the message twice.
@@ -3343,7 +3372,7 @@ function openToolDetail(name, data) {
   showSheet();
 }
 const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'], video: ['mp4', 'mov', 'webm', 'm4v', 'mkv'] };
-const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
+const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
 function openFile(path) { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); showMedia(path); }
 function showMedia(path) {
   path = normalizeJumpPath(path);
