@@ -889,8 +889,8 @@ textarea.acctInput { resize: vertical; }
   }
   body[data-view="sessions"] #sessionList,
   body[data-view="sessions"] #sessResults {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-    gap: 10px 12px; align-content: start; align-items: start;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px; align-content: start; align-items: start;
   }
   body[data-view="sessions"] #sessionList .grouphd,
   body[data-view="sessions"] #sessionList .empty,
@@ -901,8 +901,23 @@ textarea.acctInput { resize: vertical; }
   body[data-view="sessions"] #sessResults .sres {
     width: 100%;
   }
+  /* Uniform tiles: every card is the same fixed height with its content vertically
+     centered, so the desktop board reads as clean, aligned rows instead of a ragged
+     mosaic of faint cards floating above gaps. The fixed height lives on the grid item
+     (.sCard) itself — putting it on the inner .sCardFront let the overflow:hidden card
+     collapse its grid track to ~30px, so tall cards overlapped. A visible border makes
+     the grid legible against the near-matching page background; the preview is clamped
+     so a chatty session can't overflow the tile. */
+  body[data-view="sessions"] #sessionList .sCard {
+    height: 96px; margin: 0;
+    border: 1px solid var(--line); box-shadow: none;
+  }
   body[data-view="sessions"] #sessionList .sCardFront {
-    min-height: 78px;
+    height: 100%; min-height: 0; box-sizing: border-box; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: center; gap: 3px;
+  }
+  body[data-view="sessions"] #sessionList .sCard .preview {
+    -webkit-line-clamp: 2; margin-top: 0;
   }
   #chat, #board, #pipelines, #issue, #issueNew {
     order: 1; flex: 1 1 auto; width: auto; min-width: 0;
