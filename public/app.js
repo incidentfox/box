@@ -285,7 +285,22 @@ applyTheme();
 /* ---------- markdown (compact, for chat bubbles) ---------- */
 const ABS_PATH_RE = /(^|[\s([])((?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))[^\s<>"'`)]{2,})/g;
 const PREVIEW_IMG_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)(?:[?#].*)?$/i;
+const PDF_EXT_RE = /\.pdf(?:[?#].*)?$/i;
 const LOCAL_PATH_RE = /^(~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))(?:\/|$)/;
+// Extensions worth auto-linking when an agent mentions a *relative* path in chat. Deliberately
+// excludes code exts (js/ts/py/…) — those are noisy in technical prose and already shown via
+// Edit/Write tool chips. Focused on deliverables: docs, data, media.
+const REL_FILE_EXTS = 'png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xlsx?|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac';
+// A relative file token preceded by a word-boundary char. The (^|[\s([]) prefix keeps it from
+// matching inside generated HTML attributes or URLs (those are preceded by " or /, not a boundary).
+const REL_FILE_RE = new RegExp('(^|[\\s([])((?:\\.\\/)?(?:[\\w.-]+\\/)*[\\w.-]+\\.(?:' + REL_FILE_EXTS + '))\\b', 'gi');
+const REL_FILE_LONE_RE = new RegExp('^(?:\\.\\/)?(?:[\\w.-]+\\/)*[\\w.-]+\\.(?:' + REL_FILE_EXTS + ')$', 'i');
+// Resolve a relative path against the active session's working dir → absolute box path.
+function resolveRelPath(rel) {
+  const base = String((cur && cur.cwd) || (CFG && CFG.defaultCwd) || (CFG && CFG.home) || '').replace(/\/$/, '');
+  if (!base) return '';
+  return base + '/' + String(rel || '').replace(/^\.\//, '');
+}
 function cleanPreviewPath(raw) {
   let path = String(raw || '');
   let suffix = '';
@@ -307,31 +322,45 @@ function displayPath(path) {
   const s = String(path || '');
   return s === home ? '~' : s.startsWith(home + '/') ? '~' + s.slice(home.length) : s;
 }
+// One renderer for any local file reference in chat. Images preview inline; PDFs get a compact
+// "PDF · name" card (tap → full viewer); everything else is a file chip. All open via the
+// delegated .pathPreview click handler → openFile() → media viewer.
+function filePreviewChip(absPath, label) {
+  const expanded = expandBoxPath(absPath);
+  const shown = label != null ? String(label) : displayPath(expanded);
+  const name = shown.split('/').filter(Boolean).pop() || shown;
+  if (PREVIEW_IMG_EXT_RE.test(expanded)) {
+    return `<span class="pathPreview pathPreviewImg" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+      `<img src="${esc(rawFileUrl(expanded))}" alt="${esc(name)}" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
+      `<span class="pathPreviewText">${esc(shown)}</span></span>`;
+  }
+  if (PDF_EXT_RE.test(expanded)) {
+    return `<span class="pathPreview pathPreviewPdf" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+      `<span class="pdfBadge">PDF</span><span class="pathPreviewText">${esc(shown)}</span></span>`;
+  }
+  return `<span class="pathPreview" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+    `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(shown)}</span></span>`;
+}
 function pathPreviewHtml(rawPath) {
   const { path, suffix } = cleanPreviewPath(rawPath);
   if (!path || path.length < 3) return esc(rawPath || '');
-  const expanded = expandBoxPath(path);
-  const shown = displayPath(path);
-  const name = shown.split('/').filter(Boolean).pop() || shown;
-  if (PREVIEW_IMG_EXT_RE.test(path)) {
-    return `<span class="pathPreview pathPreviewImg" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
-      `<img src="${esc(rawFileUrl(expanded))}" alt="${esc(name)}" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
-      `<span class="pathPreviewText">${esc(shown)}</span></span>${esc(suffix)}`;
-  }
-  return `<span class="pathPreview" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
-    `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(shown)}</span></span>${esc(suffix)}`;
+  return filePreviewChip(expandBoxPath(path), displayPath(path)) + esc(suffix);
 }
 function localPathLinkHtml(label, href) {
   const path = expandBoxPath(decodePathMaybe(String(href || '')));
-  const name = (String(label || '').trim() || path.split('/').filter(Boolean).pop() || path);
   if (!LOCAL_PATH_RE.test(path)) return null;
-  if (PREVIEW_IMG_EXT_RE.test(path)) {
-    return `<span class="pathPreview pathPreviewImg" data-path="${esc(path)}" title="${esc(path)}">` +
-      `<img src="${esc(rawFileUrl(path))}" alt="${esc(name)}" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
-      `<span class="pathPreviewText">${esc(name)}</span></span>`;
-  }
-  return `<span class="pathPreview" data-path="${esc(path)}" title="${esc(path)}">` +
-    `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(name)}</span></span>`;
+  const lbl = String(label || '').trim();
+  return filePreviewChip(path, lbl || (path.split('/').filter(Boolean).pop() || path));
+}
+// A lone backticked token that is just a file path → clickable chip instead of plain <code>.
+// Agents very often write paths in backticks (`output/report.pdf`); this makes those tappable.
+function lonePathChip(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s || /\s/.test(s) || s.length < 3) return null;
+  const exp = expandBoxPath(s);
+  if (LOCAL_PATH_RE.test(exp)) return filePreviewChip(exp, displayPath(s));
+  if (cur && cur.cwd && REL_FILE_LONE_RE.test(s)) return filePreviewChip(resolveRelPath(s), s);
+  return null;
 }
 function md(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
@@ -367,7 +396,13 @@ function md(src) {
     t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     t = t.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank">$2</a>');
     t = t.replace(ABS_PATH_RE, (_, pre, path) => pre + pathPreviewHtml(path));
-    return t.replace(/(\d+)/g, (_, n) => `<code>${safeEsc(codes[+n] ?? '')}</code>`);
+    // Relative file mentions (output/report.pdf, report.csv) → resolve against the session cwd.
+    // Gated on a known cwd; the boundary prefix keeps it out of HTML attrs / URLs built above.
+    if (cur && cur.cwd) t = t.replace(REL_FILE_RE, (m, pre, rel) => {
+      const abs = resolveRelPath(rel);
+      return abs ? pre + filePreviewChip(abs, rel) : m;
+    });
+    return t.replace(/(\d+)/g, (_, n) => { const c = codes[+n] ?? ''; const chip = lonePathChip(c); return chip != null ? chip : `<code>${safeEsc(c)}</code>`; });
   };
   const isTableRow = (ln) => /^\|.+\|$/.test(ln.trim());
   const isSepRow  = (ln) => /^\|[-|: ]+\|$/.test(ln.trim());
@@ -1937,7 +1972,7 @@ function fileExtIcon(ext) {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(e)) return ICONS.copy;
   return ICONS.copy;
 }
-const PDF_EXT_RE = /\.pdf(?:[?#].*)?$/i;
+// PDF_EXT_RE is declared with the other path regexes near the top of this file.
 function fileExtOf(fp) {
   const fname = String(fp || '').split('/').pop() || '';
   return fname.includes('.') ? fname.split('.').pop().toLowerCase() : '';
@@ -3011,7 +3046,7 @@ $('renameBtn').onclick = () => renameChat(cur);
 /* ---------- file explorer + reader ---------- */
 let expPath = '';
 const parentOf = (p) => p.replace(/\/[^/]+\/?$/, '') || '/';
-$('filesBtn').onclick = () => { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); };
+$('filesBtn').onclick = () => { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); const i = $('expJumpInput'); try { i.focus(); i.select(); } catch {} };
 
 /* ---- my messages overlay ---- */
 function closeMyMsgs() { $('myMsgsOverlay').classList.add('hidden'); }
@@ -3370,17 +3405,23 @@ $('expClose').onclick = () => {
   else $('explorer').classList.add('hidden');
 };
 $('expUp').onclick = () => browseExp(parentOf(expPath));
+// Tappable breadcrumb: the current-path title focuses the path bar so it's obvious you can type one.
+$('expPath').onclick = () => { const i = $('expJumpInput'); i.focus(); i.select(); };
 function normalizeJumpPath(path) {
   path = String(path || '').trim();
   if (!path) return '';
-  if (path === '~') return '/home/factory';
-  if (path.startsWith('~')) return '/home/factory' + path.slice(1);
-  return path;
+  return expandBoxPath(path);
 }
 function openJumpPath() {
-  const p = normalizeJumpPath($('expJumpInput').value);
-  if (!p) return;
-  browseExp(p);
+  let v = String($('expJumpInput').value || '').trim();
+  if (!v) return;
+  // A relative path (no leading / or ~) resolves against the folder we're currently viewing,
+  // so pasting "output/report.pdf" from a coding-agent message just works.
+  if (!/^[~/]/.test(v)) {
+    const base = String(expPath || cur.cwd || defaultCwd || (CFG && CFG.home) || '').replace(/\/$/, '');
+    if (base) v = base + '/' + v.replace(/^\.\//, '');
+  }
+  browseExp(normalizeJumpPath(v));
 }
 $('expJump').onsubmit = (e) => {
   e.preventDefault();
