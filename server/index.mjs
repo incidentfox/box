@@ -178,7 +178,7 @@ function childEnv() {
 
 // ---- helpers: names store -------------------------------------------------
 const loadNames = () => { try { return JSON.parse(readFileSync(NAMES_FILE, 'utf8')); } catch { return {}; } };
-const saveNames = (n) => writeFileSync(NAMES_FILE, JSON.stringify(n, null, 2));
+const saveNames = (n) => { writeFileSync(NAMES_FILE, JSON.stringify(n, null, 2)); invalidateSessionLists(); };
 
 // ---- helpers: sessions ----------------------------------------------------
 function readRcRegistry() {
@@ -522,10 +522,10 @@ const ARCH_FILE = join(STATE_DIR, 'archived.json');
 // `pickup` CLI and any older box build keep reading it. Archive *timestamps* live in a
 // separate sidecar so the Archived view can sort most-recently-archived first.
 const loadArchived = () => { try { return new Set(JSON.parse(readFileSync(ARCH_FILE, 'utf8'))); } catch { return new Set(); } };
-const saveArchived = (set) => writeJsonAtomic(ARCH_FILE, [...set]);
+const saveArchived = (set) => { writeJsonAtomic(ARCH_FILE, [...set]); invalidateSessionLists(); };
 const ARCH_AT_FILE = join(STATE_DIR, 'archived-at.json');   // { sessionId: archivedAtMs } — additive sidecar
 const loadArchivedAt = () => { try { const o = JSON.parse(readFileSync(ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
-const saveArchivedAt = (m) => writeJsonAtomic(ARCH_AT_FILE, m);
+const saveArchivedAt = (m) => { writeJsonAtomic(ARCH_AT_FILE, m); invalidateSessionLists(); };
 // Resuming an archived chat brings it back to life: when the user sends a new message we
 // un-archive it so it rejoins the active feed AND the reconcile reaper (which tears down
 // bridges for archived sessions, see reconcileLiveBridges) leaves its freshly-spawned bridge
@@ -645,15 +645,37 @@ function sessionSearchRank(r, variant, queryTokens) {
   const fieldBoost = r.match === 'title' ? 18 : r.match === 'cwd' ? 8 : 0;
   return (Number(r.score) || 0) + kindBoost + fieldBoost + (overlap * 12);
 }
+const JSON_FILE_CACHE = new Map();
+function loadJsonCached(file, fallback) {
+  let st = null;
+  try { st = statSync(file); } catch { return fallback(); }
+  const cached = JSON_FILE_CACHE.get(file);
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.value;
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    JSON_FILE_CACHE.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+    return value;
+  } catch {
+    return fallback();
+  }
+}
+function rememberJsonCache(file, value) {
+  try {
+    const st = statSync(file);
+    JSON_FILE_CACHE.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+  } catch {
+    JSON_FILE_CACHE.set(file, { mtimeMs: 0, size: 0, value });
+  }
+}
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
-const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveCodex = (state) => writeJsonAtomic(CODEX_FILE, state);
+const loadCodex = () => loadJsonCached(CODEX_FILE, () => ({ sessions: {} }));
+const saveCodex = (state) => { writeJsonAtomic(CODEX_FILE, state); rememberJsonCache(CODEX_FILE, state); invalidateSessionLists(); };
 const GEMINI_FILE = join(STATE_DIR, 'gemini-sessions.json');
-const loadGemini = () => { try { return JSON.parse(readFileSync(GEMINI_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveGemini = (state) => writeJsonAtomic(GEMINI_FILE, state);
+const loadGemini = () => loadJsonCached(GEMINI_FILE, () => ({ sessions: {} }));
+const saveGemini = (state) => { writeJsonAtomic(GEMINI_FILE, state); rememberJsonCache(GEMINI_FILE, state); invalidateSessionLists(); };
 const AGY_FILE = join(STATE_DIR, 'agy-sessions.json');
-const loadAgy = () => { try { return JSON.parse(readFileSync(AGY_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveAgy = (state) => writeJsonAtomic(AGY_FILE, state);
+const loadAgy = () => loadJsonCached(AGY_FILE, () => ({ sessions: {} }));
+const saveAgy = (state) => { writeJsonAtomic(AGY_FILE, state); rememberJsonCache(AGY_FILE, state); invalidateSessionLists(); };
 function codexMessageText(m) {
   if (!m) return '';
   const out = [];
@@ -968,8 +990,11 @@ function enrichCodexToolResults(id, messages) {
     return changed ? { ...m, parts } : m;
   });
 }
-function enrichCodexHistory(id, messages) {
-  return enrichCodexToolResults(id, enrichCodexUserAttachments(id, messages || []));
+function enrichCodexHistory(id, messages, { attachments = false, toolResults = false } = {}) {
+  let out = messages || [];
+  if (attachments) out = enrichCodexUserAttachments(id, out);
+  if (toolResults) out = enrichCodexToolResults(id, out);
+  return out;
 }
 // codex hands errors back in several shapes (a plain string, or a JSON envelope like
 // {error:{message}} / {message}). Pull out the human-readable bit before we persist it as a note,
@@ -1008,7 +1033,7 @@ function codexAssistantParts(curParts) {
   return (curParts || [])
     .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool'))
     .map((p) => (p.t === 'tool'
-      ? { t: 'tool', id: p.id, name: p.name, input: p.input, detail: p.detail, result: p.result }
+      ? { t: 'tool', id: p.id, name: p.name, input: compactString(p.input || '', 240), detail: compactToolDetail(p.name, p.detail || null, p.input), result: p.result ? compactString(p.result, HIST_TOOL_RESULT_LIMIT) : p.result }
       : { t: 'text', text: p.text }));
 }
 // Persist the in-flight Codex assistant turn AS IT STREAMS, not only at finish(). Codex
@@ -1185,7 +1210,10 @@ function autoSubcat(id, file) {
   return 'other-auto';
 }
 
+let CODEX_LIVE_CACHE = { ts: 0, ids: new Set() };
 function liveCodexSessionIds(sessions) {
+  const now = Date.now();
+  if (now - CODEX_LIVE_CACHE.ts < 2500) return new Set(CODEX_LIVE_CACHE.ids);
   const ids = new Set();
   let procText = '';
   try { procText = execSync(`pgrep -af 'codex exec' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
@@ -1196,6 +1224,7 @@ function liveCodexSessionIds(sessions) {
       try { if (existsSync(s.dtachSock)) ids.add(s.id); } catch {}
     }
   }
+  CODEX_LIVE_CACHE = { ts: now, ids: new Set(ids) };
   return ids;
 }
 
@@ -1310,7 +1339,6 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
       hasAttention,
-      context: contextForSession(s.id, { agent: s.agent || 'claude', file: s.file, codex: s.agent === 'codex' ? s : null }),
     };
   });
   // Archived view sorts most-recently-archived first (so a chat you JUST archived is
@@ -1321,6 +1349,17 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   counts.autoSub = autoSub;
   return { sessions: out, counts };
 }
+const SESSION_LIST_CACHE = new Map();
+function invalidateSessionLists() { try { SESSION_LIST_CACHE.clear(); } catch {} }
+function cachedListSessions(filter) {
+  const key = String(filter || 'all');
+  const now = Date.now();
+  const cached = SESSION_LIST_CACHE.get(key);
+  if (cached && now - cached.ts < 5000) return cached.value;
+  const value = listSessions({ filter: key });
+  SESSION_LIST_CACHE.set(key, { ts: now, value });
+  return value;
+}
 // project dir name "-home-user-code" -> "/home/user/code"
 function decodeCwd(dir) {
   const base = basename(dir);
@@ -1330,6 +1369,52 @@ function decodeCwd(dir) {
 
 const HIST_MSG_LIMIT = 400;
 const HIST_TAIL_BYTES = 6 * 1024 * 1024; // read last 6MB for large files
+const HIST_TOOL_RESULT_LIMIT = 1200;
+const HIST_TOOL_INPUT_LIMIT = 2200;
+function compactString(s, limit) {
+  s = String(s == null ? '' : s);
+  if (s.length <= limit) return s;
+  return s.slice(0, limit) + `\n\n[truncated ${s.length - limit} chars]`;
+}
+function compactToolDetail(name, detail, fallbackInput) {
+  if (!detail || typeof detail !== 'object') return fallbackInput || '';
+  if (name === 'Bash') {
+    const out = {};
+    if (detail.command) out.command = compactString(detail.command, HIST_TOOL_INPUT_LIMIT);
+    if (detail.description) out.description = compactString(detail.description, 240);
+    if (detail.timeout_ms) out.timeout_ms = detail.timeout_ms;
+    return out;
+  }
+  if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(name)) {
+    const out = {};
+    for (const k of ['file_path', 'notebook_path', 'old_string', 'new_string', 'content']) {
+      if (detail[k] != null) out[k] = compactString(detail[k], k.endsWith('path') ? 500 : HIST_TOOL_INPUT_LIMIT);
+    }
+    return out;
+  }
+  if (['Grep', 'Glob'].includes(name)) {
+    const out = {};
+    for (const k of ['pattern', 'path', 'glob', 'type']) if (detail[k] != null) out[k] = compactString(detail[k], 500);
+    return out;
+  }
+  const raw = JSON.stringify(detail);
+  return raw.length <= HIST_TOOL_INPUT_LIMIT ? detail : { summary: compactString(raw, HIST_TOOL_INPUT_LIMIT) };
+}
+function compactHistoryMessages(messages) {
+  return (messages || []).map((m) => ({
+    ...m,
+    parts: (m.parts || []).map((p) => {
+      if (!p || p.t !== 'tool') return p;
+      const detail = compactToolDetail(p.name, p.detail || null, p.input);
+      return {
+        ...p,
+        input: compactString(p.input || summarizeToolInput(p.name, detail), 240),
+        detail,
+        result: p.result ? compactString(p.result, HIST_TOOL_RESULT_LIMIT) : p.result,
+      };
+    }),
+  }));
+}
 function parseJsonlMessages(raw) {
   const messages = [];
   const pendingTools = new Map();
@@ -1478,7 +1563,7 @@ const requireAuth = (req, res, next) => (authOk(req) ? next() : res.status(401).
 app.post('/api/login', (req, res) =>
   (req.body && req.body.token) === AUTH_TOKEN ? res.json({ ok: true }) : res.status(401).json({ error: 'bad token' }));
 
-app.get('/api/sessions', requireAuth, (req, res) => { const r = listSessions({ filter: req.query.filter || 'all' }); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD }); });
+app.get('/api/sessions', requireAuth, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD }); });
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const set = loadArchived(); const at = loadArchivedAt();
   const id = req.params.id; const on = !(req.body && req.body.archived === false);
@@ -1531,6 +1616,7 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
 app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
   const h = sessionHistory(req.params.id, { before });
+  h.messages = compactHistoryMessages(h.messages || []);
   h.archived = loadArchived().has(req.params.id);
   res.json(h);
 });
@@ -1567,7 +1653,7 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
   const codex = (loadCodex().sessions || {})[req.params.id];
   if (codex) {
     const title = codex.title || 'Codex chat';
-    const messages = enrichCodexHistory(req.params.id, codex.messages || []);
+    const messages = enrichCodexHistory(req.params.id, codex.messages || [], { attachments: true, toolResults: true });
     const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
