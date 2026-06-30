@@ -297,6 +297,12 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .sCard .nmrow { display: flex; align-items: baseline; gap: 8px; }
 .sCard .nm { flex: 1; min-width: 0; font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sCard .time { font-size: 12.5px; color: var(--muted); flex: none; }
+.sFav { display: grid; place-items: center; flex: none; align-self: center; width: 28px; height: 28px;
+  margin: -5px -6px; padding: 0; border: none; background: transparent; color: var(--muted);
+  border-radius: 8px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.sFav svg { width: 17px; height: 17px; }
+.sFav.on, .sFav:hover, .sFav:focus-visible { color: #c9921a; background: var(--subtle-2); }
+.iconbtn.active { color: #c9921a; }
 /* ⋯ more-actions button: hidden on touch (swipe + long-press cover it), shown on
    hover-capable / mouse devices so web/desktop has a clickable Rename/Archive entry. */
 .sMore { display: none; }

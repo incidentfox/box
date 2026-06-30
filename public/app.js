@@ -33,7 +33,7 @@ const agentModelLabel = (agent, rawModel) => {
   if (agent === 'codex') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
   return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
 };
-let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
+let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -245,6 +245,8 @@ const ICONS = {
   trash: SVG('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h2a2 2 0 0 1 2 2v2"/>', { w: 1.9 }),
   archive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>', { w: 1.9 }),
   unarchive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M12 17v-6M8.5 14.5L12 11l3.5 3.5"/>', { w: 1.9 }),
+  star: SVG('<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>', { w: 1.8 }),
+  'star-filled': SVG('<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>', { fill: 'currentColor' }),
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
@@ -385,7 +387,7 @@ function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); n
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
 let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
 let chatRenderSeq = 0;
-const STATUS_TABS = [['all', 'All'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
@@ -459,11 +461,9 @@ function renderSessionList() {
   if (!items.length) { list.innerHTML = '<p class="empty">No chats here.</p>'; return; }
   let group = null;
   for (const s of items) {
-    // Pinned (live) sessions are sorted to the top by the server. Group them ALL under
-    // one "Live" header instead of letting them fall into time buckets — otherwise a
-    // pinned "Today" item and a non-pinned "Today" item each emit their own header,
-    // duplicating Today/This week/Earlier down the list (the reported bug).
-    const g = s.pinned ? 'Live' : timeGroup(cardTime(s));
+    // Favorites and live sessions are sorted to the top by the server. Group them
+    // before time buckets so "Today" does not repeat between pinned and regular cards.
+    const g = s.favorite && !s.archived ? 'Favorites' : s.pinned ? 'Live' : timeGroup(cardTime(s));
     if (g !== group) { group = g; const h = document.createElement('div'); h.className = 'grouphd'; h.textContent = g; list.appendChild(h); }
     list.appendChild(sessionCard(s));
   }
@@ -484,7 +484,7 @@ function sessionCard(s) {
        <div class="srow">
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
-	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sMore" type="button" title="More actions (rename / archive)" aria-label="More actions">⋯</button></div>
+	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
            <div class="sl"></div>
          </div>
        </div>
@@ -505,6 +505,7 @@ function sessionCard(s) {
   // swipe-left action buttons (revealed behind the front)
   el.querySelector('.sAct.edit').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); renameChat(s, () => fetchSessions(curFilter)); });
   el.querySelector('.archBtn').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); doArchive(s, !s.archived); });
+  el.querySelector('.sFav').addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); swipe.close(); doFavorite(s, !s.favorite); });
   // web/desktop has no swipe and no touch long-press: a visible ⋯ button (shown on
   // hover-capable devices, see .sMore in CSS) opens the same Rename/Archive sheet on a
   // plain click. Right-click anywhere on the row opens it too, as a power-user shortcut.
@@ -559,6 +560,9 @@ function confirmArchive(s) {
 }
 function openArchiveSheet(s) {
   openSheet(s.title, [
+    s.favorite
+      ? { ic: '★', label: 'Unpin', desc: 'Remove from Favorites', fn: () => doFavorite(s, false) }
+      : { ic: '☆', label: 'Pin', desc: 'Keep at the top of the chat list', fn: () => doFavorite(s, true) },
     { ic: '✎', label: 'Rename', desc: 'Edit this chat’s name', fn: () => renameChat(s, () => fetchSessions(curFilter)) },
     s.archived
       ? { ic: '📤', label: 'Unarchive', fn: () => doArchive(s, false) }
@@ -579,6 +583,23 @@ async function doArchive(s, on) {
   if (cur && cur.id === s.id) { cur.archived = s.archived; updateArchiveButton(); }
   if (s.archived) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
   else toast(j.restored && j.restored.started ? '📤 Unarchived and reconnected' : '📤 Unarchived');
+  fetchSessions(curFilter);
+  return j;
+}
+async function doFavorite(s, on) {
+  if (!s || !s.id) return null;
+  let j = null;
+  try {
+    const r = await api(`/api/sessions/${s.id}/favorite`, { method: 'POST', body: JSON.stringify({ favorite: on }) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'favorite failed');
+  } catch {
+    toast(on ? 'Pin failed' : 'Unpin failed', 2600);
+    return null;
+  }
+  s.favorite = !!j.favorite;
+  if (cur && cur.id === s.id) { cur.favorite = s.favorite; updateFavoriteButton(); }
+  toast(s.favorite ? 'Pinned to Favorites' : 'Removed from Favorites');
   fetchSessions(curFilter);
   return j;
 }
@@ -1686,11 +1707,12 @@ function setNewChatIntro(on) {
 async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   $('chatTitle').textContent = cur.title;
+  updateFavoriteButton();
   updateArchiveButton();
   renderContextMeter();
   $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
@@ -1706,6 +1728,7 @@ async function openChat(s) {
     if (renderSeq !== chatRenderSeq) return;
     cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
     if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
+    if (typeof h.favorite === 'boolean') { cur.favorite = h.favorite; updateFavoriteButton(); }
     cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
     cur.context = h.context || cur.context; renderContextMeter();
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
@@ -2155,6 +2178,7 @@ function onSync(o) {
   if (o.cwd) cur.cwd = o.cwd;
   if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; $('chatTitle').textContent = o.title; }
   if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
+  if (typeof o.favorite === 'boolean') { cur.favorite = o.favorite; updateFavoriteButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
   if (o.context) { cur.context = o.context; renderContextMeter(); }
   // Remove stale live bubble from DOM before recreating it below (prevents duplicate
@@ -2978,6 +3002,15 @@ $('myMsgsBtn').onclick = async () => {
    voice button) handles the reply. Back returns to the chat. Items are shown as clean cards. */
 // Paint bell icon (attnBtn has a badge child, so we use insertAdjacentHTML not data-icon/paintIcons)
 $('attnBtn').insertAdjacentHTML('afterbegin', ICONS.bell);
+function updateFavoriteButton() {
+  const b = $('favoriteBtn'); if (!b) return;
+  const isFavorite = !!(cur && cur.favorite);
+  b.dataset.icon = isFavorite ? 'star-filled' : 'star';
+  b.title = isFavorite ? 'Unpin this conversation' : 'Pin this conversation';
+  b.setAttribute('aria-label', b.title);
+  b.classList.toggle('active', isFavorite);
+  b._painted = 0; b.innerHTML = ''; paintIcons(b.parentElement || document);
+}
 function updateArchiveButton() {
   const b = $('archiveBtn'); if (!b) return;
   const isArchived = !!(cur && cur.archived);
@@ -3010,6 +3043,10 @@ $('archiveBtn').onclick = async () => {
   const s = { id: cur.id, title: cur.title, archived: !!cur.archived };
   if (s.archived) { await doArchive(s, false); return; }
   openArchiveConfirm(s, { leaveChat: true });
+};
+$('favoriteBtn').onclick = async () => {
+  if (!cur.id) return toast('Nothing to pin yet');
+  await doFavorite({ id: cur.id, title: cur.title, favorite: !!cur.favorite }, !cur.favorite);
 };
 $('attnBtn').onclick = () => {
   attnLinear = !!(((CFG && CFG.features) || {}).linear);
