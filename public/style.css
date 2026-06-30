@@ -270,11 +270,19 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 /* clip container: the front slides left to reveal the action buttons behind it */
 .sCard { position: relative; border-radius: 18px; margin-bottom: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(40,30,20,.05), 0 6px 18px rgba(40,30,20,.04); }
 .sCardFront { position: relative; z-index: 1; background: var(--card); padding: 14px 15px; border-radius: 18px;
-  transform: translateX(0); transition: transform .22s cubic-bezier(.4,0,.2,1); will-change: transform;
+  transform: translateX(0); transition: transform .22s cubic-bezier(.4,0,.2,1);
   -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-.sCardFront.dragging { transition: none; }
-/* action buttons revealed on swipe-left (sit behind the front, right-aligned) */
-.sActions { position: absolute; top: 0; right: 0; bottom: 0; z-index: 0; display: flex; align-items: stretch; }
+/* Promote to its own layer only while actually dragging — leaving will-change on
+   permanently makes every card a GPU layer, which lets the buttons behind flash
+   through the rounded corners during scroll. */
+.sCardFront.dragging { transition: none; will-change: transform; }
+/* action buttons revealed on swipe-left (sit behind the front, right-aligned).
+   Hidden until a horizontal swipe is in progress so they never peek/flash at rest
+   or during a vertical scroll; on desktop (no swipe) they're removed entirely —
+   the ⋯ button + right-click cover rename/archive there. */
+.sActions { position: absolute; top: 0; right: 0; bottom: 0; z-index: 0; display: flex; align-items: stretch; visibility: hidden; }
+.sCard.swiping .sActions { visibility: visible; }
+@media (hover: hover) and (pointer: fine) { .sActions { display: none; } }
 .sAct { border: none; width: 66px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
   font-size: 12px; font-weight: 600; color: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .sAct .sActIc { font-size: 18px; line-height: 1; }
