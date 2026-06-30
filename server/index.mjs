@@ -19,6 +19,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import multer from 'multer';
 import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases } from './rc-engine.mjs';
 import * as accounts from './accounts.mjs';
+import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
@@ -2006,6 +2007,16 @@ app.post('/api/accounts/remove', ...acctRoute((req) => accounts.removeAccount((r
 app.post('/api/accounts/primary', ...acctRoute((req) => accounts.setPrimary((req.body || {}).id)));
 app.post('/api/accounts/cooldown', ...acctRoute((req) => accounts.cooldown((req.body || {}).id, (req.body || {}).minutes)));
 app.post('/api/accounts/clear', ...acctRoute((req) => accounts.clearCooldown((req.body || {}).id)));
+
+// --- Codex (OpenAI) + Gemini (Google) login: subscription OR API key, from the phone ---
+app.get('/api/providers', ...acctRoute(async () => ({ providers: providerLogin.providerStatus(), meta: providerLogin.providerMeta })));
+app.post('/api/providers/codex/device/start', ...acctRoute(() => providerLogin.codexDeviceStart()));
+app.post('/api/providers/codex/apikey', ...acctRoute((req) => providerLogin.codexApiKey((req.body || {}).apiKey)));
+app.post('/api/providers/gemini/google/start', ...acctRoute(() => providerLogin.geminiGoogleStart()));
+app.post('/api/providers/gemini/google/complete', ...acctRoute((req) => providerLogin.geminiGoogleComplete((req.body || {}).flowId, (req.body || {}).code)));
+app.post('/api/providers/gemini/apikey', ...acctRoute((req) => providerLogin.geminiApiKey((req.body || {}).apiKey)));
+app.get('/api/providers/poll', ...acctRoute((req) => providerLogin.loginPoll(req.query.flowId)));
+app.post('/api/providers/logout', ...acctRoute((req) => providerLogin.providerLogout((req.body || {}).provider)));
 
 // Move a LIVE session to another account: stop its bridge on the old account, relocate
 // its transcript into the new account's config dir, pin affinity. It resumes on the new
