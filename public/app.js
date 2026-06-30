@@ -3714,6 +3714,108 @@ async function renderAccountsList() {
     if (a.id !== 'mine' && !a.primary) btn('Remove', () => { if (confirm(`Remove account "${a.label || a.id}"? (its credentials dir is left on disk)`)) acctAction('/api/accounts/remove', { id: a.id }, 'Removed'); }, 'danger');
     body.appendChild(card);
   }
+  await renderProviders(body);
+}
+
+// Codex (OpenAI) + Gemini (Google): sign in with a SUBSCRIPTION or an API key — the same
+// idea as the Claude accounts above, but each CLI is single-account (one credential file),
+// so it's just "who am I signed in as / sign in / sign out", not a pool.
+async function renderProviders(body) {
+  let data;
+  try { data = await (await api('/api/providers')).json(); } catch { return; }
+  const meta = data.meta || {}, provs = data.providers || {};
+  const sec = document.createElement('div'); sec.className = 'acctProviders';
+  sec.innerHTML = '<div class="acctSectionHdr">Other agents</div>';
+  body.appendChild(sec);
+  for (const key of ['codex', 'gemini']) {
+    const st = provs[key] || { mode: 'none' }, m = meta[key] || { label: key };
+    const stateLabel = st.mode === 'subscription' ? `signed in${st.label ? ' · ' + st.label : ''}` : st.mode === 'apikey' ? 'API key set' : 'not signed in';
+    const card = document.createElement('div'); card.className = 'acctCard';
+    card.innerHTML = `<div class="acctTop"><div class="acctName">${esc(m.label)}</div><span class="acctBadge ${st.mode === 'none' ? 'warn' : 'ok'}">${esc(stateLabel)}</span></div><div class="acctActions"></div>`;
+    const acts = card.querySelector('.acctActions');
+    const btn = (label, fn, cls = '') => { const b = document.createElement('button'); b.className = 'chip small ' + cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
+    btn(st.mode === 'none' ? 'Sign in' : 'Change', () => renderProviderLogin(key, m, st));
+    if (st.mode !== 'none') btn('Sign out', async () => {
+      if (!confirm(`Sign ${m.label} out?`)) return;
+      try { const j = await (await api('/api/providers/logout', { method: 'POST', body: JSON.stringify({ provider: key }) })).json(); if (j.error) return toast(j.error); toast('Signed out'); renderAccountsList(); }
+      catch { toast('Failed'); }
+    }, 'danger');
+    sec.appendChild(card);
+  }
+}
+
+function renderProviderLogin(provider, meta, status) {
+  const body = $('accountsBody');
+  const keysUrl = meta.keysUrl || '';
+  const subLabel = provider === 'codex' ? 'Sign in with ChatGPT' : 'Sign in with Google';
+  body.innerHTML = `<div class="acctForm">
+    <div class="acctSectionHdr">${esc(meta.label)} login</div>
+    <div class="acctTabs"><button class="acctTab sel" data-tab="sub">Subscription</button><button class="acctTab" data-tab="apikey">API key</button></div>
+    <div id="pvPaneSub" class="acctPane">
+      <div class="acctNote">Use your ${esc(meta.sub || 'subscription')} — flat-rate, usually cheaper than a metered API key.</div>
+      <button id="pvSubStart" class="btn primary">${esc(subLabel)}</button>
+      <div id="pvSubStep2" class="hidden">
+        <a id="pvSubLink" class="acctLink" target="_blank" rel="noopener">Open sign-in ↗</a>
+        <div id="pvCodeBox"></div>
+      </div>
+    </div>
+    <div id="pvPaneApikey" class="acctPane hidden">
+      <label class="acctLbl">API key<input id="pvKey" class="acctInput" type="password" placeholder="${provider === 'codex' ? 'sk-…' : 'AIza… (Google AI Studio key)'}" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <button id="pvKeyPaste" class="chip small acctPaste">📋 Paste from clipboard</button>
+      ${keysUrl ? `<a class="acctLink" target="_blank" rel="noopener" href="${esc(keysUrl)}">Get an API key ↗</a>` : ''}
+      <div class="acctNote">API-key auth bills per token (metered).</div>
+      <button id="pvKeySave" class="btn primary">Save API key</button>
+    </div>
+    <button id="pvBack" class="chip small acctBack">← Back</button></div>`;
+  body.querySelectorAll('.acctTab').forEach((t) => t.onclick = () => {
+    body.querySelectorAll('.acctTab').forEach((x) => x.classList.toggle('sel', x === t));
+    $('pvPaneSub').classList.toggle('hidden', t.dataset.tab !== 'sub');
+    $('pvPaneApikey').classList.toggle('hidden', t.dataset.tab !== 'apikey');
+  });
+  $('pvBack').onclick = renderAccountsList;
+  $('pvKeyPaste').onclick = async () => { try { const t = await navigator.clipboard.readText(); $('pvKey').value = (t || '').trim(); toast('Pasted ✓'); } catch { $('pvKey').focus(); toast('Long-press the field → Paste'); } };
+  $('pvKeySave').onclick = async () => {
+    const apiKey = $('pvKey').value.trim(); if (!apiKey) return toast('Paste an API key');
+    const b = $('pvKeySave'); b.disabled = true; b.textContent = 'Saving…';
+    try { const j = await (await api(`/api/providers/${provider}/apikey`, { method: 'POST', body: JSON.stringify({ apiKey }) })).json(); if (j.error) return toast(j.error); toast(j.validated ? 'API key saved & validated' : 'API key saved'); renderAccountsList(); }
+    catch { toast('Save failed'); } finally { b.disabled = false; b.textContent = 'Save API key'; }
+  };
+  let flowId = null, pollTimer = null;
+  $('pvSubStart').onclick = async () => {
+    const b = $('pvSubStart'); b.disabled = true; b.textContent = 'Starting…';
+    try {
+      const ep = provider === 'codex' ? '/api/providers/codex/device/start' : '/api/providers/gemini/google/start';
+      const j = await (await api(ep, { method: 'POST' })).json();
+      if (j.error) { toast(j.error); return; }
+      flowId = j.flowId; $('pvSubLink').href = j.url; $('pvSubStep2').classList.remove('hidden');
+      const cb = $('pvCodeBox');
+      if (provider === 'codex') {
+        cb.innerHTML = `<div class="acctNote">1. Open the link.  2. Enter this code:</div><div class="pvCode">${esc(j.code || '')}</div><div class="acctNote">Then come back — this completes automatically.</div>`;
+        pollTimer = setInterval(async () => {
+          try {
+            const p = await (await api('/api/providers/poll?flowId=' + encodeURIComponent(flowId))).json();
+            if (p.status === 'success') { clearInterval(pollTimer); toast('Signed in' + (p.account ? ' · ' + p.account : '')); renderAccountsList(); }
+            else if (p.status === 'error') { clearInterval(pollTimer); toast(p.error || 'Sign-in failed'); }
+            else if (p.status === 'expired') { clearInterval(pollTimer); }
+          } catch {}
+        }, 2500);
+      } else {
+        cb.innerHTML = `<div class="acctNote">1. Open the link & sign in.  2. Copy the code Google gives you and paste it:</div>
+          <button id="pvGPaste" class="btn primary">📋 Paste code from clipboard</button>
+          <textarea id="pvGCode" class="acctInput acctCodeView" rows="2" readonly placeholder="pasted code shows here"></textarea>
+          <button id="pvGComplete" class="btn primary">Complete sign-in</button>`;
+        $('pvGPaste').onclick = async () => { try { const t = await navigator.clipboard.readText(); const el = $('pvGCode'); el.removeAttribute('readonly'); el.value = (t || '').trim(); el.setAttribute('readonly', ''); toast('Pasted ✓'); } catch { const el = $('pvGCode'); el.removeAttribute('readonly'); el.focus(); toast('Long-press → Paste'); } };
+        $('pvGComplete').onclick = async () => {
+          const code = $('pvGCode').value.trim(); if (!code) return toast('Paste the code first');
+          const gb = $('pvGComplete'); gb.disabled = true; gb.textContent = 'Finishing…';
+          try { const j2 = await (await api('/api/providers/gemini/google/complete', { method: 'POST', body: JSON.stringify({ flowId, code }) })).json(); if (j2.error) { toast(j2.error); return; } toast('Signed in'); renderAccountsList(); }
+          catch { toast('Sign-in failed'); } finally { gb.disabled = false; gb.textContent = 'Complete sign-in'; }
+        };
+      }
+      toast('Open the link to continue');
+    } catch { toast('Failed to start'); }
+    finally { b.disabled = false; b.textContent = subLabel; }
+  };
 }
 
 async function acctAction(path, payload, okMsg) {

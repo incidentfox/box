@@ -794,6 +794,9 @@ html[data-theme="dark"] .lbState { background: var(--subtle-2); color: var(--mut
 #accountsOverlay { z-index: 27; }
 .accountsBody { padding: 12px 14px 40px; overflow-y: auto; }
 .acctIntro { font-size: 12.5px; color: var(--muted); line-height: 1.45; margin: 2px 2px 12px; }
+.acctProviders { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.acctSectionHdr { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 2px 10px; }
+.pvCode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 22px; font-weight: 700; letter-spacing: .08em; text-align: center; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 11px; padding: 12px; margin: 8px 0; user-select: all; }
 .acctCard { background: var(--card); border: 1px solid var(--line); border-radius: 13px; padding: 12px 13px; margin-bottom: 10px; }
 .acctCard.primary { border-color: var(--accent); }
 .acctTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
