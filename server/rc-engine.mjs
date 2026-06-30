@@ -97,6 +97,28 @@ function childEnv() {
   return e;
 }
 
+// Claude Code shows a one-time "Do you trust this folder?" dialog the first time it
+// runs in a directory. It's a pre-TUI screen our boot detector can't distinguish from a
+// ready input box, so the first pasted prompt gets swallowed and the chat looks dead.
+// Pre-seed trust for the cwd in ~/.claude.json (the same store the dialog writes) so the
+// dialog never shows. Only writes when not already trusted (so steady state never touches
+// the file); atomic rename + best-effort.
+function trustCwd(cwd) {
+  try {
+    if (!cwd) return;
+    const p = path.join(homedir(), '.claude.json');
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    j.projects = j.projects || {};
+    const cur = j.projects[cwd] || {};
+    if (cur.hasTrustDialogAccepted === true) return; // already trusted — no write, no race
+    cur.hasTrustDialogAccepted = true;
+    j.projects[cwd] = cur;
+    const tmp = p + '.box.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(j, null, 2));
+    fs.renameSync(tmp, p); // atomic swap; readers never see a torn file
+  } catch { /* never block a spawn on trust bookkeeping */ }
+}
+
 // Wrap text in a bracketed-paste so embedded newlines / special chars land in
 // the input box without submitting; a separate CR submits.
 const bracketedPaste = (t) => '\x1b[200~' + t + '\x1b[201~';
@@ -306,11 +328,12 @@ export class RCEngine extends EventEmitter {
     const cwd = opts.cwd || CWD;
     // Wrap the RC process in dtach so it survives server restarts and SSH disconnects.
     // dtach -A creates the socket+process if absent, or reattaches if it exists (idempotent).
-    const claudeArgs = ['--remote-control', name, '--dangerously-skip-permissions'];
+    const claudeArgs = ['--remote-control', name, '--permission-mode', 'auto'];
     if (opts.settings && opts.settings.model) claudeArgs.push('--model', opts.settings.model);
     if (opts.settings && opts.settings.effort) claudeArgs.push('--effort', opts.settings.effort);
     if (sessionId) claudeArgs.push('--resume', sessionId);
     else claudeArgs.push('--session-id', newId);   // deterministic id for a fresh chat
+    trustCwd(cwd); // pre-accept the folder-trust dialog so the first prompt isn't eaten
     const term = pty.spawn('dtach', ['-A', sock, '-r', 'winch', '-z', 'claude', ...claudeArgs], {
       name: 'xterm-256color', cols: 100, rows: 40, cwd, env: childEnv(),
     });

@@ -52,14 +52,18 @@ export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings =
   const cfgArgs = [];
   if (settings.model) cfgArgs.push('--model', settings.model);
   if (settings.reasoningEffort) cfgArgs.push('-c', `model_reasoning_effort="${settings.reasoningEffort}"`);
-  // Full-access, no-prompt mode (the `codex exec` equivalent of `--yolo`). The box is itself the
-  // trust boundary, so we skip Codex's own sandbox — its bubblewrap sandbox can't set up loopback
-  // networking here (bwrap: loopback Failed RTM_NEWADDR) and blocks EVERY command otherwise.
-  // Applied to BOTH new and resume turns (resume previously inherited no bypass → stayed sandboxed).
-  const BYPASS = ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
+  // Sandboxed auto mode — the `codex exec` analog of Claude's `--permission-mode auto`: Codex
+  // runs commands automatically but confined to the workspace (read repo + write workspace), with
+  // no full-system access and no prompts (exec is non-interactive anyway). Changed from
+  // `--dangerously-bypass-approvals-and-sandbox` per the owner's "no dangerous modes" preference.
+  // The old full-bypass was a Linux workaround (bwrap couldn't set up loopback → blocked every
+  // command); macOS uses the Seatbelt sandbox, which runs workspace-write fine (verified). If you
+  // ever run this box on Linux and hit the bwrap loopback issue, fall back to danger-full-access.
+  // Applied to BOTH new and resume turns.
+  const SANDBOX = ['--sandbox', 'workspace-write'];
   return sessionId
-    ? ['exec', 'resume', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', sessionId, prompt || '', ...imageArgs]
-    : ['exec', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', '-C', cwd || process.cwd(), prompt || '', ...imageArgs];
+    ? ['exec', 'resume', '--json', ...cfgArgs, ...SANDBOX, '--skip-git-repo-check', sessionId, prompt || '', ...imageArgs]
+    : ['exec', '--json', ...cfgArgs, ...SANDBOX, '--skip-git-repo-check', '-C', cwd || process.cwd(), prompt || '', ...imageArgs];
 }
 
 export class CodexExecEngine {

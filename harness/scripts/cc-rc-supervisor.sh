@@ -87,7 +87,7 @@ launch_session(){
     unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_OAUTH_TOKEN ANTHROPIC_API_KEY
     exec setsid dtach -n "$sock" -r winch -z \
       "$CLAUDE" --resume "$id" --remote-control "$name" \
-      --debug-file "$dbg" --dangerously-skip-permissions
+      --debug-file "$dbg" --permission-mode auto
   ) >/dev/null 2>&1
 }
 

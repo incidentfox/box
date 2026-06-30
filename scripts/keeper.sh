@@ -30,8 +30,18 @@ TUN_LOG="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/url.txt"
 
 # Single-instance guard (cron tick + manual launch dedupe).
-exec 9>"$STATE_DIR/keeper.lock"
-flock -n 9 || { echo "keeper already running; exiting"; exit 0; }
+# flock is Linux-only (util-linux); fall back to a PID-file lock on macOS/BSD.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$STATE_DIR/keeper.lock"
+  flock -n 9 || { echo "keeper already running; exiting"; exit 0; }
+else
+  PIDFILE="$STATE_DIR/keeper.pid"
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    echo "keeper already running; exiting"; exit 0
+  fi
+  echo $$ > "$PIDFILE"
+  trap 'rm -f "$PIDFILE"' EXIT
+fi
 
 # Claude Code must use your full login credentials, not an inference-only token that
 # might be injected into the environment — otherwise remote-control is disallowed.
