@@ -12,7 +12,7 @@ managed one-repo sandbox.
 
 <br>
 
-<img src="docs/demo.gif" alt="Box on a phone — browse sessions, open a chat, type" width="280">
+<img src="docs/demo.gif" alt="Box on a phone — open the task board, delegate a Linear ticket to an agent, watch it work, and file a follow-up ticket" width="280">
 
 <br>
 
