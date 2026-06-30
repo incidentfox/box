@@ -256,12 +256,15 @@ const ICONS = {
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
+  'sidebar-collapse': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M16 9l-3 3 3 3"/>', { w: 1.9 }),
+  'sidebar-expand': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9l3 3-3 3"/>', { w: 1.9 }),
   search: SVG('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', { w: 2 }),
   settings: SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1A1.7 1.7 0 0 0 10 3V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1A1.7 1.7 0 0 0 21 10h0a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', { w: 1.8 }),
 };
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { if (!el._painted) { el.innerHTML = ICONS[el.dataset.icon] || ''; el._painted = 1; } }); }
 
 const THEME_KEY = 'box_theme';
+const SIDEBAR_COLLAPSED_KEY = 'box_sidebar_collapsed';
 const themeMq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
 function resolveTheme(theme) { return theme === 'dark' || (theme !== 'light' && themeMq && themeMq.matches) ? 'dark' : 'light'; }
 function applyTheme(theme = LS.getItem(THEME_KEY) || 'auto') {
@@ -281,6 +284,43 @@ if (themeMq) {
   else if (themeMq.addListener) themeMq.addListener(syncTheme);
 }
 applyTheme();
+
+function updateSidebarButtons() {
+  const collapsed = document.body.classList.contains('sidebarCollapsed');
+  const collapseBtn = $('sidebarCollapseBtn');
+  if (collapseBtn) {
+    collapseBtn.dataset.icon = collapsed ? 'sidebar-expand' : 'sidebar-collapse';
+    collapseBtn.title = collapsed ? 'expand sidebar' : 'collapse sidebar';
+    collapseBtn.setAttribute('aria-label', collapseBtn.title);
+    collapseBtn._painted = 0; collapseBtn.innerHTML = '';
+  }
+  const restoreBtn = $('sidebarRestoreBtn');
+  if (restoreBtn) {
+    restoreBtn.title = 'expand sidebar';
+    restoreBtn.setAttribute('aria-label', restoreBtn.title);
+    restoreBtn._painted = 0; restoreBtn.innerHTML = '';
+  }
+  paintIcons(document);
+}
+function applySidebarCollapsed() {
+  const collapsed = isDesktopShell() && LS.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  document.body.classList.toggle('sidebarCollapsed', collapsed);
+  updateSidebarButtons();
+}
+function setSidebarCollapsed(collapsed) {
+  if (collapsed) LS.setItem(SIDEBAR_COLLAPSED_KEY, '1');
+  else LS.removeItem(SIDEBAR_COLLAPSED_KEY);
+  applySidebarCollapsed();
+}
+function toggleSidebarCollapsed() {
+  if (!isDesktopShell()) return;
+  setSidebarCollapsed(!document.body.classList.contains('sidebarCollapsed'));
+}
+if (desktopMq) {
+  const syncSidebarCollapse = () => applySidebarCollapsed();
+  if (desktopMq.addEventListener) desktopMq.addEventListener('change', syncSidebarCollapse);
+  else if (desktopMq.addListener) desktopMq.addListener(syncSidebarCollapse);
+}
 
 /* ---------- markdown (compact, for chat bubbles) ---------- */
 const ABS_PATH_RE = /(^|[\s([])((?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))[^\s<>"'`)]{2,})/g;
@@ -936,6 +976,8 @@ $('newBtn').onclick = () => {
 };
 if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
 $('themeBtn').onclick = toggleTheme;
+if ($('sidebarCollapseBtn')) $('sidebarCollapseBtn').onclick = toggleSidebarCollapsed;
+if ($('sidebarRestoreBtn')) $('sidebarRestoreBtn').onclick = () => setSidebarCollapsed(false);
 if ($('contextMeter')) $('contextMeter').onclick = openStatusSheet;
 
 /* ---------- session search — full-text across ALL chats (title/summary/cwd/transcript)
@@ -3710,6 +3752,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'n') { e.preventDefault(); $('newBtn').click(); }
   else if (e.key.toLowerCase() === 'b' && CFG.features && CFG.features.linear) { e.preventDefault(); openBoard(); }
   else if (e.key.toLowerCase() === 'p') { e.preventDefault(); openPipelines(); }
+  else if (e.key.toLowerCase() === 'm' && isDesktopShell() && document.body.dataset.view !== 'sessions') { e.preventDefault(); toggleSidebarCollapsed(); }
   else if (e.key.toLowerCase() === 's') { e.preventDefault(); openSessions(curFilter || 'all'); }
 });
 
@@ -4264,6 +4307,7 @@ fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
   stampVersion('build ' + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + '·' + p(d.getUTCHours()) + p(d.getUTCMinutes()) + 'Z');
 }).catch(() => {});
 paintIcons();
+applySidebarCollapsed();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 if (TOKEN) { navTo({ view: 'sessions', filter: 'all' }, { replace: true }); loadConfig(); openSessions().catch(() => show('login')); }
 else { navTo({ view: 'login' }, { replace: true }); show('login'); }

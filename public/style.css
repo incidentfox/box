@@ -232,6 +232,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .ver { font-size: 11px; color: var(--muted); margin-left: 7px; align-self: flex-end; padding-bottom: 4px; }
 .compose { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; box-shadow: 0 3px 10px rgba(200,110,80,.4); flex: none; }
 .compose svg { width: 22px; height: 22px; }
+.sidebarToggle.sidebarToggle, .sidebarRestore.sidebarRestore { display: none; }
 
 /* status filter tabs */
 .tabs { display: flex; gap: 8px; padding: 12px 14px 6px; overflow-x: auto; flex: none; scrollbar-width: none; }
@@ -866,6 +867,11 @@ textarea.acctInput { resize: vertical; }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions {
     order: 0; flex: 0 0 var(--desktop-sidebar); width: var(--desktop-sidebar);
     border-right: 1px solid var(--line); background: var(--subtle);
+    overflow: hidden; transition: flex-basis .18s ease, width .18s ease, opacity .14s ease;
+  }
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) #sessions {
+    flex-basis: 0; width: 0; min-width: 0;
+    opacity: 0; border-right: 0; pointer-events: none;
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .bar,
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .boardSearch,
@@ -874,6 +880,9 @@ textarea.acctInput { resize: vertical; }
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .sbar {
     padding-inline: 16px 12px;
+  }
+  body:not([data-view="login"]):not([data-view="sessions"]) #sessions .sidebarToggle {
+    display: grid; flex: none; margin-left: 3px;
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .sbar .apptitle {
     font-size: 18px;
@@ -936,6 +945,20 @@ textarea.acctInput { resize: vertical; }
   #chat, #board, #pipelines, #issue, #issueNew {
     order: 1; flex: 1 1 auto; width: auto; min-width: 0;
     border-right: 0; background: var(--bg);
+  }
+  .sidebarRestore {
+    position: fixed; top: 9px; left: 13px; z-index: 90;
+    background: var(--bg); border: 1px solid var(--line); box-shadow: 0 4px 18px rgba(0,0,0,.08);
+  }
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) .sidebarRestore {
+    display: grid;
+  }
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) #chat > .bar,
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) #board > .bar,
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) #pipelines > .bar,
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) #issue > .bar,
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) #issueNew > .bar {
+    padding-left: 62px;
   }
   .bar {
     min-height: 54px; padding: 8px 18px; padding-top: 8px;
@@ -1079,6 +1102,9 @@ textarea.acctInput { resize: vertical; }
     left: 50%; right: auto; width: min(var(--content-max), calc(100vw - var(--desktop-sidebar) - 48px));
     transform: translateX(-50%); max-height: min(420px, calc(var(--app-h) - 220px));
   }
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) .suggest {
+    width: min(var(--content-max), calc(100vw - 48px));
+  }
 
   .boardWrap {
     padding: 16px; gap: 16px; overflow-x: auto; scroll-snap-type: none;
@@ -1125,6 +1151,9 @@ textarea.acctInput { resize: vertical; }
   .explorer {
     left: var(--desktop-sidebar); right: 0; width: auto; transform: none;
     border-left: 1px solid var(--line); box-shadow: -16px 0 50px rgba(0,0,0,.08);
+  }
+  body.sidebarCollapsed:not([data-view="login"]):not([data-view="sessions"]) .explorer {
+    left: 0;
   }
   body[data-view="sessions"] .explorer,
   body[data-view="login"] .explorer {
