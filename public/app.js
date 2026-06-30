@@ -352,6 +352,7 @@ function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); n
 /* ---------- sessions ---------- */
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
 let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
+let chatRenderSeq = 0;
 const STATUS_TABS = [['all', 'All'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
@@ -1445,6 +1446,7 @@ function setNewChatIntro(on) {
   if (chat) chat.classList.toggle('newChatIntro', !!on);
 }
 async function openChat(s) {
+  const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
@@ -1463,18 +1465,21 @@ async function openChat(s) {
   cur.histCursor = 0; cur.hasMoreHistory = false; cur.loadingEarlier = false;
   if (s.id) {
     const h = await (await api(`/api/sessions/${s.id}/history`)).json();
+    if (renderSeq !== chatRenderSeq) return;
     cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
     if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
     cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
     cur.context = h.context || cur.context; renderContextMeter();
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
-    for (const m of h.messages) addHistMessage(m);
+    await renderHistoryBatch(h.messages, renderSeq);
+    if (renderSeq !== chatRenderSeq) return;
     scrollBottom();
   } else if (s.carry && s.carry.length) {
     // Agent switch: render the prior transcript inline so it reads as ONE continuous
     // conversation, capped to the last 40 messages for snappiness (the agent still gets
     // the fuller context via the seed prompt).
-    for (const m of s.carry.slice(-40)) addHistMessage(m);
+    await renderHistoryBatch(s.carry.slice(-40), renderSeq);
+    if (renderSeq !== chatRenderSeq) return;
     addSwitchDivider(s.carryFrom || 'previous agent', cur.agent === 'codex' ? 'Codex' : 'Claude');
     scrollBottom();
   } else {
@@ -1583,6 +1588,24 @@ function buildHistElement(m) {
   return wrap;
 }
 function addHistMessage(m) { const el = buildHistElement(m); $('messages').appendChild(el); return el.querySelector('.body'); }
+function nextPaint() {
+  return new Promise((resolve) => {
+    if (window.requestAnimationFrame) requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+async function renderHistoryBatch(messages, seq) {
+  const list = messages || [];
+  const batchSize = list.length > 140 ? 12 : 24;
+  for (let i = 0; i < list.length; i += batchSize) {
+    if (seq !== chatRenderSeq) return false;
+    const frag = document.createDocumentFragment();
+    for (const m of list.slice(i, i + batchSize)) frag.appendChild(buildHistElement(m));
+    $('messages').appendChild(frag);
+    if (i + batchSize < list.length) await nextPaint();
+  }
+  return true;
+}
 
 /* load older history when user scrolls to top */
 async function loadEarlierMessages() {

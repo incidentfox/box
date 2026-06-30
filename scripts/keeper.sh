@@ -47,7 +47,15 @@ fi
 # might be injected into the environment — otherwise remote-control is disallowed.
 unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_OAUTH_TOKEN ANTHROPIC_API_KEY
 
-server_up() { pgrep -f "node server/index.mjs" >/dev/null 2>&1; }
+server_pids() {
+  local p cwd
+  pgrep -f "node server/index.mjs" 2>/dev/null | while read -r p; do
+    [ -n "$p" ] || continue
+    cwd="$(readlink "/proc/$p/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$APP_DIR" ] && echo "$p"
+  done
+}
+server_up() { [ -n "$(server_pids | head -n 1)" ]; }
 start_server() { nohup node server/index.mjs >>"$SRV_LOG" 2>&1 9>&- & }
 
 tunnel_up()  { pgrep -f "cloudflared tunnel" >/dev/null 2>&1; }
