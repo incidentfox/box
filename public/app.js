@@ -36,7 +36,13 @@ applyVV();
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
 /* ---------- helpers ---------- */
-function show(id) { ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
+const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'];
+const desktopMq = window.matchMedia ? window.matchMedia('(min-width: 900px)') : null;
+const isDesktopShell = () => !!(desktopMq && desktopMq.matches);
+function show(id) {
+  document.body.dataset.view = id;
+  TOP_SCREENS.forEach((s) => $(s).classList.toggle('hidden', s !== id));
+}
 
 /* ---------- history-synced navigation (browser Back / Forward) ---------- */
 // The app is one page that toggles top-level <section> "screens" (plus the chat's
@@ -101,6 +107,7 @@ function toast(m, ms = 2200, action) {
   t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms);
 }
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const isPlaceholderChatTitle = (s) => /^New (Claude |Codex )?chat$/i.test(String(s || '').trim());
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
   if (r.status === 401) { throw new Error('unauthorized'); }   // never auto-logout — token is long & annoying to re-enter
@@ -117,7 +124,7 @@ function applyConfig() {
   const f = (CFG && CFG.features) || {};
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   setVis('boardBtn', !!f.linear);       // header Linear-board button
-  setVis('attnTabLinear', !!f.linear);  // "Linear" sub-tab in the needs-attention panel
+  setVis('attnTabLinear', !!f.linear);  // Linear tab in the needs-attention panel
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
 function atBottom() { const m = $('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
@@ -210,6 +217,7 @@ const ICONS = {
   copy: SVG('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', { w: 2 }),
   trash: SVG('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h2a2 2 0 0 1 2 2v2"/>', { w: 1.9 }),
   archive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>', { w: 1.9 }),
+  unarchive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M12 17v-6M8.5 14.5L12 11l3.5 3.5"/>', { w: 1.9 }),
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
@@ -407,6 +415,7 @@ function renderSessionList() {
 }
 function sessionCard(s) {
   const el = document.createElement('div'); el.className = 'sCard';
+  if (cur && cur.id && s.id === cur.id) el.classList.add('current');
   const agent = s.agent || 'claude';
   const sub = s.parentId ? `Fork of ${s.parentTitle || s.parentId.slice(0, 8)}` : (s.note ? s.note : shortCwd(s.cwd));
   const label = STATUS_LABEL[s.status];
@@ -490,8 +499,8 @@ function attachSwipeActions(card, front, s) {
   return { close, isOpen: () => open };
 }
 function confirmArchive(s) {
-  // No confirm dialog (it got annoying) — archive immediately; the Undo toast is the safety net.
-  doArchive(s, !s.archived);
+  if (s.archived) return doArchive(s, false);
+  openArchiveConfirm(s);
 }
 function openArchiveSheet(s) {
   openSheet(s.title, [
@@ -502,11 +511,21 @@ function openArchiveSheet(s) {
   ]);
 }
 async function doArchive(s, on) {
-  try { await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) }); } catch {}
-  s.archived = on;
-  if (on) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
-  else toast('📤 Unarchived');
+  let j = null;
+  try {
+    const r = await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'archive failed');
+  } catch {
+    toast(on ? 'Archive failed' : 'Unarchive failed', 2600);
+    return null;
+  }
+  s.archived = !!j.archived;
+  if (cur && cur.id === s.id) { cur.archived = s.archived; updateArchiveButton(); }
+  if (s.archived) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
+  else toast(j.restored && j.restored.started ? '📤 Unarchived and reconnected' : '📤 Unarchived');
   fetchSessions(curFilter);
+  return j;
 }
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
@@ -581,7 +600,9 @@ async function runSessSearch() {
   const seq = ++sessSearchSeq;
   const box = $('sessResults'); box.innerHTML = '<p class="empty">Searching…</p>';
   let results = [];
-  try { results = (await (await api('/api/session-search?q=' + encodeURIComponent(q))).json()).results || []; } catch {}
+  const params = new URLSearchParams({ q });
+  if (cur.id) params.set('exclude', cur.id);
+  try { results = (await (await api('/api/session-search?' + params.toString())).json()).results || []; } catch {}
   if (seq !== sessSearchSeq || sessQuery !== q) return;   // a newer query already fired
   box.innerHTML = '';
   if (!results.length) { box.innerHTML = `<p class="empty">No chats match “${esc(q)}”.</p>`; return; }
@@ -599,10 +620,14 @@ function sessResultRow(s) {
     + (s.preview ? `<div class="sresSnip"></div>` : '');
   row.querySelector('.sresTitle').textContent = s.title || 'session';
   row.querySelector('.sresAge').textContent = s.age || '';
-  row.querySelector('.sresMeta').textContent = shortCwd(s.cwd);
+  row.querySelector('.sresMeta').textContent = [shortCwd(s.cwd), searchMatchLabel(s)].filter(Boolean).join(' · ');
   if (s.preview) row.querySelector('.sresSnip').textContent = stripMd(s.preview);
   row.onclick = () => { sessSearchClose(); openChat({ id: s.id, title: s.title, agent, cwd: s.cwd }); };
   return row;
+}
+function searchMatchLabel(s) {
+  if (!s || !s.matchedQuery || s.matchKind === 'exact') return '';
+  return `matched ${s.matchKind}: ${s.matchedQuery}`;
 }
 
 /* ---------- pipelines health panel ---------- */
@@ -1387,11 +1412,12 @@ function connectWS() {
 }
 async function openChat(s) {
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   $('chatTitle').textContent = cur.title;
+  updateArchiveButton();
   renderContextMeter();
   $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
@@ -1403,6 +1429,7 @@ async function openChat(s) {
   if (s.id) {
     const h = await (await api(`/api/sessions/${s.id}/history`)).json();
     cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
+    if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
     cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
     cur.context = h.context || cur.context; renderContextMeter();
     cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
@@ -1453,10 +1480,7 @@ async function renderLinearBar(inc, sessionId) {
     const r = await (await api(`/api/linear/${inc}/done`, { method: 'POST' })).json();
     toast(r.ok ? `✅ ${inc} → Done` : (r.error || 'failed'), 3000); renderLinearBar(inc, sessionId);
   });
-  if (sessionId) btn('Archive', 'arch', async () => {
-    try { await api(`/api/sessions/${sessionId}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-    toast('🗄 archived'); if (ws) ws.close(); openSessions();
-  });
+  if (sessionId) btn('Archive', 'arch', async () => openArchiveConfirm({ id: sessionId, title: cur.title, archived: false }, { leaveChat: true }));
   bar.appendChild(actions);
 }
 // Back from the chat, kept in lock-step with the browser history stack: the
@@ -1499,11 +1523,13 @@ function buildHistElement(m) {
       if (m.role === 'user') {
         const paths = [...text.matchAll(/\[Image attached at (.+?) —/g)].map((x) => x[1]);
         text = text.replace(/^\[Image attached at .+?\]\n?/gm, '').trim();
-        if (paths.length) { const r = document.createElement('div'); r.className = 'umgs'; paths.forEach((pp) => { const im = document.createElement('img'); im.src = imgUrl(pp); r.appendChild(im); }); body.appendChild(r); }
+        if (paths.length) body.appendChild(userAttachmentGrid(paths));
       }
       rawText += (rawText ? '\n' : '') + text;
       if (text) { const d = document.createElement('div'); d.innerHTML = m.role === 'user' ? esc(text) : md(text); body.appendChild(d); }
-    } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.input }));
+    } else if (m.role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
+      body.appendChild(userAttachmentGrid([p.path]));
+    } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.detail || p.input, result: p.result }));
   }
   rawText = rawText.trim();
   wrap.dataset.rawText = rawText;
@@ -1670,8 +1696,7 @@ const toolVerb = (name) => TOOL_VERB[name] || name;
 let running = false;     // a turn is currently running for this session
 let recording = false;   // mic is recording (live transcription in progress)
 let attnMode = false;    // the needs-attention reply page is open → composer is Send-only (never Stop)
-let attnShowAll = false; // Status tab: show ALL inbox entries (incl. done/answered), not just open
-let attnLinear = false;  // Linear tab: show the INC issues THIS session has touched
+let attnLinear = true;   // Linear tab: show the INC issues this session touched, or the global board queue
 function refreshButton() {
   const hasText = !!($('input').value.trim() || images.length);
   const btn = $('sendBtn');
@@ -1752,18 +1777,21 @@ const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' +
 // echo back as a `remote_user`) can be dropped instead of rendering the message twice.
 let lastUserRender = { text: '', at: 0 };
 function isRecentDupUser(text) { return (text || '') === lastUserRender.text && (Date.now() - lastUserRender.at) < 15000; }
+function userAttachmentGrid(paths) {
+  const r = document.createElement('div'); r.className = 'umgs';
+  (paths || []).forEach((p) => {
+    if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
+    else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(String(p).split('/').pop())}</span>`; r.appendChild(fc); }
+  });
+  return r;
+}
 function addUser(text, images) {
   lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   const body = document.createElement('div'); body.className = 'body';
   if (images && images.length) {
-    const r = document.createElement('div'); r.className = 'umgs';
-    images.forEach((p) => {
-      if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
-      else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(p.split('/').pop())}</span>`; r.appendChild(fc); }
-    });
-    body.appendChild(r);
+    body.appendChild(userAttachmentGrid(images));
   }
   if (text) { const t = document.createElement('div'); t.textContent = text; body.appendChild(t); }
   wrap.appendChild(body);
@@ -1827,7 +1855,8 @@ function onSync(o) {
   if (o.agent && o.sessionId) setAgent(o.agent);
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
-  if (o.title && cur.title === 'New chat') { cur.title = o.title; $('chatTitle').textContent = o.title; }
+  if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; $('chatTitle').textContent = o.title; }
+  if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
   if (o.context) { cur.context = o.context; renderContextMeter(); }
   // Remove stale live bubble from DOM before recreating it below (prevents duplicate
@@ -1897,7 +1926,7 @@ function finishTurn(o) {
   live = null; killGhostIndicators();
   running = false; refreshButton();
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
-  if (cur.title === 'New chat' && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); $('chatTitle').textContent = cur.title; }
+  if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); $('chatTitle').textContent = cur.title; }
   maybeScroll();
 }
 
@@ -2069,7 +2098,7 @@ function autoGrow() { const t = $('input'); t.style.height = 'auto'; t.style.hei
 $('input').addEventListener('input', () => { autoGrow(); onType(); updateSend(); saveDraft(cur.key, $('input').value); });
 
 /* ---------- mode (normal / bash) ---------- */
-function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
+function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').title = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
 $('modeChip').onclick = () => openSheet('Mode', [
   { ic: '⌗', label: 'normal', sel: cur.mode === 'normal', desc: `Chat with ${cur.agent === 'codex' ? 'Codex' : 'Claude'}`, fn: () => setMode('normal') },
   { ic: '⌘', label: 'bash', sel: cur.mode === 'bash', desc: 'Run commands on the box', fn: () => setMode('bash') },
@@ -2080,7 +2109,9 @@ function refreshAgentChip() {
   const rawModel = (cfg && cfg.model) || (isCodex ? 'gpt-5.5' : 'opus');
   const effort = isCodex ? (cfg && cfg.reasoningEffort) : (cfg && cfg.effort);
   // compact display name
-  const modelName = rawModel.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
+  const modelName = isCodex
+    ? rawModel.replace(/^gpt-/, '').replace(/-codex$/, 'c')
+    : rawModel.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
   $('agentChip').classList.toggle('codex', isCodex);
 }
@@ -2451,7 +2482,7 @@ function openApprovalsSheet() {
 // Rename any chat (from the in-chat header button OR the swipe Edit button) without
 // having to open it. Updates the open-chat header too if it's the same session.
 function renameChat(s, onDone) {
-  const cleanCur = (s.title && !/^New (Claude |Codex )?chat$/.test(s.title)) ? s.title : '';
+  const cleanCur = (s.title && !isPlaceholderChatTitle(s.title)) ? s.title : '';
   const inner = $('sheetInner'); inner.innerHTML = '<h3>Rename chat</h3>';
   const inp = document.createElement('input'); inp.className = 'sheetInput'; inp.value = cleanCur; inp.placeholder = 'Chat name';
   inner.appendChild(inp);
@@ -2466,7 +2497,7 @@ function renameChat(s, onDone) {
     closeSheet();
     if (onDone) onDone(name);
   };
-  inner.appendChild(row); $('sheet').classList.remove('hidden');
+  inner.appendChild(row); showSheet();
   // Focus synchronously, still inside the tap gesture — iOS only raises the soft keyboard for a
   // user-initiated focus(). A setTimeout breaks that gesture chain, so the keyboard stays down and
   // you have to tap the field again. The sheet un-hides instantly (no transition), so it's focusable now.
@@ -2569,14 +2600,44 @@ $('myMsgsBtn').onclick = async () => {
    voice button) handles the reply. Back returns to the chat. Items are shown as clean cards. */
 // Paint bell icon (attnBtn has a badge child, so we use insertAdjacentHTML not data-icon/paintIcons)
 $('attnBtn').insertAdjacentHTML('afterbegin', ICONS.bell);
+function updateArchiveButton() {
+  const b = $('archiveBtn'); if (!b) return;
+  const isArchived = !!(cur && cur.archived);
+  b.dataset.icon = isArchived ? 'unarchive' : 'archive';
+  b.title = isArchived ? 'Unarchive this conversation' : 'Archive this conversation';
+  b.setAttribute('aria-label', b.title);
+  b._painted = 0; b.innerHTML = ''; paintIcons(b.parentElement || document);
+}
+function openArchiveConfirm(s, opts = {}) {
+  const inner = $('sheetInner');
+  inner.innerHTML = '<h3>Archive chat?</h3><p class="sheetText">This moves the chat to Archived and stops its running Claude bridge so it no longer consumes box resources. You can unarchive it later from Archived or from this chat.</p>';
+  const rows = [
+    { ic: '🗄', label: 'Archive', desc: 'Stop the bridge and move it out of active chats', fn: async () => {
+      const j = await doArchive(s, true);
+      if (j && opts.leaveChat) { if (ws) ws.close(); openSessions(); }
+    } },
+    { ic: '✕', label: 'Cancel', fn: () => {} },
+  ];
+  for (const r of rows) {
+    const el = document.createElement('div');
+    el.className = 'sheetRow' + (r.label === 'Archive' ? ' danger' : '');
+    el.innerHTML = `<span class="ic">${r.ic || ''}</span><div><div>${esc(r.label)}</div>${r.desc ? `<div class="muted" style="font-size:12.5px">${esc(r.desc)}</div>` : ''}</div>`;
+    el.onclick = () => { closeSheet(); r.fn(); };
+    inner.appendChild(el);
+  }
+  showSheet();
+}
 $('archiveBtn').onclick = async () => {
   if (!cur.id) return toast('Nothing to archive yet');
-  const sid = cur.id;   // no confirm — archive now, offer Undo via toast
-  try { await api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-  toast('🗄 Archived', 6000, { label: 'Undo', fn: () => { api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: false }) }).catch(() => {}); if (curFilter) fetchSessions(curFilter); } });
-  if (ws) ws.close(); openSessions();
+  const s = { id: cur.id, title: cur.title, archived: !!cur.archived };
+  if (s.archived) { await doArchive(s, false); return; }
+  openArchiveConfirm(s, { leaveChat: true });
 };
-$('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key }); showAttention(); };
+$('attnBtn').onclick = () => {
+  attnLinear = !!(((CFG && CFG.features) || {}).linear);
+  navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
+  showAttention();
+};
 $('copyChatBtn').onclick = () => {
   const TURNS = 10;
   const msgs = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')];
@@ -2591,8 +2652,7 @@ $('copyChatBtn').onclick = () => {
   if (!lines.length) { toast('No messages yet'); return; }
   navigator.clipboard.writeText(lines.join('\n\n')).then(() => toast(`Copied ${lines.length} messages`)).catch(() => {});
 };
-$('attnTabInput').onclick = () => { attnShowAll = false; attnLinear = false; showAttention(); };
-$('attnTabStatus').onclick = () => { attnShowAll = true; attnLinear = false; showAttention(); };
+$('attnTabStatus').onclick = () => { attnLinear = false; showAttention(); };
 $('attnTabLinear') && ($('attnTabLinear').onclick = () => { attnLinear = true; showAttention(); });
 $('attnList').addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('.attnDismiss'); if (b) { e.preventDefault(); e.stopPropagation(); dismissAttn(b.dataset.key, b.dataset.title, b.dataset.identifier); } });
 function closeAttention() {
@@ -2619,6 +2679,32 @@ function attnCard(it) {
 }
 const attnKey = (it) => `${it.date || ''}|${it.title || ''}`;
 const attnDismissedSet = () => { try { return new Set(JSON.parse(LS.getItem('attn_dismissed') || '[]')); } catch { return new Set(); } };
+function attnSection(markdown, heading) {
+  const m = String(markdown || '').match(new RegExp(`(^##\\s*${heading}[\\s\\S]*?)(?=^##\\s|\\s*$)`, 'im'));
+  return m ? m[1].trim() : '';
+}
+function attnSectionBody(section) {
+  return String(section || '').replace(/^##[^\n]*\n?/i, '').trim();
+}
+function hasUsefulAttnSection(section) {
+  const body = attnSectionBody(section)
+    .replace(/\*\*/g, '')
+    .replace(/[_`]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!body) return false;
+  return !/^\(?\s*(none|n\/a|nothing|no blockers?|all clear)\s*\)?[.!]*$/.test(body);
+}
+function buildBriefMarkdown(markdown) {
+  const needs = attnSection(markdown, 'needs your input');
+  const inProgress = attnSection(markdown, 'in progress');
+  const done = attnSection(markdown, 'done recently');
+  const parts = [];
+  if (hasUsefulAttnSection(needs)) parts.push(needs);
+  if (hasUsefulAttnSection(inProgress)) parts.push(inProgress);
+  if (hasUsefulAttnSection(done)) parts.push(done);
+  return { markdown: parts.join('\n\n').trim(), hasNeeds: hasUsefulAttnSection(needs) };
+}
 // Items are Linear issues (label needs-me). Dismiss = actually resolve the issue
 // (move it to Done) via the existing /api/linear/:id/done endpoint, so it clears for
 // every session — not just hidden locally. Falls back to local-hide if there's no
@@ -2635,16 +2721,13 @@ async function dismissAttn(key, title, identifier) {
   showAttention();
 }
 async function showAttention() {
-  // Per-session view: GET /api/sessions/:id/attention → this session's own status doc
-  // (server stores it per session id, so concurrent ~/development chats don't clobber).
-  // Falls back to the global needs-me Linear inbox (via /api/needs-attention) with the card UI.
+  // Linear is the default surface because it is the durable work queue. Brief is the
+  // per-session status doc, merged into one page instead of split across empty tabs.
   const perSession = cur.id;
   const seg = $('attnSeg');
   if (seg) seg.classList.remove('hidden');
-  // 3-way tab active state
-  $('attnTabInput') && $('attnTabInput').classList.toggle('active', !attnShowAll && !attnLinear);
-  $('attnTabStatus') && $('attnTabStatus').classList.toggle('active', attnShowAll && !attnLinear);
   $('attnTabLinear') && $('attnTabLinear').classList.toggle('active', attnLinear);
+  $('attnTabStatus') && $('attnTabStatus').classList.toggle('active', !attnLinear);
   if (attnLinear) {
     await renderSessionLinear(perSession);
   } else if (perSession) {
@@ -2652,38 +2735,31 @@ async function showAttention() {
     let markdown = null;
     try { const d = await (await api(`/api/sessions/${cur.id}/attention`)).json(); markdown = d.markdown || null; } catch {}
     if (markdown) {
-      const hasNeeds = /^##\s*needs your input/im.test(markdown) && !/^##\s*needs your input\s*\n\s*\n/im.test(markdown);
+      const brief = buildBriefMarkdown(markdown);
+      const hasNeeds = brief.hasNeeds;
       setAttnBadge(hasNeeds ? 1 : 0);
-      let display = markdown;
-      if (!attnShowAll) {
-        // "Needs input" tab — show only the ## Needs your input section
-        const m = markdown.match(/^(##\s*needs your input[\s\S]*?)(?=^##\s|\s*$)/im);
-        display = m ? m[1].trim() : (hasNeeds ? markdown : '');
-      }
-      if (display) {
-        const lead = attnShowAll
-          ? 'Full session status — updated every 5 turns automatically.'
-          : 'What this session needs from you — reply below to unblock it.';
-        $('attnList').innerHTML = `<div class="attnLead">${lead}</div><div class="attnMd">${md(display)}</div>`;
+      if (brief.markdown) {
+        const lead = hasNeeds
+          ? 'Session brief — blockers first. Reply below to unblock it.'
+          : 'Session brief — no blocker detected; recent status is below.';
+        $('attnList').innerHTML = `<div class="attnLead">${lead}</div><div class="attnMd">${md(brief.markdown)}</div>`;
       } else {
-        $('attnList').innerHTML = '<div class="attnEmpty">🎉 Nothing blocking — all clear.</div>';
+        $('attnList').innerHTML = '<div class="attnEmpty">Nothing useful in the session brief yet.</div>';
       }
     } else {
       setAttnBadge(0);
-      $('attnList').innerHTML = '<div class="attnEmpty">No status yet — will appear after a few turns.</div>';
+      $('attnList').innerHTML = '<div class="attnEmpty">No brief yet — it will appear after a few turns.</div>';
     }
   } else {
     // Global fallback: needs-me Linear inbox with card UI
     let all = [];
     try { const d = await (await api('/api/needs-attention')).json(); all = d.items || []; setAttnBadge((d.items || []).filter((i) => i.open).length); } catch {}
     const dis = attnDismissedSet();
-    const items = all.filter((i) => attnShowAll ? !dis.has(attnKey(i)) : (i.open && !dis.has(attnKey(i))));
-    const lead = attnShowAll
-      ? `Everything tracked across sessions. 🔴 needs you · 🟡 heads-up · 🟢 answered · ⚪ done.`
-      : `${items.length} thing${items.length === 1 ? '' : 's'} need your input. Reply below.`;
+    const items = all.filter((i) => !dis.has(attnKey(i)));
+    const lead = `Cross-session queue. Reply below, or resolve a card when it no longer needs you.`;
     $('attnList').innerHTML = items.length
       ? `<div class="attnLead">${lead}</div>` + items.map(attnCard).join('')
-      : (attnShowAll ? '<div class="attnEmpty">Nothing tracked yet.</div>' : '<div class="attnEmpty">🎉 All clear — nothing needs your input right now.</div>');
+      : '<div class="attnEmpty">Nothing tracked yet.</div>';
   }
   $('messages').classList.add('hidden');
   $('attnPanel').classList.remove('hidden');
@@ -2698,11 +2774,11 @@ async function showAttention() {
 // "Linear" tab of the bell — the INC issues THIS session has referenced (most first),
 // resolved to title + workflow state. Tap a row to open the in-app issue workspace.
 async function renderSessionLinear(perSession) {
-  if (!perSession) { $('attnList').innerHTML = '<div class="attnEmpty">Open a session to see the Linear issues it has worked on.</div>'; return; }
+  if (!perSession) { await renderLinearQueuePreview(); return; }
   $('attnList').innerHTML = '<div class="attnLead">Loading…</div>';
   let issues = [];
   try { const d = await (await api(`/api/sessions/${perSession}/linear`)).json(); issues = d.issues || []; } catch {}
-  if (!issues.length) { $('attnList').innerHTML = '<div class="attnEmpty">No Linear issues referenced in this session yet.</div>'; return; }
+  if (!issues.length) { await renderLinearQueuePreview('No Linear issue is tied to this session yet. Here is the active queue.'); return; }
   const STYPE = { completed: '#3aa55e', canceled: '#9aa', started: '#e0a23a', unstarted: '#5b8def', backlog: '#9aa', triage: '#e0533a' };
   const rows = issues.map((it) => {
     const stCol = it.state ? (STYPE[it.state.type] || '#9aa') : '#9aa';
@@ -2721,6 +2797,39 @@ async function renderSessionLinear(perSession) {
     };
   });
 }
+async function renderLinearQueuePreview(prefix) {
+  $('attnList').innerHTML = '<div class="attnLead">Loading…</div>';
+  let d = null;
+  try { d = await (await api('/api/linear-board')).json(); } catch {}
+  const issues = [];
+  for (const col of ((d && d.columns) || [])) {
+    if (col.recent) continue;
+    for (const t of (col.issues || [])) issues.push({ ...t, stateName: col.name, stateType: col.type });
+  }
+  if (!issues.length) {
+    $('attnList').innerHTML = '<div class="attnEmpty">No open Linear issues.</div>';
+    return;
+  }
+  issues.sort((a, b) => (a.stateType === 'started' ? -1 : b.stateType === 'started' ? 1 : 0) || (Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0)));
+  const rows = issues.slice(0, 12).map((it) => {
+    const [plabel, pcolor] = PRIO[it.priority] || [];
+    const sub = [it.stateName, plabel, it.assignee && `@${it.assignee}`].filter(Boolean).join(' · ');
+    return `<div class="sessRow linRow" data-id="${esc(it.id)}"><span class="sessIc">◎</span>`
+      + `<div class="sessMain"><div class="sessTitle">${esc(it.id)} · ${esc(it.title || '(untitled)')}</div>`
+      + `<div class="sessSub">${pcolor ? `<span class="attnDot" style="background:${pcolor}"></span>` : ''}${esc(sub)}</div></div>`
+      + `<span class="sessGo">→</span></div>`;
+  }).join('');
+  const lead = prefix || 'Active Linear queue — tap an issue to open it.';
+  $('attnList').innerHTML = `<div class="attnLead">${esc(lead)}</div>${rows}`;
+  $('attnList').querySelectorAll('.linRow').forEach((row) => {
+    row.onclick = () => {
+      issueOrigin = cur.id
+        ? { kind: 'chat', chat: { id: cur.id, title: cur.title, cwd: cur.cwd, agent: cur.agent, settings: cur.settings } }
+        : { kind: 'board' };
+      openIssue(row.dataset.id);
+    };
+  });
+}
 function setAttnBadge(n) {
   const b = $('attnBadge'); if (!b) return;
   if (n > 0) { b.textContent = n; b.classList.remove('hidden'); } else b.classList.add('hidden');
@@ -2730,7 +2839,7 @@ async function refreshAttnBadge() {
     // Per-session: badge = 1 if ATTENTION.md exists with a non-empty "Needs your input" section
     try {
       const d = await (await api(`/api/sessions/${cur.id}/attention`)).json();
-      const hasNeeds = d.markdown && /^##\s*needs your input/im.test(d.markdown) && !/^##\s*needs your input\s*\n\s*\n/im.test(d.markdown);
+      const hasNeeds = d.markdown && buildBriefMarkdown(d.markdown).hasNeeds;
       setAttnBadge(hasNeeds ? 1 : 0);
     } catch { setAttnBadge(0); }
   } else {
@@ -2794,7 +2903,7 @@ function openToolDetail(name, data) {
   else if (name === 'Read') { if (fp) inner.appendChild(openFileBtn(fp)); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
   else if (name === 'Bash') { inner.appendChild(codeBlock('$ ' + (inp.command || ''))); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
   else { inner.appendChild(codeBlock(JSON.stringify(inp, null, 2))); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
-  $('sheet').classList.remove('hidden');
+  showSheet();
 }
 const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'], video: ['mp4', 'mov', 'webm', 'm4v', 'mkv'] };
 const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
@@ -2850,10 +2959,67 @@ function openSheet(title, rows) {
   if (active && active.id === 'input') active.blur();
   const inner = $('sheetInner'); inner.innerHTML = title ? `<h3>${esc(title)}</h3>` : '';
   for (const r of rows) { const el = document.createElement('div'); el.className = 'sheetRow' + (r.sel ? ' sel' : ''); el.innerHTML = `<span class="ic">${r.ic || ''}</span><div><div>${esc(r.label)}</div>${r.desc ? `<div class="muted" style="font-size:12.5px">${esc(r.desc)}</div>` : ''}</div>`; el.onclick = () => { closeSheet(); r.fn(); }; inner.appendChild(el); }
+  showSheet();
+}
+let sheetDrag = null;
+function setSheetDragOffset(y) {
+  const sheet = $('sheet');
+  const offset = Math.max(0, y || 0);
+  sheet.style.setProperty('--sheet-y', offset + 'px');
+  sheet.style.setProperty('--sheet-dim', Math.max(.12, .35 * (1 - Math.min(offset, 360) / 420)).toFixed(3));
+}
+function resetSheetDrag() {
+  const sheet = $('sheet');
+  sheet.classList.remove('dragging');
+  setSheetDragOffset(0);
+  sheetDrag = null;
+}
+function showSheet() {
+  resetSheetDrag();
+  const inner = $('sheetInner');
+  if (inner) inner.scrollTop = 0;
   $('sheet').classList.remove('hidden');
 }
-function closeSheet() { $('sheet').classList.add('hidden'); }
+function closeSheet() { resetSheetDrag(); $('sheet').classList.add('hidden'); }
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
+function onSheetTouchStart(e) {
+  if ($('sheet').classList.contains('hidden') || e.touches.length !== 1) return;
+  const inner = $('sheetInner');
+  if (!inner || e.target.closest('input, textarea, select, button, a, iframe, audio, video')) return;
+  const y = e.touches[0].clientY;
+  sheetDrag = { startY: y, lastY: y, startAt: performance.now(), dragging: false, offset: 0 };
+}
+function onSheetTouchMove(e) {
+  if (!sheetDrag || e.touches.length !== 1) return;
+  const inner = $('sheetInner');
+  if (!inner) return;
+  const y = e.touches[0].clientY;
+  const dy = y - sheetDrag.startY;
+  sheetDrag.lastY = y;
+  if (!sheetDrag.dragging) {
+    if (dy <= 8 || inner.scrollTop > 0) return;
+    sheetDrag.dragging = true;
+    $('sheet').classList.add('dragging');
+  }
+  e.preventDefault();
+  const resisted = dy > 320 ? 320 + ((dy - 320) * .25) : dy;
+  sheetDrag.offset = Math.max(0, resisted);
+  setSheetDragOffset(sheetDrag.offset);
+}
+function onSheetTouchEnd() {
+  if (!sheetDrag) return;
+  const inner = $('sheetInner');
+  const dt = Math.max(1, performance.now() - sheetDrag.startAt);
+  const velocity = (sheetDrag.lastY - sheetDrag.startY) / dt;
+  const threshold = Math.min(150, Math.max(88, ((inner && inner.offsetHeight) || 0) * .24));
+  const shouldClose = sheetDrag.dragging && (sheetDrag.offset > threshold || (velocity > .65 && sheetDrag.offset > 44));
+  if (shouldClose) closeSheet();
+  else resetSheetDrag();
+}
+$('sheetInner').addEventListener('touchstart', onSheetTouchStart, { passive: true });
+$('sheetInner').addEventListener('touchmove', onSheetTouchMove, { passive: false });
+$('sheetInner').addEventListener('touchend', onSheetTouchEnd);
+$('sheetInner').addEventListener('touchcancel', resetSheetDrag);
 // Desktop convenience: Escape dismisses the topmost transient surface (bottom sheet
 // or the accounts overlay). The image lightbox owns its own Escape; the chat's
 // attention overlay closes with Back (it's a history entry), so it's not handled here.
@@ -2885,14 +3051,37 @@ document.addEventListener('keydown', (e) => {
   // don't hijack keys while a modal/overlay owns the screen
   if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden') ||
       ($('accountsOverlay') && !$('accountsOverlay').classList.contains('hidden'))) return;
-  const onList = !$('sessions').classList.contains('hidden');
+  const onList = !$('sessions').classList.contains('hidden') || (isDesktopShell() && document.body.dataset.view !== 'login');
   const onChat = !$('chat').classList.contains('hidden');
   if (e.key === '/') { if (onChat && !attnMode) { e.preventDefault(); $('input').focus(); } return; }
-  if (e.key === '?') { toast('Shortcuts: j/k move · Enter opens · / composer · Esc closes', 3200); return; }
+  if (e.key === '?') { toast('Shortcuts: n new · b board · p pipelines · j/k move · Enter opens · / composer', 3800); return; }
   if (!onList) return;
   if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); kbMove(1); }
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); kbMove(-1); }
   else if (e.key === 'Enter') { const c = kbCards()[kbSel]; if (c) { e.preventDefault(); c.querySelector('.sCardFront').click(); } }
+});
+
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden')) return;
+  if (!TOKEN || document.body.dataset.view === 'login') return;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (!$('board').classList.contains('hidden')) boardSearchToggle();
+    else sessSearchToggle();
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+    e.preventDefault();
+    $('newBtn').click();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key.toLowerCase() === 'n') { e.preventDefault(); $('newBtn').click(); }
+  else if (e.key.toLowerCase() === 'b' && CFG.features && CFG.features.linear) { e.preventDefault(); openBoard(); }
+  else if (e.key.toLowerCase() === 'p') { e.preventDefault(); openPipelines(); }
+  else if (e.key.toLowerCase() === 's') { e.preventDefault(); openSessions(curFilter || 'all'); }
 });
 
 /* ---------- Claude accounts (login / pool / failover) ---------- */
@@ -3329,7 +3518,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 61;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 72;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {

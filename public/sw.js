@@ -1,6 +1,6 @@
 // Minimal service worker: makes the app installable + caches the shell so it
 // opens instantly. Network-first for everything; falls back to cache offline.
-const CACHE = 'cc-mobile-v61';
+const CACHE = 'cc-mobile-v73';
 const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
