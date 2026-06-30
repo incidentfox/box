@@ -498,7 +498,7 @@ function sessionCard(s) {
   const swipe = attachSwipeActions(el, front, s);
   // swipe-left action buttons (revealed behind the front)
   el.querySelector('.sAct.edit').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); renameChat(s, () => fetchSessions(curFilter)); });
-  el.querySelector('.archBtn').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); confirmArchive(s); });
+  el.querySelector('.archBtn').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); doArchive(s, !s.archived); });
   // web/desktop has no swipe and no touch long-press: a visible ⋯ button (shown on
   // hover-capable devices, see .sMore in CSS) opens the same Rename/Archive sheet on a
   // plain click. Right-click anywhere on the row opens it too, as a power-user shortcut.
@@ -556,7 +556,7 @@ function openArchiveSheet(s) {
     { ic: '✎', label: 'Rename', desc: 'Edit this chat’s name', fn: () => renameChat(s, () => fetchSessions(curFilter)) },
     s.archived
       ? { ic: '📤', label: 'Unarchive', fn: () => doArchive(s, false) }
-      : { ic: '🗄', label: 'Archive', desc: 'Hide from your list', fn: () => confirmArchive(s) },
+      : { ic: '🗄', label: 'Archive', desc: 'Hide from your list', fn: () => doArchive(s, true) },
   ]);
 }
 async function doArchive(s, on) {
@@ -3686,7 +3686,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 77;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 80;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
