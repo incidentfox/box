@@ -629,7 +629,28 @@ html[data-theme="dark"] .agentTag.arch { background: #2c2620; color: #c8b48c; }
 .fileCardIcon svg { width: 16px; height: 16px; opacity: 0.7; }
 .fileCardName { flex: 1; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .fileCardExt { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .05em; color: var(--muted); background: var(--subtle); border-radius: 5px; padding: 2px 5px; }
-.fileCardDl { flex: none; opacity: 0.45; } .fileCardDl svg { width: 16px; height: 16px; }
+.fileCardDl { flex: none; opacity: 0.5; background: none; border: 0; padding: 2px; margin: 0; color: inherit; cursor: pointer; line-height: 0; border-radius: 6px; } .fileCardDl svg { width: 16px; height: 16px; }
+.fileCardDl:active { opacity: 0.9; }
+.fileCardMain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.fileCardSize { font-size: 11px; color: var(--muted); font-weight: 500; }
+.fileMetaRow { display: flex; align-items: center; gap: 8px; }
+.fileMetaRow .fileCardName { font-size: 13.5px; }
+/* delivered image → inline picture */
+.fileImgCard { margin: 0; display: flex; flex-direction: column; gap: 7px; padding: 7px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); max-width: min(320px, 88vw); box-sizing: border-box; }
+.fileImgPreview { display: block; width: 100%; max-height: 320px; object-fit: contain; border-radius: 9px; background: var(--subtle); cursor: zoom-in; }
+.fileImgCard.fileMissing { display: none; }
+/* delivered PDF → inline embedded preview + actions */
+.filePdfCard { display: flex; flex-direction: column; gap: 9px; padding: 11px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); max-width: min(360px, 90vw); box-sizing: border-box; }
+.fileCardIcon.pdf { font-size: 9.5px; font-weight: 800; letter-spacing: .03em; color: #fff; background: #d2433a; }
+.filePdfPreview { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #fff; }
+.filePdfFrame { display: block; width: 100%; height: 340px; border: 0; background: #fff; }
+.filePreviewActions { display: flex; gap: 8px; }
+.filePreviewBtn { flex: 1; text-align: center; font-size: 13px; font-weight: 600; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--subtle); color: var(--ink); cursor: pointer; text-decoration: none; box-sizing: border-box; }
+.filePreviewBtn:active { opacity: 0.7; }
+/* PDF in the full-screen media viewer */
+.pdfframe { width: 100%; height: 100%; min-height: 72vh; border: 0; background: #fff; }
+.pdfFallbackBar { display: flex; justify-content: center; padding: 10px 0 2px; }
+.pdfFallbackBar .filePreviewBtn { flex: none; min-width: 180px; }
 
 /* AskUserQuestion → interactive question cards */
 .askUserCard { display: flex; flex-direction: column; gap: 14px; margin: 4px 0; max-width: min(360px, 92vw); }
@@ -998,6 +1019,10 @@ textarea.acctInput { resize: vertical; }
   .msg .body .mdImg { max-width: min(520px, 100%); }
   .toolchip.imgchip { max-width: min(520px, 100%); }
   .tchipThumb { max-height: 360px; }
+  .fileImgCard { max-width: min(520px, 100%); }
+  .fileImgPreview { max-height: 460px; }
+  .filePdfCard { max-width: min(560px, 100%); }
+  .filePdfFrame { height: 460px; }
   .composer {
     padding: 12px var(--desktop-pad) 16px; background: color-mix(in srgb, var(--bg) 92%, var(--card));
   }

@@ -1936,28 +1936,93 @@ function fileExtIcon(ext) {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(e)) return ICONS.copy;
   return ICONS.copy;
 }
+const PDF_EXT_RE = /\.pdf(?:[?#].*)?$/i;
+function fileExtOf(fp) {
+  const fname = String(fp || '').split('/').pop() || '';
+  return fname.includes('.') ? fname.split('.').pop().toLowerCase() : '';
+}
+function fmtBytes(n) {
+  n = Number(n);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return n + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB']; let i = -1, v = n;
+  do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
+  return (v >= 10 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+}
+// Lazily fill an element with the delivered file's size (HEAD /api/raw → Content-Length).
+// Best-effort: any failure just leaves the slot blank rather than blocking the card.
+function fillFileSize(el, fp) {
+  if (!el) return;
+  fetch(rawFileUrl(fp), { method: 'HEAD' })
+    .then((r) => { const s = fmtBytes(r.headers.get('content-length')); if (s) el.textContent = s; })
+    .catch(() => {});
+}
+function downloadFile(fp, fname) {
+  fetch(rawFileUrl(fp)).then((r) => r.blob()).then((blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = fname; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }).catch(() => window.open(rawFileUrl(fp), '_blank'));
+}
+function fileDlBtn(fp, fname) {
+  const dl = document.createElement('button'); dl.className = 'fileCardDl'; dl.title = 'Download'; dl.innerHTML = ICONS['arrow-down'];
+  dl.addEventListener('click', (e) => { e.stopPropagation(); downloadFile(fp, fname); });
+  return dl;
+}
+// Delivered image → render the picture inline, tappable into the shared lightbox gallery.
+function imageDeliveryCard(fp, fname) {
+  const card = document.createElement('figure'); card.className = 'fileImgCard';
+  const img = document.createElement('img'); img.className = 'fileImgPreview'; img.src = rawFileUrl(fp); img.alt = fname; img.loading = 'lazy';
+  img.onerror = () => card.classList.add('fileMissing');
+  img.onclick = () => {
+    const all = [...$('messages').querySelectorAll('.fileImgPreview, .umgs img, .tchipThumb')];
+    window.openImageLightbox(all.map((i) => i.src), Math.max(0, all.indexOf(img)));
+  };
+  const cap = document.createElement('figcaption'); cap.className = 'fileMetaRow';
+  cap.innerHTML = `<span class="fileCardName">${esc(fname)}</span><span class="fileCardSize"></span>`;
+  cap.appendChild(fileDlBtn(fp, fname));
+  card.append(img, cap);
+  fillFileSize(cap.querySelector('.fileCardSize'), fp);
+  return card;
+}
+// Delivered PDF → inline embedded preview (full viewer on desktop, first page on iOS Safari)
+// plus explicit Open/Download actions so the full document is always reachable.
+function pdfDeliveryCard(fp, fname) {
+  const card = document.createElement('div'); card.className = 'filePdfCard';
+  const head = document.createElement('div'); head.className = 'fileMetaRow filePdfHead';
+  head.innerHTML = `<span class="fileCardIcon pdf">PDF</span><span class="fileCardName">${esc(fname)}</span><span class="fileCardSize"></span>`;
+  head.appendChild(fileDlBtn(fp, fname));
+  const prev = document.createElement('div'); prev.className = 'filePdfPreview';
+  const frame = document.createElement('iframe'); frame.className = 'filePdfFrame'; frame.title = fname; frame.loading = 'lazy';
+  frame.src = rawFileUrl(fp) + '#view=FitH&toolbar=0&navpanes=0';
+  prev.appendChild(frame);
+  const actions = document.createElement('div'); actions.className = 'filePreviewActions';
+  const open = document.createElement('button'); open.className = 'filePreviewBtn'; open.textContent = 'Open fullscreen';
+  open.addEventListener('click', () => openFile(fp));
+  actions.appendChild(open);
+  card.append(head, prev, actions);
+  fillFileSize(head.querySelector('.fileCardSize'), fp);
+  return card;
+}
+// Anything else → a download affordance with filename + size; tap opens the file viewer.
+function genericFileCard(fp, fname, ext) {
+  const card = document.createElement('div'); card.className = 'fileCard';
+  card.innerHTML = `<span class="fileCardIcon">${ICONS.file}</span>` +
+    `<div class="fileCardMain"><span class="fileCardName">${esc(fname)}</span><span class="fileCardSize"></span></div>` +
+    `<span class="fileCardExt">${ext ? esc(ext.toUpperCase()) : 'FILE'}</span>`;
+  card.appendChild(fileDlBtn(fp, fname));
+  card.addEventListener('click', (e) => { if (e.target.closest('.fileCardDl')) return; openFile(fp); });
+  fillFileSize(card.querySelector('.fileCardSize'), fp);
+  return card;
+}
 function sendFileCards(files, caption) {
   const wrap = document.createElement('div'); wrap.className = 'fileCards';
   if (caption) { const cap = document.createElement('div'); cap.className = 'fileCaption'; cap.textContent = caption; wrap.appendChild(cap); }
   for (const fp of (files || [])) {
     const fname = fp.split('/').pop();
-    const ext = fname.includes('.') ? fname.split('.').pop() : '';
-    const card = document.createElement('div');
-    card.className = 'fileCard';
-    card.innerHTML = `<span class="fileCardIcon">${ICONS.copy}</span><span class="fileCardName">${esc(fname)}</span><span class="fileCardExt">${ext ? esc(ext.toUpperCase()) : 'FILE'}</span><span class="fileCardDl">${ICONS['arrow-down']}</span>`;
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.fileCardDl')) return;
-      openFile(fp);
-    });
-    card.querySelector('.fileCardDl').addEventListener('click', (e) => {
-      e.stopPropagation();
-      fetch(rawFileUrl(fp)).then((r) => r.blob()).then((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = fname; a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-      }).catch(() => window.open(rawFileUrl(fp), '_blank'));
-    });
-    wrap.appendChild(card);
+    if (PREVIEW_IMG_EXT_RE.test(fp)) { wrap.appendChild(imageDeliveryCard(fp, fname)); continue; }
+    if (PDF_EXT_RE.test(fp)) { wrap.appendChild(pdfDeliveryCard(fp, fname)); continue; }
+    wrap.appendChild(genericFileCard(fp, fname, fileExtOf(fp)));
   }
   return wrap;
 }
@@ -3392,6 +3457,15 @@ function showMedia(path) {
   if (MEDIA.img.includes(ext)) { const im = document.createElement('img'); im.className = 'mediaimg'; im.src = rawUrl(path); body.appendChild(im); }
   else if (MEDIA.audio.includes(ext)) { const a = document.createElement('audio'); a.controls = true; a.src = rawUrl(path); a.className = 'mediael'; body.appendChild(a); }
   else if (MEDIA.video.includes(ext)) { const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.src = rawUrl(path); v.className = 'mediael'; body.appendChild(v); }
+  else if (ext === 'pdf') {
+    // Native embedded PDF viewer (full + scrollable on desktop; first page on iOS Safari).
+    // Always offer an open-in-new-tab fallback so the whole document is reachable everywhere.
+    const f = document.createElement('iframe'); f.className = 'mediael pdfframe'; f.title = path.split('/').pop();
+    f.src = rawUrl(path) + '#view=FitH'; body.appendChild(f);
+    const bar = document.createElement('div'); bar.className = 'pdfFallbackBar';
+    const a = document.createElement('a'); a.className = 'filePreviewBtn'; a.textContent = 'Open in browser'; a.href = rawUrl(path); a.target = '_blank'; a.rel = 'noopener';
+    bar.appendChild(a); body.appendChild(bar);
+  }
   else {
     body.classList.add('astext'); body.textContent = 'Loading…';
     api('/api/fs?path=' + encodeURIComponent(path)).then((r) => r.json()).then((d) => {
