@@ -908,31 +908,42 @@ textarea.acctInput { resize: vertical; }
     display: none;
   }
   #chat.newChatIntro .messages {
-    flex: 1 1 0;
-    justify-content: flex-end;
-    overflow: hidden;
-    padding-bottom: 14px;
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    overflow: visible;
+    padding: clamp(92px, 18vh, 190px) var(--desktop-pad) 12px;
   }
   #chat.newChatIntro .messages > .muted {
-    color: var(--muted);
-    font-size: 15px;
-    line-height: 1.5;
+    width: min(760px, 100%);
+    max-width: 760px;
+    color: var(--ink);
+    font-size: 16px;
+    font-weight: 650;
+    line-height: 1.45;
+    text-align: center;
   }
   #chat.newChatIntro .composer {
+    width: 100%;
     flex: none;
     border-top: 0;
     background: transparent;
     padding-top: 0;
     padding-bottom: 0;
   }
+  #chat.newChatIntro .composer > * {
+    max-width: 760px;
+  }
   #chat.newChatIntro .inputWrap {
-    border-radius: 18px;
-    box-shadow: 0 14px 44px rgba(0,0,0,.08);
+    min-height: 90px;
+    border-radius: 20px;
+    background: var(--card);
+    border-color: color-mix(in srgb, var(--line) 82%, var(--ink));
+    box-shadow: 0 22px 70px color-mix(in srgb, #000 15%, transparent);
   }
   #chat.newChatIntro::after {
     content: '';
-    flex: 1 1 0;
-    min-height: 48px;
+    flex: 1 1 auto;
+    min-height: clamp(96px, 20vh, 220px);
   }
   .messages {
     padding: 18px var(--desktop-pad) 12px;
