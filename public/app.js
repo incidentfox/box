@@ -1589,6 +1589,9 @@ function buildIssueContext(d, sessions) {
     L.push('', `## Attachments (${attachments.length})`);
     for (const a of attachments) L.push(`- ${a.title || a.url}${a.url && a.title ? `: ${a.url}` : ''}`);
   }
+  if (d.meetingContext && String(d.meetingContext).trim()) {
+    L.push('', '## Meeting-Source Context', String(d.meetingContext).trim());
+  }
   const cmts = (d.comments || []).filter((c) => !isDelegationMarker(c.body));
   if (cmts.length) {
     L.push('', `## Comments (${cmts.length}) — context already gathered; read these before re-deriving anything`);
