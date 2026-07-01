@@ -682,6 +682,8 @@ function tailInfo(file) {
 }
 // session ids with a currently-running worker turn (set maintained by runWorker)
 const RUNNING = new Set();
+function addRunning(id) { if (id && !RUNNING.has(id)) { RUNNING.add(id); invalidateSessionLists(); } }
+function deleteRunning(id) { if (id && RUNNING.delete(id)) invalidateSessionLists(); }
 
 // Atomic JSON write: write a temp file then rename over the target, so a concurrent reader
 // always sees either the old or the new COMPLETE file — never a half-written (torn) one.
@@ -3360,7 +3362,7 @@ async function runWorker(s) {
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
     s.curText = ''; s.curTools = []; s.curParts = []; s.canceled = false; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
-    if (s.sessionId) { RUNNING.add(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
+    if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
@@ -3368,7 +3370,7 @@ async function runWorker(s) {
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
-  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; if (s.sessionId) RUNNING.delete(s.sessionId); bcast(s, { type: 'idle' });
+  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
 // Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
@@ -3437,7 +3439,7 @@ function runTurn(s, msg) {
         if (!s.sessionId) {
           await rec.session_p;                 // real id appears once the JSONL is created
           s.sessionId = rec.sessionId;
-          ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+          ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
           if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
           persist(s);
           // If this chat was started with an EXPLICIT title (e.g. delegating a Linear
@@ -3484,7 +3486,7 @@ function runCodexTurn(s, msg, resolve) {
     s.provKey = s.key;
     ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
     appendCodexMessage(s.provKey, 'user', userText, { parts: userParts });
-    RUNNING.add(s.provKey);
+    addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
   const finish = () => {
@@ -3504,7 +3506,7 @@ function runCodexTurn(s, msg, resolve) {
       // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
       // entry already holds the user's message, so the chat stays in the list and is retryable in
       // place; clear its "working" state and leave a note explaining what happened.
-      RUNNING.delete(s.provKey);
+      deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
@@ -3524,11 +3526,11 @@ function runCodexTurn(s, msg, resolve) {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;
         s.sessionId = ev.id; s.agent = 'codex';
-        ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+        ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
         // Migrate the provisional entry (and its already-appended user message) onto the real
         // thread id, then drop its working marker. provKey is cleared so finish() treats this as a
         // normal (registered) turn.
-        if (provKey && provKey !== s.sessionId) { RUNNING.delete(provKey); migrateCodexSession(provKey, s.sessionId); }
+        if (provKey && provKey !== s.sessionId) { deleteRunning(provKey); migrateCodexSession(provKey, s.sessionId); }
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
@@ -3609,7 +3611,7 @@ function runGeminiTurn(s, msg, resolve) {
   appendGeminiMessage(sid, 'user', userText, { parts: userParts });
   s.sessionId = sid;
   s.agent = 'gemini';
-  ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+  ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
   if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
   persist(s);
 
@@ -3684,7 +3686,7 @@ function runAgyTurn(s, msg, resolve) {
   appendAgyMessage(sid, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
   s.sessionId = sid;
   s.agent = 'agy';
-  ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+  ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
   if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
   if (isNew) persist(s);
 
