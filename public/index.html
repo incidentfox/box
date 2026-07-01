@@ -121,15 +121,11 @@
 
 <!-- CHAT -->
 <section id="chat" class="screen hidden">
-  <header class="bar">
+  <header class="bar chatBar">
     <button id="backBtn" class="iconbtn ghost" data-icon="back"></button>
-    <strong id="chatTitle" class="ctitle">New chat</strong>
-    <div class="spacer"></div>
+    <button id="chatTitle" class="ctitle titleBtn" type="button">New chat</button>
     <button id="filesBtn" class="iconbtn ghost" title="files" data-icon="folder"></button>
-    <button id="renameBtn" class="iconbtn ghost" title="rename" data-icon="pencil"></button>
     <button id="myMsgsBtn" class="iconbtn ghost" title="my messages" data-icon="list"></button>
-    <button id="copyChatBtn" class="iconbtn ghost" title="copy last 10 turns" data-icon="copy"></button>
-    <button id="favoriteBtn" class="iconbtn ghost" title="Pin this conversation" data-icon="star"></button>
     <button id="archiveBtn" class="iconbtn ghost" title="Archive this conversation" data-icon="archive"></button>
     <button id="attnBtn" class="iconbtn ghost" title="needs attention" style="position:relative"><span id="attnBadge" class="attnBadge hidden"></span></button>
   </header>
@@ -224,7 +220,7 @@
     <button id="myMsgsClose" class="iconbtn ghost" data-icon="back"></button>
     <strong class="ctitle">My messages</strong>
     <div class="spacer"></div>
-    <button id="myMsgsCopyAll" class="chip small">Copy all</button>
+    <button id="myMsgsCopyAll" class="chip small">Copy</button>
     <button id="myMsgsDownload" class="iconbtn ghost" title="download full conversation" data-icon="arrow-down"></button>
   </header>
   <div id="myMsgsList" class="list myMsgsList"></div>

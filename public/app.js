@@ -141,6 +141,34 @@ async function api(path, opts = {}) {
   if (r.status === 401) { throw new Error('unauthorized'); }   // never auto-logout — token is long & annoying to re-enter
   return r;
 }
+function setChatTitle(title) {
+  const t = $('chatTitle'); if (!t) return;
+  t.textContent = title || 'New chat';
+  t.title = title || 'New chat';
+}
+function cleanCopyText(text) {
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00a0/g, ' ')
+    .trim();
+}
+async function writeClipboardText(text, label = 'Copied') {
+  const clean = cleanCopyText(text);
+  if (!clean) { toast('Nothing to copy'); return false; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(clean);
+    else throw new Error('clipboard unavailable');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = clean; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  toast(label);
+  return true;
+}
 // Client bootstrap (filled from /api/config): $HOME for path-shortening + which optional
 // integrations are wired, so we can hide the Board / Linear UI when they aren't set up.
 let CFG = { home: '', ownerName: 'you', defaultCwd: '', appSettings: { defaultCwd: '', envDefaultCwd: '', defaultAgent: 'claude', codexSandbox: 'off' }, features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false }, promptTemplates: [], hooks: [] };
@@ -1839,7 +1867,7 @@ async function openChat(s) {
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
-  $('chatTitle').textContent = cur.title;
+  setChatTitle(cur.title);
   updateFavoriteButton();
   updateArchiveButton();
   renderContextMeter();
@@ -1970,7 +1998,7 @@ function buildHistElement(m) {
   if (rawText) {
     const acts = document.createElement('div'); acts.className = 'msgActions';
     const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
-    cpBtn.onclick = () => navigator.clipboard.writeText(rawText || body.innerText).then(() => toast('Copied!')).catch(() => {});
+    cpBtn.onclick = () => writeClipboardText(rawText, 'Copied!');
     if (m.ts) { const ts = document.createElement('span'); ts.className = 'msgTs'; ts.textContent = fmtTs(m.ts); acts.appendChild(ts); }
     acts.appendChild(cpBtn); wrap.appendChild(acts);
   }
@@ -2275,7 +2303,7 @@ function startAssistant() {
   wrap.appendChild(body); $('messages').appendChild(wrap);
   const loading = document.createElement('div'); loading.className = 'loading'; loading.innerHTML = '<span></span><span></span><span></span>'; body.appendChild(loading);
   const textEl = document.createElement('div'); textEl.className = 'cursor'; body.appendChild(textEl);
-  live = { body, raw: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
+  live = { body, raw: '', copyText: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
 // remove orphaned streaming indicators (blinking cursor / loading dots) left by a previous
@@ -2310,7 +2338,7 @@ function addUser(text, images) {
   wrap.appendChild(body);
   const acts = document.createElement('div'); acts.className = 'msgActions';
   const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
-  cpBtn.onclick = () => navigator.clipboard.writeText(text || '').then(() => toast('Copied!')).catch(() => {});
+  cpBtn.onclick = () => writeClipboardText(text || '', 'Copied!');
   acts.appendChild(cpBtn); wrap.appendChild(acts);
   $('messages').appendChild(wrap);
 }
@@ -2323,7 +2351,7 @@ function onServer(o) {
   // hadHistory=false, renders the user bubble from turn_start, THEN learns its id here. If
   // the WS later reconnects mid-first-turn, onSync re-adds the user bubble (guarded only by
   // !cur.hadHistory) → the message renders twice. Marking it now suppresses that re-add.
-  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; $('chatTitle').textContent = o.title; } return; }
+  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; setChatTitle(o.title); } return; }
   if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); if (o.cwd) cur.cwd = o.cwd; refreshAgentChip(); return; }
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
@@ -2335,7 +2363,7 @@ function onServer(o) {
   if (o.type === 'turn_start') return beginTurn(o.text, o.images);
   if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); return; }
   if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
-  else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; queueRender(); }
+  else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
   else if (o.type === 'tool') {
     if (!live) startAssistant(); clearLoading();
     live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
@@ -2369,7 +2397,7 @@ function onSync(o) {
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
   if (o.cwd) cur.cwd = o.cwd;
-  if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; $('chatTitle').textContent = o.title; }
+  if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; setChatTitle(o.title); }
   if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
   if (typeof o.favorite === 'boolean') { cur.favorite = o.favorite; updateFavoriteButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
@@ -2405,12 +2433,12 @@ function onSync(o) {
           const chip = toolChip(p.name, p.input || '', live.toolData[p.id]);
           live.textEl.insertAdjacentElement('afterend', chip);
           live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
-        } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.textEl.innerHTML = md(live.raw); }
+        } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.copyText += p.text; live.textEl.innerHTML = md(live.raw); }
       }
     } else {
       // legacy fallback (server snapshot without curParts)
       (o.curTools || []).forEach((t) => { live.textEl.classList.remove('cursor'); live.body.insertBefore(toolChip(t.name, t.input || '', { input: t.detail, result: t.result }), live.textEl); const nt = document.createElement('div'); nt.className = 'cursor'; live.body.appendChild(nt); live.textEl = nt; });
-      if (o.curText) { clearLoading(); live.raw = o.curText; live.textEl.innerHTML = md(live.raw); }
+      if (o.curText) { clearLoading(); live.raw = o.curText; live.copyText = o.curText; live.textEl.innerHTML = md(live.raw); }
     }
     running = true;
     // If the in-flight turn is parked on an AskUserQuestion (tool emitted, no result yet),
@@ -2429,19 +2457,23 @@ function finishTurn(o) {
   if (live) {
     clearLoading(); live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
     if (o.canceled) { const s = document.createElement('div'); s.className = 'stoppedTag'; s.textContent = 'stopped'; live.body.appendChild(s); }
-    const rawText = live.raw; const msgWrap = live.body.parentElement;
+    const rawText = cleanCopyText(live.copyText || live.raw); const msgWrap = live.body.parentElement;
     if (msgWrap) {
       msgWrap.dataset.rawText = rawText;
-      const acts = document.createElement('div'); acts.className = 'msgActions';
-      const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
-      cpBtn.onclick = () => navigator.clipboard.writeText(rawText).then(() => toast('Copied!')).catch(() => {});
-      acts.appendChild(cpBtn); msgWrap.appendChild(acts);
+      if (rawText) {
+        const acts = document.createElement('div'); acts.className = 'msgActions';
+        const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
+        cpBtn.onclick = () => writeClipboardText(rawText, 'Copied!');
+        acts.appendChild(cpBtn); msgWrap.appendChild(acts);
+      } else {
+        msgWrap.classList.add('toolonly');
+      }
     }
   }
   live = null; killGhostIndicators();
   running = false; refreshButton();
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
-  if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); $('chatTitle').textContent = cur.title; }
+  if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); setChatTitle(cur.title); }
   maybeScroll();
 }
 
@@ -2602,11 +2634,7 @@ $('sendBtn').onclick = () => { if ($('sendBtn').dataset.act === 'stop') stopCurr
 $('copyInputBtn').onclick = () => {
   const text = $('input').value;
   if (!text) return;
-  navigator.clipboard.writeText(text).then(() => toast('Copied!')).catch(() => {
-    /* fallback for older mobile browsers */
-    const t = $('input'); t.select(); t.setSelectionRange(0, t.value.length);
-    document.execCommand('copy'); toast('Copied!');
-  });
+  writeClipboardText(text, 'Copied!');
 };
 // Enter behavior: on desktop (mouse/fine pointer) Enter sends, Shift+Enter inserts a newline.
 // On mobile (coarse/touch pointer) Enter inserts a newline (default); send via the ↑ button.
@@ -2850,6 +2878,43 @@ function compactTranscript(messages, maxChars = 14000, maxMsgs = 28) {
   let out = rows.join('\n\n---\n\n');
   if (out.length > maxChars) out = out.slice(out.length - maxChars);
   return out;
+}
+function visibleConversationText() {
+  const rows = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')].map((m) => {
+    const role = m.classList.contains('user') ? 'You' : agentLabel(cur.agent);
+    const text = cleanCopyText(m.dataset.rawText || '');
+    return text ? `${role}:\n${text}` : null;
+  }).filter(Boolean);
+  return rows.join('\n\n---\n\n');
+}
+async function loadUserMessages() {
+  if (!cur.id) return [];
+  const j = await (await api(`/api/sessions/${cur.id}/user-messages`)).json();
+  return (j.messages || []).map((m) => typeof m === 'string' ? { text: m, ts: null } : m);
+}
+async function copyUserMessages(preloaded) {
+  if (!cur.id && !preloaded) { toast('No session yet'); return; }
+  let msgs = preloaded;
+  try { if (!msgs) msgs = await loadUserMessages(); }
+  catch { toast('Could not load messages'); return; }
+  const text = (msgs || []).map((m) => cleanCopyText(m.text)).filter(Boolean).join('\n\n---\n\n');
+  await writeClipboardText(text, `Copied ${(msgs || []).length} messages`);
+}
+async function copyFullConversation() {
+  if (!cur.id) { toast('No session yet'); return; }
+  toast('Preparing copy...', 900);
+  try {
+    const r = await fetch(`/api/sessions/${cur.id}/export?token=${encodeURIComponent(TOKEN)}`);
+    if (!r.ok) { toast('Copy failed'); return; }
+    await writeClipboardText(await r.text(), 'Copied conversation');
+  } catch { toast('Copy failed'); }
+}
+function openCopySheet(preloadedUserMessages = null) {
+  openSheet('Copy', [
+    { ic: '', label: 'Full conversation', desc: 'Clean markdown export of the whole chat', fn: copyFullConversation },
+    { ic: '', label: 'My messages only', desc: 'Every user message from this chat', fn: () => copyUserMessages(preloadedUserMessages) },
+    { ic: '', label: 'Visible messages', desc: 'Only the messages currently loaded on screen', fn: () => writeClipboardText(visibleConversationText(), 'Copied visible messages') },
+  ]);
 }
 function buildForkPrompt(parent, messages) {
   const transcript = compactTranscript(messages);
@@ -3096,7 +3161,7 @@ function renameChat(s, onDone) {
     const name = inp.value.trim();
     if (name) {
       s.title = name;
-      if (cur && s.id && s.id === cur.id) { cur.title = name; $('chatTitle').textContent = name; }
+      if (cur && s.id && s.id === cur.id) { cur.title = name; setChatTitle(name); }
       if (s.id) { try { await api(`/api/sessions/${s.id}/rename`, { method: 'POST', body: JSON.stringify({ name }) }); } catch {} }
     }
     closeSheet();
@@ -3108,7 +3173,18 @@ function renameChat(s, onDone) {
   // you have to tap the field again. The sheet un-hides instantly (no transition), so it's focusable now.
   inp.focus(); inp.select();
 }
-$('renameBtn').onclick = () => renameChat(cur);
+function openChatTitleSheet() {
+  const title = cur.title || 'New chat';
+  openSheet(title, [
+    { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
+    { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
+    { ic: '', label: 'My messages', desc: 'Browse and copy just your prompts', fn: openMyMessages },
+    cur.favorite
+      ? { ic: '★', label: 'Unpin', desc: 'Remove from Favorites', fn: () => cur.id ? doFavorite({ id: cur.id, title: cur.title, favorite: true }, false) : toast('No session yet') }
+      : { ic: '☆', label: 'Pin', desc: 'Keep at the top of the chat list', fn: () => cur.id ? doFavorite({ id: cur.id, title: cur.title, favorite: false }, true) : toast('No session yet') },
+  ]);
+}
+$('chatTitle').onclick = openChatTitleSheet;
 
 /* ---------- file explorer + reader ---------- */
 let expPath = '';
@@ -3131,21 +3207,17 @@ $('myMsgsDownload').onclick = async () => {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch { toast('Download failed'); }
 };
-$('myMsgsBtn').onclick = async () => {
+async function openMyMessages() {
   if (!cur.id) return toast('No session yet');
   const overlay = $('myMsgsOverlay'), list = $('myMsgsList');
   overlay.classList.remove('hidden'); paintIcons(overlay);
   list.innerHTML = '<div class="histLoader">Loading…</div>';
   let msgs;
-  try { msgs = (await (await api(`/api/sessions/${cur.id}/user-messages`)).json()).messages; }
+  try { msgs = await loadUserMessages(); }
   catch { list.innerHTML = '<div class="histLoader">Failed to load</div>'; return; }
   list.innerHTML = '';
   if (!msgs || !msgs.length) { list.innerHTML = '<div class="histLoader">No messages found</div>'; return; }
-  // msgs is [{text, ts}] — normalise in case server returns plain strings (old format)
-  msgs = msgs.map((m) => typeof m === 'string' ? { text: m, ts: null } : m);
-  $('myMsgsCopyAll').onclick = () => {
-    navigator.clipboard.writeText(msgs.map((m) => m.text).join('\n\n---\n\n')).then(() => toast(`Copied ${msgs.length} messages`)).catch(() => {});
-  };
+  $('myMsgsCopyAll').onclick = () => openCopySheet(msgs);
   const total = msgs.length;
   msgs.forEach(({ text, ts }, i) => {
     const card = document.createElement('div'); card.className = 'myMsgCard';
@@ -3165,7 +3237,7 @@ $('myMsgsBtn').onclick = async () => {
       left.appendChild(exp);
     }
     const cp = document.createElement('button'); cp.className = 'iconbtn ghost'; cp.title = 'copy'; cp.innerHTML = ICONS.copy;
-    cp.onclick = (e) => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => toast('Copied!')).catch(() => {}); };
+    cp.onclick = (e) => { e.stopPropagation(); writeClipboardText(text, 'Copied!'); };
     card.appendChild(left); card.appendChild(cp);
     // tap card → find that exact message in the chat and scroll to it. Match by the
     // message TIMESTAMP (a unique, stable key present on both the API and the rendered
@@ -3198,7 +3270,8 @@ $('myMsgsBtn').onclick = async () => {
     });
     list.appendChild(card);
   });
-};
+}
+$('myMsgsBtn').onclick = openMyMessages;
 
 /* ---- /clear + "needs attention" page ----
    A dedicated page that takes the messages area's place, so the REAL composer below (with its
@@ -3255,28 +3328,10 @@ $('archiveBtn').onclick = async () => {
   if (s.archived) { await doArchive(s, false); return; }
   openArchiveConfirm(s, { leaveChat: true });
 };
-$('favoriteBtn').onclick = async () => {
-  if (!cur.id) return toast('Nothing to pin yet');
-  await doFavorite({ id: cur.id, title: cur.title, favorite: !!cur.favorite }, !cur.favorite);
-};
 $('attnBtn').onclick = () => {
   attnLinear = !!(((CFG && CFG.features) || {}).linear);
   navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
   showAttention();
-};
-$('copyChatBtn').onclick = () => {
-  const TURNS = 10;
-  const msgs = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')];
-  const last = msgs.slice(-(TURNS * 2));
-  const lines = last.map((m) => {
-    const role = m.classList.contains('user') ? 'You' : 'Claude';
-    // Only use rawText — never fall back to innerText (which includes tool chip DOM garbage).
-    // Skip tool-only turns where there's no text content.
-    const text = (m.dataset.rawText || '').trim();
-    return text ? `${role}: ${text}` : null;
-  }).filter(Boolean);
-  if (!lines.length) { toast('No messages yet'); return; }
-  navigator.clipboard.writeText(lines.join('\n\n')).then(() => toast(`Copied ${lines.length} messages`)).catch(() => {});
 };
 $('attnTabStatus').onclick = () => { attnLinear = false; showAttention(); };
 $('attnTabLinear') && ($('attnTabLinear').onclick = () => { attnLinear = true; showAttention(); });

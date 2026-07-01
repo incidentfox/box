@@ -204,6 +204,13 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 }
 .bar strong { font-size: 17px; font-weight: 700; }
 .ctitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62vw; font-size: 16px; }
+.chatBar { gap: 5px; }
+.chatBar .ctitle {
+  flex: 1 1 auto; min-width: 0; max-width: none; height: 38px; padding: 0 4px;
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: left; font-size: 17px; font-weight: 700; border-radius: 8px;
+}
+.chatBar .titleBtn:active { background: var(--subtle-2); }
 .ghost { padding: 6px 10px; font-size: 19px; border-radius: 10px; color: var(--ink); }
 .contextMeter {
   position: relative; flex: none; height: 28px; overflow: hidden; cursor: pointer;
@@ -457,13 +464,15 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .iconbtn:active { filter: brightness(.93); }
 
 @media (max-width: 430px) {
-	.toolsRow { gap: 5px; }
-	.inputWrap { padding-inline: 9px; }
-	.chip { padding-inline: 9px; font-size: 12.5px; }
-	#modeChip { width: 42px; padding-inline: 0; }
-	#modeLabel { display: none; }
-	.iconbtn { width: 36px; height: 36px; }
-	.iconbtn svg { width: 20px; height: 20px; }
+  .toolsRow { gap: 5px; }
+  .inputWrap { padding-inline: 9px; }
+  .chip { padding-inline: 9px; font-size: 12.5px; }
+  #modeChip { width: 42px; padding-inline: 0; }
+  #modeLabel { display: none; }
+  .iconbtn { width: 36px; height: 36px; }
+  .iconbtn svg { width: 20px; height: 20px; }
+  .chatBar { gap: 3px; padding-inline: 9px; }
+  .chatBar .ctitle { height: 36px; font-size: 16px; padding-inline: 2px; }
 }
 
 /* recorder */
