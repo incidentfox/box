@@ -25,6 +25,7 @@ import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
+import { renderMeetingContextForIssue } from './meeting-context.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -131,7 +132,7 @@ const PROMPT_TEMPLATES = {
     vars: ['issueId', 'issueTitle', 'issueContext', 'branchSlug', 'agentBranch'],
     default: `Work the Linear issue {{issueId}}: "{{issueTitle}}".
 
-Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
+Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, meeting-source artifacts/transcript if this came from a meeting, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
 
 {{issueContext}}
 
@@ -147,7 +148,7 @@ How to work it:
     vars: ['issueId', 'issueTitle', 'issueContext', 'branchSlug', 'agentBranch'],
     default: `Continue working on {{issueId}}: "{{issueTitle}}".
 
-You worked on this earlier — pick up where you left off. The full CURRENT ticket context (description, every comment, and who else touched it) is included below so you don't need to re-fetch the Linear ticket:
+You worked on this earlier — pick up where you left off. The full CURRENT ticket context (description, meeting-source artifacts/transcript if this came from a meeting, every comment, and who else touched it) is included below so you don't need to re-fetch the Linear ticket:
 
 {{issueContext}}
 
@@ -2525,6 +2526,7 @@ app.get('/api/linear/:id/detail', requireAuth, async (req, res) => {
       comments: (it.comments.nodes || []).map((c) => ({ body: c.body, createdAt: c.createdAt, user: c.user ? c.user.displayName : 'someone' })),
       attachments: (it.attachments.nodes || []).map((a) => ({ url: a.url, title: a.title })),
       delegations: loadDelegations()[it.identifier] || [],
+      meetingContext: renderMeetingContextForIssue(it),
       pr,
     });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
