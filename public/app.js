@@ -2805,14 +2805,15 @@ $('agentChip').onclick = () => {
   ];
   if (agentEnabled('gemini') || cur.agent === 'gemini') rows.push({ ic: agentIcon('gemini'), label: 'Gemini', sel: cur.agent === 'gemini', desc: 'Run Gemini on the box', fn: () => setAgent('gemini') });
   if (agentEnabled('agy') || cur.agent === 'agy') rows.push({ ic: agentIcon('agy'), label: 'Antigravity', sel: cur.agent === 'agy', desc: 'Use local agy / AI Pro', fn: () => setAgent('agy') });
-  if (cur.id) {
-    for (const row of rows) {
-      const target = row.label === 'Antigravity' ? 'agy' : row.label.toLowerCase();
-      row.desc = cur.agent === target ? 'Current agent' : `Continue this transcript in ${row.label}`;
-      row.fn = () => (cur.agent === target ? openModelSheet() : continueWithAgent(target));
-    }
-    rows.push({ ic: '', label: 'Model settings', desc: 'Change options for the active agent', fn: () => openModelSheet() });
+  // Tapping the CURRENT agent always opens its model switcher (works in a new chat too, not just
+  // once the thread has an id). Tapping a DIFFERENT agent switches to it — continuing the transcript
+  // when one exists, otherwise just selecting it for the new chat (its original fn).
+  for (const row of rows) {
+    const target = row.label === 'Antigravity' ? 'agy' : row.label.toLowerCase();
+    if (cur.agent === target) { row.desc = 'Current agent · tap to switch model'; row.fn = () => openModelSheet(); }
+    else if (cur.id) { row.desc = `Continue this transcript in ${row.label}`; row.fn = () => continueWithAgent(target); }
   }
+  rows.push({ ic: '', label: 'Model settings', desc: `Switch model / effort for ${agentLabel(cur.agent)}`, fn: () => openModelSheet() });
   openSheet('Agent', rows);
 };
 
@@ -3131,9 +3132,9 @@ function openStatusSheet() {
     rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: openModelSheet });
     rows.push({ ic: '◆', label: 'Permissions', desc: sandboxLabel(cfg.sandbox || 'off'), fn: openApprovalsSheet });
   }
-  else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: () => {} });
-  else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: () => {} });
-  else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: () => {} });
+  else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: openModelSheet });
+  else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: openModelSheet });
+  else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: openModelSheet });
   if (cur.id) rows.push({
     ic: cur.agent === 'codex' ? '⌘' : '◆',
     label: `Continue in ${cur.agent === 'codex' ? 'Claude' : 'Codex'}`,
@@ -3212,7 +3213,7 @@ const CODEX_EFFORTS = [
 const CLAUDE_MODELS = [
   { id: 'opus', label: 'Opus 4.8', desc: 'Default — 1M context, most capable' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
-  { id: 'fable', label: 'Fable', desc: 'Latest Claude alias' },
+  { id: 'fable', label: 'Fable 5', desc: 'Newest — fast, fewer check-ins (heavier usage)' },
 ];
 const CLAUDE_EFFORTS = [
   { id: 'low', label: 'Low' },
