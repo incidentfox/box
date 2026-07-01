@@ -76,6 +76,88 @@ mkdirSync(SESS_ATT_DIR, { recursive: true });
 const sessionAttFile = (sessionId) => join(SESS_ATT_DIR, `${String(sessionId).replace(/[^\w.-]/g, '_')}.md`);
 const sessionAttOff = (sessionId) => join(SESS_ATT_DIR, `${String(sessionId).replace(/[^\w.-]/g, '_')}.off`);
 
+const LOCAL_PATH_ALLOWED_RE = /^(?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))(?:\/|$)/;
+const FILE_SEARCH_SKIP_DIRS = new Set(['.git', 'node_modules', '.next', 'dist', 'build', 'coverage', '.cache', '.turbo']);
+const FILE_SEARCH_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xlsx?|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac)$/i;
+function cleanPathToken(raw) {
+  let s = String(raw || '').trim().replace(/^['"`]+|['"`]+$/g, '');
+  while (/[.,;:!?]$/.test(s)) s = s.slice(0, -1);
+  return s;
+}
+function expandLocalPathToken(raw, cwd = DEFAULT_CWD) {
+  const s = cleanPathToken(raw);
+  if (!s) return '';
+  if (s === '~') return HOME;
+  if (s.startsWith('~/')) return resolve(join(HOME, s.slice(2)));
+  if (s.startsWith('/') && LOCAL_PATH_ALLOWED_RE.test(s)) return resolve(s);
+  if (/^\.\.?(?:\/|$)/.test(s) || s.includes('/') || FILE_SEARCH_EXT_RE.test(s)) return resolve(cwd || DEFAULT_CWD, s.replace(/^\.\//, ''));
+  return '';
+}
+function localFileResult(path) {
+  try {
+    const st = statSync(path);
+    return st.isFile() ? { found: true, path, size: st.size, mtime: st.mtimeMs } : null;
+  } catch {
+    return null;
+  }
+}
+function uniqueSearchRoots(cwd = DEFAULT_CWD, raw = '') {
+  const roots = [UPLOAD_DIR, STATE_DIR, cwd, DEFAULT_CWD, join(HOME, 'development'), '/tmp'];
+  const expanded = expandLocalPathToken(raw, cwd);
+  if (expanded && expanded.startsWith('/')) roots.unshift(dirname(expanded));
+  const out = [];
+  for (const root of roots) {
+    if (!root) continue;
+    let real = '';
+    try {
+      const st = statSync(root);
+      if (!st.isDirectory()) continue;
+      real = resolve(root);
+    } catch {
+      continue;
+    }
+    if (!out.includes(real)) out.push(real);
+  }
+  return out;
+}
+function findFileByBasename(name, roots) {
+  if (!name || name.length < 3 || !FILE_SEARCH_EXT_RE.test(name)) return null;
+  const lower = name.toLowerCase();
+  const deadline = Date.now() + 160;
+  let seen = 0;
+  for (const root of roots) {
+    const stack = [root];
+    while (stack.length && seen < 7000 && Date.now() < deadline) {
+      const dir = stack.pop();
+      let entries = [];
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (++seen > 7000 || Date.now() >= deadline) break;
+        const p = join(dir, e.name);
+        if (e.isFile() && (e.name === name || e.name.toLowerCase() === lower)) {
+          const hit = localFileResult(p);
+          if (hit) return hit;
+        } else if (e.isDirectory() && !FILE_SEARCH_SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) {
+          stack.push(p);
+        }
+      }
+    }
+  }
+  return null;
+}
+function resolveLocalFileReference(raw, cwd = DEFAULT_CWD) {
+  const token = cleanPathToken(raw);
+  if (!token) return { found: false };
+  const expanded = expandLocalPathToken(token, cwd);
+  if (expanded) {
+    const exact = localFileResult(expanded);
+    if (exact) return exact;
+  }
+  const base = basename(expanded || token);
+  const hit = findFileByBasename(base, uniqueSearchRoots(cwd, token));
+  return hit || { found: false };
+}
+
 // ---- config ---------------------------------------------------------------
 function loadEnvFile(path) {
   const out = {};
@@ -2891,6 +2973,23 @@ app.get('/api/fs', requireAuth, (req, res) => {
   } catch (e) { res.status(404).json({ error: String(e.message || e) }); }
 });
 
+app.post('/api/resolve-paths', requireAuth, (req, res) => {
+  const cwd = expandUserPath(req.body && req.body.cwd) || DEFAULT_CWD;
+  const paths = Array.isArray(req.body && req.body.paths) ? req.body.paths.slice(0, 80) : [];
+  const results = {};
+  for (const raw of paths) {
+    const token = cleanPathToken(raw);
+    if (!token) continue;
+    const expanded = expandLocalPathToken(token, cwd);
+    if (!expanded && !FILE_SEARCH_EXT_RE.test(token)) {
+      results[token] = { found: false };
+      continue;
+    }
+    results[token] = resolveLocalFileReference(token, cwd);
+  }
+  res.json({ results });
+});
+
 // image upload (for the camera/library attach, and pasted clipboard images on web)
 const imgExtForMime = (m = '') =>
   /png/.test(m) ? '.png' : /jpe?g/.test(m) ? '.jpg' : /gif/.test(m) ? '.gif' :
@@ -3144,6 +3243,20 @@ function scanRecentImages(sessionId) {
   } catch {}
   return results.slice(-8).reverse(); // newest first, cap at 8 batches
 }
+function agentDisplayName(agent) {
+  return agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : 'Claude';
+}
+function recentImagesForHistory(sessionId, hist) {
+  if (!hist || hist.agent === 'claude' || !hist.agent) return scanRecentImages(sessionId);
+  const out = [];
+  const IMG_RE = /\.(png|jpe?g|gif|webp|svg)$/i;
+  for (const m of [...(hist.messages || [])].reverse()) {
+    const paths = (m.parts || []).filter((p) => p && (p.t === 'image' || p.t === 'file') && IMG_RE.test(p.path || '') && existsSync(p.path)).map((p) => p.path);
+    if (paths.length) out.push({ paths, caption: '' });
+    if (out.length >= 8) break;
+  }
+  return out.reverse();
+}
 
 function triggerAttentionUpdate(s) {
   if (!s.sessionId || s._attnUpdating) return;
@@ -3163,10 +3276,11 @@ function triggerAttentionUpdate(s) {
   let existing = '';
   try { existing = readFileSync(attFile, 'utf8').trim(); } catch {}
   // Collect recent verification screenshots (SendUserFile image batches)
-  const recentImgs = scanRecentImages(s.sessionId);
+  const recentImgs = recentImagesForHistory(s.sessionId, hist);
+  const assistantName = agentDisplayName(hist.agent || s.agent || 'claude').toUpperCase();
   const turns = hist.messages.slice(-20).map((m) => {
     const text = m.parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ').slice(0, 2000);
-    return `[${m.role === 'user' ? 'USER' : 'CLAUDE'}]: ${text}`;
+    return `[${m.role === 'user' ? 'USER' : assistantName}]: ${text}`;
   }).join('\n\n---\n\n');
   const imgSection = recentImgs.length
     ? `RECENT VERIFICATION SCREENSHOTS (evidence of completed work — newest first):
@@ -3509,6 +3623,7 @@ function runCodexTurn(s, msg, resolve) {
       deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
+    if (s.sessionId && !s.canceled) triggerAttentionUpdate(s);
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };

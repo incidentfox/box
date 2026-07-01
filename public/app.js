@@ -390,6 +390,94 @@ function displayPath(path) {
   const s = String(path || '');
   return s === home ? '~' : s.startsWith(home + '/') ? '~' + s.slice(home.length) : s;
 }
+const pathResolveCache = new Map();
+let pathResolveQueue = new Map();
+let pathResolveTimer = null;
+const pathResolveKey = (path, cwd = (cur && cur.cwd) || '') => String(cwd || '') + '\n' + cleanPreviewPath(path).path;
+function cacheResolvedPath(raw, result, cwd = (cur && cur.cwd) || '') {
+  const token = cleanPreviewPath(raw).path;
+  if (!token) return;
+  const value = result && result.found && result.path ? { found: true, path: result.path } : { found: false };
+  pathResolveCache.set(pathResolveKey(token, cwd), value);
+  if (value.found) pathResolveCache.set(pathResolveKey(value.path, cwd), value);
+}
+function verifiedPath(raw) {
+  const token = cleanPreviewPath(raw).path;
+  if (!token) return null;
+  const cached = pathResolveCache.get(pathResolveKey(token));
+  if (cached) return cached.found ? cached.path : null;
+  queuePathResolve(token);
+  return null;
+}
+function queuePathResolve(raw) {
+  const token = cleanPreviewPath(raw).path;
+  if (!token || pathResolveCache.has(pathResolveKey(token))) return;
+  pathResolveQueue.set(pathResolveKey(token), token);
+  clearTimeout(pathResolveTimer);
+  pathResolveTimer = setTimeout(() => {
+    const cwd = (cur && cur.cwd) || '';
+    const refs = [...pathResolveQueue.values()];
+    pathResolveQueue = new Map();
+    resolvePathRefs(refs, cwd).then((changed) => { if (changed) rerenderResolvedMarkdown(); }).catch(() => {});
+  }, 80);
+}
+async function resolvePathRefs(refs, cwd = (cur && cur.cwd) || '') {
+  const paths = [...new Set((refs || []).map((r) => cleanPreviewPath(r).path).filter(Boolean))].slice(0, 80);
+  const missing = paths.filter((p) => !pathResolveCache.has(pathResolveKey(p, cwd)));
+  if (!missing.length) return false;
+  let data;
+  try {
+    data = await (await api('/api/resolve-paths', { method: 'POST', body: JSON.stringify({ cwd, paths: missing }) })).json();
+  } catch {
+    return false;
+  }
+  const results = data && data.results || {};
+  for (const p of missing) cacheResolvedPath(p, results[p], cwd);
+  return true;
+}
+function collectLocalPathRefs(text) {
+  const refs = [];
+  const add = (p) => { const token = cleanPreviewPath(p).path; if (token) refs.push(token); };
+  const s = String(text || '');
+  for (const m of s.matchAll(/\[([^\]]*)\]\(([^)\s]+)\)/g)) {
+    const href = decodePathMaybe(m[2].trim());
+    if (LOCAL_PATH_RE.test(expandBoxPath(href))) add(href);
+  }
+  for (const m of s.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+    const src = decodePathMaybe(m[1].trim());
+    if (LOCAL_PATH_RE.test(expandBoxPath(src))) add(src);
+  }
+  ABS_PATH_RE.lastIndex = 0;
+  for (const m of s.matchAll(ABS_PATH_RE)) add(m[2]);
+  if ((cur && cur.cwd)) {
+    REL_FILE_RE.lastIndex = 0;
+    for (const m of s.matchAll(REL_FILE_RE)) add(m[2]);
+  }
+  for (const m of s.matchAll(/`([^`]+)`/g)) {
+    const raw = m[1].trim();
+    if (LOCAL_PATH_RE.test(expandBoxPath(raw)) || REL_FILE_LONE_RE.test(raw)) add(raw);
+  }
+  return refs;
+}
+function messagePathRefs(m) {
+  if (!m || m.role === 'user') return [];
+  return (m.parts || []).filter((p) => p && p.t === 'text').flatMap((p) => collectLocalPathRefs(p.text || ''));
+}
+async function preResolveMessages(messages, seq) {
+  const refs = (messages || []).flatMap(messagePathRefs);
+  if (!refs.length) return true;
+  await resolvePathRefs(refs);
+  return seq == null || seq === chatRenderSeq;
+}
+function rerenderResolvedMarkdown() {
+  for (const el of document.querySelectorAll('.mdBlock')) {
+    if (el._rawMdText != null) el.innerHTML = md(el._rawMdText);
+  }
+  if (live && live.textEl && live.raw) {
+    live.textEl.innerHTML = md(live.raw);
+    maybeScroll();
+  }
+}
 // One renderer for any local file reference in chat. Images preview inline; PDFs get a compact
 // "PDF · name" card (tap → full viewer); everything else is a file chip. All open via the
 // delegated .pathPreview click handler → openFile() → media viewer.
@@ -412,13 +500,15 @@ function filePreviewChip(absPath, label) {
 function pathPreviewHtml(rawPath) {
   const { path, suffix } = cleanPreviewPath(rawPath);
   if (!path || path.length < 3) return esc(rawPath || '');
-  return filePreviewChip(expandBoxPath(path), displayPath(path)) + esc(suffix);
+  const hit = verifiedPath(path);
+  return (hit ? filePreviewChip(hit, displayPath(path)) : path) + suffix;
 }
 function localPathLinkHtml(label, href) {
   const path = expandBoxPath(decodePathMaybe(String(href || '')));
   if (!LOCAL_PATH_RE.test(path)) return null;
   const lbl = String(label || '').trim();
-  return filePreviewChip(path, lbl || (path.split('/').filter(Boolean).pop() || path));
+  const hit = verifiedPath(path);
+  return hit ? filePreviewChip(hit, lbl || (path.split('/').filter(Boolean).pop() || path)) : (lbl || esc(displayPath(path)));
 }
 // A lone backticked token that is just a file path → clickable chip instead of plain <code>.
 // Agents very often write paths in backticks (`output/report.pdf`); this makes those tappable.
@@ -426,8 +516,8 @@ function lonePathChip(raw) {
   const s = String(raw == null ? '' : raw).trim();
   if (!s || /\s/.test(s) || s.length < 3) return null;
   const exp = expandBoxPath(s);
-  if (LOCAL_PATH_RE.test(exp)) return filePreviewChip(exp, displayPath(s));
-  if (cur && cur.cwd && REL_FILE_LONE_RE.test(s)) return filePreviewChip(resolveRelPath(s), s);
+  if (LOCAL_PATH_RE.test(exp)) { const hit = verifiedPath(exp); return hit ? filePreviewChip(hit, displayPath(s)) : null; }
+  if (cur && cur.cwd && REL_FILE_LONE_RE.test(s)) { const hit = verifiedPath(s); return hit ? filePreviewChip(hit, s) : null; }
   return null;
 }
 function md(src) {
@@ -451,7 +541,9 @@ function md(src) {
       if (isHttp && !looksImg) return `<a href="${esc(src)}" target="_blank">${esc(alt || src)}</a>`;
       // A relative/placeholder path (path/to/x.png — no leading slash) never resolves → its label.
       if (!isHttp && !LOCAL_PATH_RE.test(src)) return alt ? esc(alt) : '';
-      const url = isHttp ? src : rawFileUrl(expandBoxPath(src));
+      const hit = isHttp ? src : verifiedPath(src);
+      if (!hit) return alt ? esc(alt) : esc(src);
+      const url = isHttp ? src : rawFileUrl(hit);
       // onerror: a missing/stale file should vanish, not leave a broken-image placeholder box.
       return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" onerror="this.style.display='none'">`;
     });
@@ -467,8 +559,8 @@ function md(src) {
     // Relative file mentions (output/report.pdf, report.csv) → resolve against the session cwd.
     // Gated on a known cwd; the boundary prefix keeps it out of HTML attrs / URLs built above.
     if (cur && cur.cwd) t = t.replace(REL_FILE_RE, (m, pre, rel) => {
-      const abs = resolveRelPath(rel);
-      return abs ? pre + filePreviewChip(abs, rel) : m;
+      const hit = verifiedPath(rel);
+      return hit ? pre + filePreviewChip(hit, rel) : pre + rel;
     });
     return t.replace(/(\d+)/g, (_, n) => { const c = codes[+n] ?? ''; const chip = lonePathChip(c); return chip != null ? chip : `<code>${safeEsc(c)}</code>`; });
   };
@@ -2005,7 +2097,12 @@ function buildHistElement(m) {
         if (paths.length) body.appendChild(userAttachmentGrid(paths));
       }
       rawText += (rawText ? '\n' : '') + text;
-      if (text) { const d = document.createElement('div'); d.innerHTML = m.role === 'user' ? esc(text) : md(text); body.appendChild(d); }
+      if (text) {
+        const d = document.createElement('div');
+        if (m.role === 'user') d.innerHTML = esc(text);
+        else { d.className = 'mdBlock'; d._rawMdText = text; d.innerHTML = md(text); }
+        body.appendChild(d);
+      }
     } else if (m.role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
       body.appendChild(userAttachmentGrid([p.path]));
     } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.detail || p.input, result: p.result }));
@@ -2035,6 +2132,7 @@ function nextPaint() {
 }
 async function renderHistoryBatch(messages, seq) {
   const list = messages || [];
+  if (!await preResolveMessages(list, seq)) return false;
   const batchSize = list.length > 140 ? 12 : 24;
   for (let i = 0; i < list.length; i += batchSize) {
     if (seq !== chatRenderSeq) return false;
@@ -2058,6 +2156,7 @@ async function loadEarlierMessages() {
     const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`)).json();
     loader.remove();
     if (!h.messages || !h.messages.length) { cur.hasMoreHistory = false; const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); return; }
+    await preResolveMessages(h.messages);
     // prepend in order (oldest first = same as h.messages array order)
     for (let i = h.messages.length - 1; i >= 0; i--) {
       container.insertBefore(buildHistElement(h.messages[i]), container.firstChild);
@@ -2324,7 +2423,7 @@ function startAssistant() {
   const body = document.createElement('div'); body.className = 'body';
   wrap.appendChild(body); $('messages').appendChild(wrap);
   const loading = document.createElement('div'); loading.className = 'loading'; loading.innerHTML = '<span></span><span></span><span></span>'; body.appendChild(loading);
-  const textEl = document.createElement('div'); textEl.className = 'cursor'; body.appendChild(textEl);
+  const textEl = document.createElement('div'); textEl.className = 'cursor mdBlock'; textEl._rawMdText = ''; body.appendChild(textEl);
   live = { body, raw: '', copyText: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
@@ -2388,14 +2487,14 @@ function onServer(o) {
   else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
   else if (o.type === 'tool') {
     if (!live) startAssistant(); clearLoading();
-    live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
+    live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
     const data = { input: o.detail }; (live.toolData = live.toolData || {})[o.id] = data;
     // Place the chip AFTER the text that preceded it. live.textEl holds the just-streamed
     // pre-tool text; inserting the chip BEFORE it pushed that text below the chip — so a
     // summary written right before an AskUserQuestion rendered UNDER the question card.
     const chip = toolChip(o.name, o.input || '', data);
     live.textEl.insertAdjacentElement('afterend', chip);
-    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; maybeScroll();
+    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; maybeScroll();
     // AskUserQuestion pauses the turn waiting for user input — clear the running/loading state so Send shows
     if (o.name === 'AskUserQuestion') { live.textEl.classList.remove('cursor'); running = false; killGhostIndicators(); refreshButton(); }
   }
@@ -2449,18 +2548,18 @@ function onSync(o) {
       // mid-turn reconnect doesn't jam every message into one block.
       for (const p of o.curParts) {
         if (p.t === 'tool') {
-          live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
+          live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
           (live.toolData = live.toolData || {})[p.id] = { input: p.detail, result: p.result };
           // chip AFTER the preceding text segment (not before live.textEl) — keep real order
           const chip = toolChip(p.name, p.input || '', live.toolData[p.id]);
           live.textEl.insertAdjacentElement('afterend', chip);
-          live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
-        } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.copyText += p.text; live.textEl.innerHTML = md(live.raw); }
+          live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
+        } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.copyText += p.text; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
       }
     } else {
       // legacy fallback (server snapshot without curParts)
-      (o.curTools || []).forEach((t) => { live.textEl.classList.remove('cursor'); live.body.insertBefore(toolChip(t.name, t.input || '', { input: t.detail, result: t.result }), live.textEl); const nt = document.createElement('div'); nt.className = 'cursor'; live.body.appendChild(nt); live.textEl = nt; });
-      if (o.curText) { clearLoading(); live.raw = o.curText; live.copyText = o.curText; live.textEl.innerHTML = md(live.raw); }
+      (o.curTools || []).forEach((t) => { live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.body.insertBefore(toolChip(t.name, t.input || '', { input: t.detail, result: t.result }), live.textEl); const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; live.body.appendChild(nt); live.textEl = nt; });
+      if (o.curText) { clearLoading(); live.raw = o.curText; live.copyText = o.curText; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
     }
     running = true;
     // If the in-flight turn is parked on an AskUserQuestion (tool emitted, no result yet),
@@ -2474,10 +2573,10 @@ function onSync(o) {
   renderQueue(o.queue); refreshButton(); scrollBottom();
 }
 let raf = 0;
-function queueRender() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (live) { live.textEl.innerHTML = md(live.raw); maybeScroll(); } }); }
+function queueRender() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (live) { live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); maybeScroll(); } }); }
 function finishTurn(o) {
   if (live) {
-    clearLoading(); live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
+    clearLoading(); live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
     if (o.canceled) { const s = document.createElement('div'); s.className = 'stoppedTag'; s.textContent = 'stopped'; live.body.appendChild(s); }
     const rawText = cleanCopyText(live.copyText || live.raw); const msgWrap = live.body.parentElement;
     if (msgWrap) {
@@ -2648,7 +2747,7 @@ function chooseWaiting(index, btn) {
 }
 function stopCurrent() {
   try { ws.send(JSON.stringify({ type: 'cancel', key: cur.key })); } catch {}
-  if (live) { clearLoading(); live.textEl.classList.remove('cursor'); if (live.raw) live.textEl.innerHTML = md(live.raw); }
+  if (live) { clearLoading(); live.textEl.classList.remove('cursor'); if (live.raw) { live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); } }
   // optimistic: if the server doesn't confirm within 1.5s, release the UI anyway
   setTimeout(() => { if (running) { running = false; refreshButton(); } }, 1500);
 }
@@ -3665,9 +3764,13 @@ function showMedia(path) {
     body.classList.add('astext'); body.textContent = 'Loading…';
     api('/api/fs?path=' + encodeURIComponent(path)).then((r) => r.json()).then((d) => {
       if (d.error) { body.textContent = d.error; return; }
-      if (d.tooBig) { body.textContent = `(too large to preview: ${d.size} bytes)`; return; }
+      if (d.tooBig) {
+        if (['html', 'htm'].includes(ext)) renderHtmlContent(body, '', path);
+        else body.textContent = `(too large to preview: ${d.size} bytes)`;
+        return;
+      }
       const content = d.content != null ? d.content : '(binary file)';
-      if (['html', 'htm'].includes(ext)) { renderHtmlContent(body, content); }
+      if (['html', 'htm'].includes(ext)) { renderHtmlContent(body, content, path); }
       else if (['md', 'markdown'].includes(ext)) { body.classList.remove('astext'); body.innerHTML = `<div class="mdview"></div>`; body.firstChild.innerHTML = md(content); }
       else {
         body.classList.remove('astext');
@@ -3680,13 +3783,13 @@ function showMedia(path) {
     }).catch(() => { body.textContent = '(cannot read)'; });
   }
 }
-function renderHtmlContent(body, content) {
+function renderHtmlContent(body, content, path = '') {
   body.classList.remove('astext');
   body.innerHTML = `<div class="htmlbar"><button class="htmltab on">Preview</button><button class="htmltab">Source</button></div><div class="htmlhost"></div>`;
   const host = body.querySelector('.htmlhost');
   const tabs = body.querySelectorAll('.htmltab');
-  const preview = () => { host.innerHTML = ''; const f = document.createElement('iframe'); f.className = 'htmlframe'; f.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals'); f.srcdoc = content; host.appendChild(f); };
-  const source = () => { host.innerHTML = '<pre class="hl"><code class="language-xml"></code></pre>'; const c = host.querySelector('code'); c.textContent = content; if (window.hljs) { try { hljs.highlightElement(c); } catch {} } };
+  const preview = () => { host.innerHTML = ''; const f = document.createElement('iframe'); f.className = 'htmlframe'; f.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals'); if (path) f.src = rawUrl(path); else f.srcdoc = content; host.appendChild(f); };
+  const source = () => { host.innerHTML = '<pre class="hl"><code class="language-xml"></code></pre>'; const c = host.querySelector('code'); c.textContent = content || '(source too large to preview)'; if (window.hljs) { try { hljs.highlightElement(c); } catch {} } };
   tabs[0].onclick = () => { tabs[0].classList.add('on'); tabs[1].classList.remove('on'); preview(); };
   tabs[1].onclick = () => { tabs[1].classList.add('on'); tabs[0].classList.remove('on'); source(); };
   preview();
