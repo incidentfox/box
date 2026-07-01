@@ -525,6 +525,8 @@ function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); n
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
 let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
 let chatRenderSeq = 0;
+let sessionRefreshTimer = null;
+let lastSessionFetchAt = 0;
 const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
@@ -534,10 +536,22 @@ async function openSessions(filter = 'all') { navTo({ view: 'sessions', filter }
 async function fetchSessions(filter) {
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + curFilter)).json();
+  lastSessionFetchAt = Date.now();
   defaultCwd = d.defaultCwd; cur.cwd = cur.cwd || d.defaultCwd;
   allSessions = d.sessions || [];
   sessionCounts = d.counts || { all: allSessions.length };
-  renderTabs(); renderSessionList(); paintIcons($('sessions'));
+  renderTabs(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
+}
+function refreshSessionsSoon(delay = 350) {
+  if (!TOKEN) return;
+  clearTimeout(sessionRefreshTimer);
+  sessionRefreshTimer = setTimeout(() => {
+    sessionRefreshTimer = null;
+    fetchSessions(curFilter || 'all').catch(() => {});
+  }, delay);
+}
+function sessionListIsVisible() {
+  return document.body.dataset.view === 'sessions' || (isDesktopShell() && document.body.dataset.view !== 'login');
 }
 function renderTabs() {
   const c = sessionCounts; const wrap = $('tabs'); wrap.innerHTML = '';
@@ -589,6 +603,13 @@ function relTime(ms) {
   if (s < 86400) return Math.floor(s / 3600) + 'h'; if (s < 7 * 86400) return Math.floor(s / 86400) + 'd';
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
+function refreshSessionListTimes() {
+  const list = $('sessionList'); if (!list) return;
+  for (const el of list.querySelectorAll('[data-rel-time]')) {
+    const ms = Number(el.dataset.relTime || 0);
+    el.textContent = relTime(ms);
+  }
+}
 // In the Archived view, sort/group/label by WHEN it was archived (so a chat you just
 // archived shows up at the very top under "Today"), falling back to last-activity for
 // legacy archives. Everywhere else, last-activity time.
@@ -624,6 +645,7 @@ function sessionCard(s) {
   const sub = s.parentId ? `Fork of ${s.parentTitle || s.parentId.slice(0, 8)}` : (s.note ? s.note : shortCwd(s.cwd));
   const label = STATUS_LABEL[s.status];
   const arch = s.archived;
+  const when = cardTime(s) || 0;
   el.innerHTML =
     `<div class="sActions">
        <button class="sAct edit" type="button"><span class="sActIc">✎</span>Edit</button>
@@ -633,7 +655,7 @@ function sessionCard(s) {
        <div class="srow">
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
-	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
+	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time" data-rel-time="${when}">${relTime(when)}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
            <div class="sl"></div>
          </div>
        </div>
@@ -2351,7 +2373,7 @@ function onServer(o) {
   // hadHistory=false, renders the user bubble from turn_start, THEN learns its id here. If
   // the WS later reconnects mid-first-turn, onSync re-adds the user bubble (guarded only by
   // !cur.hadHistory) → the message renders twice. Marking it now suppresses that re-add.
-  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; setChatTitle(o.title); } return; }
+  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; setChatTitle(o.title); } refreshSessionsSoon(); return; }
   if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); if (o.cwd) cur.cwd = o.cwd; refreshAgentChip(); return; }
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
@@ -2360,8 +2382,8 @@ function onServer(o) {
   if (o.type === 'queue') return renderQueue(o.queue);
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
   if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
-  if (o.type === 'turn_start') return beginTurn(o.text, o.images);
-  if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); return; }
+  if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images); }
+  if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); return; }
   if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
   else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
   else if (o.type === 'tool') {
@@ -2474,6 +2496,7 @@ function finishTurn(o) {
   running = false; refreshButton();
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
   if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); setChatTitle(cur.title); }
+  refreshSessionsSoon();
   maybeScroll();
 }
 
@@ -4366,6 +4389,15 @@ fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
 }).catch(() => {});
 paintIcons();
 applySidebarCollapsed();
+setInterval(() => {
+  refreshSessionListTimes();
+  if (!document.hidden && TOKEN && sessionListIsVisible() && Date.now() - lastSessionFetchAt > 55000) refreshSessionsSoon(0);
+}, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  refreshSessionListTimes();
+  refreshSessionsSoon(100);
+});
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 if (TOKEN) { navTo({ view: 'sessions', filter: 'all' }, { replace: true }); loadConfig(); openSessions().catch(() => show('login')); }
 else { navTo({ view: 'login' }, { replace: true }); show('login'); }
