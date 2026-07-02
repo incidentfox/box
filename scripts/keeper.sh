@@ -47,11 +47,20 @@ fi
 # might be injected into the environment — otherwise remote-control is disallowed.
 unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_OAUTH_TOKEN ANTHROPIC_API_KEY
 
+# A process's cwd, portably: /proc on Linux, lsof on macOS/BSD (no /proc there).
+proc_cwd() {
+  local p="$1"
+  if [ -r "/proc/$p/cwd" ]; then
+    readlink "/proc/$p/cwd" 2>/dev/null
+  else
+    lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+  fi
+}
 server_pids() {
   local p cwd
   pgrep -f "node server/index.mjs" 2>/dev/null | while read -r p; do
     [ -n "$p" ] || continue
-    cwd="$(readlink "/proc/$p/cwd" 2>/dev/null || true)"
+    cwd="$(proc_cwd "$p")"
     [ "$cwd" = "$APP_DIR" ] && echo "$p"
   done
 }

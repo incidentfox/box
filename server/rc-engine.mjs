@@ -23,6 +23,48 @@ const require = createRequire(import.meta.url);
 const pty = require('node-pty');
 const { execSync } = require('child_process');
 
+// ── Cross-platform process helpers ───────────────────────────────────────────
+// Box runs on both Linux servers and macOS. A few of the process inspections below
+// rely on tools whose flags/paths differ across platforms; these wrappers pick the
+// portable path so behaviour is identical on both.
+//
+// `pgrep -a` (print the full command line) is GNU/procps-only — macOS pgrep prints just
+// the PID — so get the PID list with portable `pgrep -f`, then read each command line via
+// portable `ps -o command=`. Returns the same "PID<space>command\n…" text the old
+// `pgrep -af` produced, so every caller's line-parsing is unchanged.
+export function pgrepFull(pattern) {
+  const q = `'${String(pattern).replace(/'/g, `'\\''`)}'`;
+  let pids = [];
+  try {
+    pids = execSync(`pgrep -f -- ${q} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 })
+      .split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch {}
+  const lines = [];
+  for (const pid of pids) {
+    let cmd = '';
+    try { cmd = execSync(`ps -p ${Number(pid)} -o command= 2>/dev/null`, { encoding: 'utf8', timeout: 2000 }).trim(); } catch {}
+    if (cmd) lines.push(`${pid} ${cmd}`);
+  }
+  return lines.join('\n');
+}
+// A process's current working directory, portably: /proc on Linux, `lsof` on macOS/BSD
+// (which have no /proc). Returns '' if it can't be determined.
+export function pidCwd(pid) {
+  try { return fs.readlinkSync(`/proc/${pid}/cwd`); } catch {}
+  try {
+    const out = execSync(`lsof -a -p ${Number(pid)} -d cwd -Fn 2>/dev/null`, { encoding: 'utf8', timeout: 2000 });
+    const n = out.split('\n').find((l) => l.startsWith('n'));
+    if (n) return n.slice(1);
+  } catch {}
+  return '';
+}
+// Is any process holding this socket/file open? `fuser` is Linux-only; `lsof` covers macOS/BSD.
+function fileInUse(p) {
+  try { execSync(`fuser ${JSON.stringify(p)} 2>/dev/null`, { timeout: 2000 }); return true; } catch {}
+  try { return !!execSync(`lsof -t -- ${JSON.stringify(p)} 2>/dev/null || true`, { encoding: 'utf8', timeout: 2000 }).trim(); } catch {}
+  return false;
+}
+
 const HOME = homedir();
 const CWD = process.env.CC_WORKSPACE || HOME;
 const PROJECTS_BASE = path.join(HOME, '.claude', 'projects');
@@ -203,7 +245,7 @@ export class RCEngine extends EventEmitter {
         if (!sm) return null;
         const sock = sm[1];
         if (!fs.existsSync(sock)) return null;
-        try { execSync(`fuser ${sock} 2>/dev/null`, { timeout: 2000 }); return sock; } catch { return null; }
+        return fileInUse(sock) ? sock : null;
       } catch { return null; }
     };
 
@@ -212,10 +254,7 @@ export class RCEngine extends EventEmitter {
     // the interactive `cnew` wrapper for a fresh RC session). The filters below still
     // require a real `claude --remote-control` process, so a bare id match can't false-hit.
     try {
-      const out = execSync(
-        `pgrep -af -- '${sessionId}' 2>/dev/null || true`,
-        { encoding: 'utf8', timeout: 2000 },
-      );
+      const out = pgrepFull(sessionId);
       for (const line of out.split('\n')) {
         const m = line.match(/^(\d+)\s+(.*)$/);
         if (!m) continue;
@@ -236,14 +275,15 @@ export class RCEngine extends EventEmitter {
     // share a cwd (see argvOnly above) — never use it to pick a socket to inject into.
     if (argvOnly) return null;
     try {
-      const all = execSync(`pgrep -af -- '--remote-control' 2>/dev/null || true`, { encoding: 'utf8', timeout: 2000 });
+      const all = pgrepFull('--remote-control');
       for (const line of all.split('\n')) {
         const m = line.match(/^(\d+)\s+(.*)$/);
         if (!m) continue;
         const [, pid, cmd] = m;
         if (!/\bclaude\b/.test(cmd) || /^dtach\b/.test(cmd) || /\bbash -c\b/.test(cmd)) continue;
         try {
-          const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+          const cwd = pidCwd(pid);
+          if (!cwd) continue;
           const proj = projectDirFor(cwd);
           const jf = path.join(proj, sessionId + '.jsonl');
           const st = fs.statSync(jf);
