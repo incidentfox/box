@@ -45,6 +45,14 @@ BOX_PR_EVENT_EMITTER=/home/factory/development/software-factory/harness/emit-eve
 BOX_PR_DRY_RUN=1
 ```
 
+The installed systemd service also reads optional local overrides from
+`~/.config/box/pr-autopilot.env`. Use that file for box-specific trust policy,
+for example:
+
+```bash
+BOX_PR_TRUSTED_AUTHORS=alice,bob
+```
+
 Add a `no-automerge` or `do-not-merge` label to keep the bot from merging a PR.
 Draft PRs are skipped. Fork PRs are skipped unless the PR author or head repo
 owner is listed in `BOX_PR_TRUSTED_AUTHORS`, or `BOX_PR_PROCESS_UNTRUSTED_FORKS=1`

@@ -7,6 +7,7 @@ const root = resolve(process.argv[2] || process.cwd());
 const serviceDir = join(homedir(), '.config', 'systemd', 'user');
 const servicePath = join(serviceDir, 'box-pr-autopilot.service');
 const timerPath = join(serviceDir, 'box-pr-autopilot.timer');
+const envPath = join(homedir(), '.config', 'box', 'pr-autopilot.env');
 const node = process.execPath;
 
 mkdirSync(serviceDir, { recursive: true });
@@ -19,6 +20,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=${root}
 TimeoutStartSec=30min
+EnvironmentFile=-${envPath}
 Environment=BOX_PR_REPO=incidentfox/box
 Environment=BOX_PR_AUTO_MERGE=1
 Environment=BOX_PR_REAL_MODEL=trusted
