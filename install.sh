@@ -253,7 +253,7 @@ echo
 # ---- Google CLI power-up ----------------------------------------------------
 bold "4) Installing Google CLI power-up (optional)"
 mkdir -p "$HOME/.local/bin"
-chmod +x "$APP_DIR/harness/google" "$APP_DIR/harness/google-auth.mjs" 2>/dev/null || true
+chmod +x "$APP_DIR/harness/google" "$APP_DIR/harness/google.mjs" "$APP_DIR/harness/google-auth.mjs" 2>/dev/null || true
 ln -sfn "$APP_DIR/harness/google" "$HOME/.local/bin/google"
 ok "google CLI → ~/.local/bin/google"
 case ":$PATH:" in *":$HOME/.local/bin:"*) :;; *) info "add ~/.local/bin to your PATH to use 'google' directly";; esac
