@@ -7,6 +7,8 @@
   "license": "GPL-3.0-or-later",
   "scripts": {
     "start": "node server/index.mjs",
+    "smoke:chat": "node scripts/smoke-chat.mjs",
+    "pr:autopilot": "node scripts/pr-autopilot.mjs --once",
     "test:linear-lite": "node lib/linear-lite/test.mjs",
     "test:codex-context": "node server/codex-context.test.mjs",
     "test:codex-exec": "node server/codex-exec-engine.test.mjs",

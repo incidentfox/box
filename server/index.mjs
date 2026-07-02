@@ -168,7 +168,7 @@ function loadEnvFile(path) {
   }
   return out;
 }
-const localEnv = loadEnvFile(join(ROOT, '.env'));
+const localEnv = process.env.BOX_IGNORE_LOCAL_ENV === '1' ? {} : loadEnvFile(join(ROOT, '.env'));
 // Optional: point EXTRA_ENV_FILE at a shared secrets file (e.g. one your harness
 // already maintains) to source keys from there instead of duplicating them in .env.
 const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FILE || '');
@@ -4015,9 +4015,11 @@ server.listen(PORT, () => {
 });
 
 // one-time: learn the real skill/command list from a claude init (kill before it answers)
-if (!META.skills || !META.skills.length) {
+if (process.env.BOX_SKIP_META_PROBE !== '1' && (!META.skills || !META.skills.length)) {
   try {
+    execSync('command -v claude', { stdio: 'ignore' });
     const p = spawn('claude', ['-p', 'hi', '--output-format', 'stream-json', '--verbose'], { cwd: DEFAULT_CWD, env: childEnv() });
+    p.on('error', () => {});
     const rl2 = createInterface({ input: p.stdout });
     rl2.on('line', (line) => { let o; try { o = JSON.parse(line); } catch { return; } if (o.type === 'system' && o.subtype === 'init') { captureMeta(o); try { p.kill('SIGTERM'); } catch {} } });
     setTimeout(() => { try { p.kill('SIGTERM'); } catch {} }, 20000);
