@@ -28,12 +28,14 @@ Free tier only; this costs nothing.
    (Leave it in "Testing" — that's fine for personal use.)
 4. **Create the client:** APIs & Services → Credentials → Create credentials → **OAuth client
    ID** → Application type **Desktop app** → Create. Download the JSON (the `client_secret_*.json`).
-5. On the machine running Box, in the repo dir, run:
+5. On the machine running Box, in the repo dir, run one of:
+   `./install.sh --google-client-json <path-to-the-downloaded-json>`
+   if Box is not installed yet, or:
    `node harness/google-auth.mjs --from <path-to-the-downloaded-json>`
-   It prints a URL. Open it, approve access for my account, then it redirects to
+   if Box is already installed. It prints a URL. Open it, approve access for my account, then it redirects to
    `http://localhost/?code=...` (the page won't load — that's expected). Copy the `code` from
    the address bar and paste it back into the prompt.
-6. Verify: `node harness/google gmail list "is:unread" 5` should list my recent unread mail.
+6. Verify: `google status`, then `google gmail list "is:unread" 5` should list my recent unread mail.
    Tell me it's working, and that agents can now use `google gmail|cal|drive ...`.
 
 If `harness/google-auth.mjs` says "no refresh_token", revoke prior access at
@@ -49,6 +51,7 @@ google gmail list "is:unread newer_than:2d" 10     # triage
 google gmail send you@example.com "done" "PR is up: ..."   # email yourself a result
 google cal list 5                                   # what's next
 google drive list "name contains 'invoice'" 20      # find a file
+google status                                       # check whether OAuth is configured
 ```
 
 Tell your agents these exist (it's already noted in `harness/CLAUDE.md`). Creds live in

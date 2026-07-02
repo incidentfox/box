@@ -6,6 +6,7 @@
 // (client id/secret + refresh token). See concierge/50-power-ups.md for the full walkthrough.
 //
 // Usage (the account arg is OPTIONAL — omit it to use the default ~/.config/box/google.env):
+//   google status
 //   google token
 //   google api <METHOD> <path-or-url> [jsonBody]
 //   google gmail list "<query>" [max]
@@ -30,7 +31,7 @@ import os from "node:os";
 import path from "node:path";
 
 const CFG_DIR = process.env.BOX_GOOGLE_DIR || path.join(os.homedir(), ".config", "box");
-const GROUPS = new Set(["token", "api", "gmail", "cal", "drive"]);
+const GROUPS = new Set(["status", "token", "api", "gmail", "cal", "drive"]);
 
 function die(msg, code = 1) { process.stderr.write(msg + "\n"); process.exit(code); }
 
@@ -46,9 +47,13 @@ function parseEnv(file) {
   return out;
 }
 
-function loadAccount(name) {
+function accountFile(name) {
   const fname = (!name || name === "default" || name === "me") ? "google.env" : `google-${name}.env`;
-  const file = path.join(CFG_DIR, fname);
+  return path.join(CFG_DIR, fname);
+}
+
+function loadAccount(name) {
+  const file = accountFile(name);
   if (!fs.existsSync(file)) die(`Credentials file not found: ${file}\nRun: node harness/google-auth.mjs   (see concierge/50-power-ups.md)`);
   const env = parseEnv(file);
   for (const k of ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_OAUTH_REFRESH_TOKEN"])
@@ -57,7 +62,7 @@ function loadAccount(name) {
 }
 
 let _tokenCache = null;
-async function accessToken(env) {
+async function accessToken(env, { dieOnError = true } = {}) {
   if (_tokenCache) return _tokenCache;
   const body = new URLSearchParams({
     client_id: env.GOOGLE_OAUTH_CLIENT_ID,
@@ -67,7 +72,11 @@ async function accessToken(env) {
   });
   const r = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body });
   const j = await r.json();
-  if (!j.access_token) die(`Token refresh failed: ${JSON.stringify(j)}`);
+  if (!j.access_token) {
+    const msg = `Token refresh failed: ${JSON.stringify(j)}`;
+    if (dieOnError) die(msg);
+    throw new Error(msg);
+  }
   _tokenCache = j.access_token;
   return _tokenCache;
 }
@@ -108,6 +117,30 @@ function showHelp() {
   out(fs.readFileSync(new URL(import.meta.url)).toString().split("\n").filter((l) => l.startsWith("//")).map((l) => l.slice(3)).join("\n"));
 }
 
+async function showStatus(account) {
+  const file = accountFile(account);
+  out("google CLI: installed");
+  out(`config dir: ${CFG_DIR}`);
+  out(`credentials: ${file}`);
+  if (!fs.existsSync(file)) {
+    out("status: not authorized");
+    out("next: node harness/google-auth.mjs --from /path/client_secret.json");
+    return;
+  }
+
+  const env = parseEnv(file);
+  out(`account: ${env.GOOGLE_ACCOUNT_EMAIL || account || "default"}`);
+  out(`scopes: ${env.GOOGLE_OAUTH_SCOPES || "(not recorded)"}`);
+  try {
+    await accessToken(env, { dieOnError: false });
+    out("token refresh: OK");
+    out("ready: google gmail list \"is:unread\" 5");
+  } catch (e) {
+    out(`token refresh: FAILED (${String(e?.message || e)})`);
+    process.exitCode = 1;
+  }
+}
+
 async function main() {
   let [a0, ...restAll] = process.argv.slice(2);
   if (!a0 || a0 === "-h" || a0 === "--help" || a0 === "help") { showHelp(); process.exit(0); }
@@ -115,6 +148,7 @@ async function main() {
   let account, group, rest;
   if (GROUPS.has(a0)) { account = "default"; group = a0; rest = restAll; }
   else { account = a0; group = restAll[0]; rest = restAll.slice(1); }
+  if (group === "status") { await showStatus(account); return; }
   const env = loadAccount(account);
 
   switch (group) {

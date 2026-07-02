@@ -128,6 +128,11 @@ sets everything up.
 
 `--yes` (non-interactive), `--no-harness`, `--no-cron`, `--no-start`, `--port N`. Idempotent —
 safe to re-run.
+
+Google power-up flags: `--with-google` starts the Gmail/Calendar/Drive OAuth flow during
+install, and `--google-client-json /path/client_secret.json` uses a downloaded Google
+OAuth desktop-client JSON. Add `--google-account work` to save a named account as
+`~/.config/box/google-work.env`.
 </details>
 
 ## Requirements
@@ -190,8 +195,11 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
 
 - **Google access** — the bundled **`google`** CLI lets agents read & send your **Gmail**,
   check your **Calendar**, and read your **Drive**. One-time setup:
-  `node harness/google-auth.mjs` (full walkthrough, incl. the Google Cloud part for a
-  computer-use agent, in [`concierge/50-power-ups.md`](concierge/50-power-ups.md)).
+  `./install.sh --with-google` or
+  `./install.sh --google-client-json /path/client_secret.json`. If Box is already installed,
+  run `node harness/google-auth.mjs --from /path/client_secret.json` and verify with
+  `google status` (full walkthrough, incl. the Google Cloud part for a computer-use agent,
+  in [`concierge/50-power-ups.md`](concierge/50-power-ups.md)).
 - **Email yourself** — once Google access is on, a long autonomous run can `google gmail send
   you@example.com "done" "..."` to ping you when it finishes.
 - **A "brain"** — point `BRAIN_DIR` at a notes/markdown folder; agents read it for context,
