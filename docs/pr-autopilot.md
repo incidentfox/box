@@ -38,6 +38,7 @@ BOX_PR_REPO=incidentfox/box
 BOX_PR_AUTO_MERGE=1
 BOX_PR_REAL_MODEL=trusted       # trusted | always | never
 BOX_PR_TRUSTED_AUTHORS=alice,bob
+BOX_PR_PROCESS_UNTRUSTED_FORKS=0
 BOX_PR_REVIEW_MODEL=gpt-4.1-mini
 BOX_PR_SMOKE_MODEL=gpt-4.1-mini
 BOX_PR_EVENT_EMITTER=/home/factory/development/software-factory/harness/emit-event.mjs
@@ -45,7 +46,9 @@ BOX_PR_DRY_RUN=1
 ```
 
 Add a `no-automerge` or `do-not-merge` label to keep the bot from merging a PR.
-Draft PRs are skipped.
+Draft PRs are skipped. Fork PRs are skipped unless the PR author or head repo
+owner is listed in `BOX_PR_TRUSTED_AUTHORS`, or `BOX_PR_PROCESS_UNTRUSTED_FORKS=1`
+is set.
 
 ## Install On A Box
 

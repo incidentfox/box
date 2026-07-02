@@ -24,7 +24,7 @@ Environment=BOX_PR_AUTO_MERGE=1
 Environment=BOX_PR_REAL_MODEL=trusted
 Environment=BOX_PR_REVIEW_MODEL=gpt-4.1-mini
 Environment=BOX_PR_SMOKE_MODEL=gpt-4.1-mini
-ExecStart=/usr/bin/env bash -lc 'if [ -f /run/software-factory/secrets.env ]; then set -a; . /run/software-factory/secrets.env; set +a; fi; ${node} scripts/pr-autopilot.mjs --once'
+ExecStart=${node} scripts/pr-autopilot.mjs --once
 `, 'utf8');
 
 writeFileSync(timerPath, `[Unit]

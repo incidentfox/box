@@ -32,6 +32,7 @@ const SMOKE_MODEL = v['smoke-model'] || process.env.BOX_PR_SMOKE_MODEL || REVIEW
 const TRUSTED_AUTHORS = new Set(String(v['trusted-authors'] || process.env.BOX_PR_TRUSTED_AUTHORS || '').split(',').map((s) => s.trim()).filter(Boolean));
 const EVENT_EMITTER = process.env.BOX_PR_EVENT_EMITTER || '/home/factory/development/software-factory/harness/emit-event.mjs';
 const DRY_RUN = !!v['dry-run'] || process.env.BOX_PR_DRY_RUN === '1';
+const PROCESS_UNTRUSTED_FORKS = process.env.BOX_PR_PROCESS_UNTRUSTED_FORKS === '1';
 const LOOP = !v.once;
 const INTERVAL_MS = Number(v.interval || process.env.BOX_PR_INTERVAL_MS || 180000);
 
@@ -100,6 +101,13 @@ function shouldUseRealModel(pr, repo) {
   const owner = repo.split('/')[0];
   const headOwner = pr.headRepositoryOwner && pr.headRepositoryOwner.login;
   const author = pr.author && pr.author.login;
+  return isTrustedPr(pr, repo, { owner, headOwner, author });
+}
+
+function isTrustedPr(pr, repo, known = {}) {
+  const owner = known.owner || repo.split('/')[0];
+  const headOwner = known.headOwner || (pr.headRepositoryOwner && pr.headRepositoryOwner.login);
+  const author = known.author || (pr.author && pr.author.login);
   return !pr.isCrossRepository || headOwner === owner || TRUSTED_AUTHORS.has(author) || TRUSTED_AUTHORS.has(headOwner);
 }
 
@@ -207,6 +215,13 @@ async function passOnce() {
     const labels = prLabels(pr);
     if (pr.isDraft || labels.has('no-automerge') || labels.has('do-not-merge')) {
       state.prs[key] = { skipped: true, reason: pr.isDraft ? 'draft' : 'label', at: new Date().toISOString() };
+      saveState(state);
+      continue;
+    }
+    if (!PROCESS_UNTRUSTED_FORKS && !isTrustedPr(pr, repo)) {
+      status(repo, pr.headRefOid, 'success', 'Skipped untrusted fork; add author to BOX_PR_TRUSTED_AUTHORS to process', 'box/local-autopilot', pr.url);
+      comment(repo, pr, 'Box autopilot skipped this fork PR because the author/repository owner is not in `BOX_PR_TRUSTED_AUTHORS`. This avoids running untrusted PR code on the box. Add the author to the trusted list or run the checks manually to process it.');
+      state.prs[key] = { skipped: true, reason: 'untrusted-fork', at: new Date().toISOString() };
       saveState(state);
       continue;
     }
