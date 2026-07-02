@@ -17,7 +17,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
 import multer from 'multer';
-import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases } from './rc-engine.mjs';
+import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd } from './rc-engine.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
@@ -483,8 +483,7 @@ function reconcileLiveBridges() {
   // so an actively used session is never reaped.
   let archived; try { archived = loadArchived(); } catch { archived = new Set(); }
   let reaped = 0;
-  let out = '';
-  try { out = execSync(`pgrep -af -- '--remote-control' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
+  const out = pgrepFull('--remote-control');
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
     const sp = line.indexOf(' ');
@@ -505,8 +504,7 @@ function reconcileLiveBridges() {
       continue;
     }
     const rcm = cmd.match(/--remote-control\s+(\S+)/);
-    let cwd = '';
-    try { cwd = execSync(`readlink /proc/${pid}/cwd 2>/dev/null || true`, { encoding: 'utf8', timeout: 1000 }).trim(); } catch {}
+    const cwd = pidCwd(pid);
     next.set(sessionId, { rcName: rcm ? rcm[1] : null, cwd: cwd || DEFAULT_CWD, pid });
   }
   LIVE_BRIDGES.clear();
@@ -547,7 +545,7 @@ function killSessionBridge(id) {
   // same); the registry row is already gone, so nothing relaunches it.
   const pids = [];
   try {
-    const out = execSync(`pgrep -af ${JSON.stringify(id)} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 });
+    const out = pgrepFull(id);
     for (const line of out.split('\n')) {
       if (!line.trim() || !/--remote-control(\s|$)/.test(line)) continue;
       const pid = parseInt(line, 10);
@@ -1547,8 +1545,7 @@ function liveCodexSessionIds(sessions) {
   const now = Date.now();
   if (now - CODEX_LIVE_CACHE.ts < 2500) return new Set(CODEX_LIVE_CACHE.ids);
   const ids = new Set();
-  let procText = '';
-  try { procText = execSync(`pgrep -af 'codex exec' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
+  const procText = pgrepFull('codex exec');
   for (const s of sessions || []) {
     if (!s || !s.id) continue;
     if (procText.includes(s.id)) { ids.add(s.id); continue; }

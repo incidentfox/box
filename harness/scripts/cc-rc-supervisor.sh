@@ -41,7 +41,15 @@ socket_live(){
 }
 
 # ISO8601 ("2026-06-02T14:52:56.569Z") at start of a debug line -> epoch seconds.
-ts_epoch(){ date -d "$1" +%s 2>/dev/null || echo 0; }
+# Portable: GNU coreutils `date -d` on Linux; BSD/macOS `date -j -f` (strip frac secs + trailing Z).
+ts_epoch(){
+  if date --version >/dev/null 2>&1; then
+    date -d "$1" +%s 2>/dev/null || echo 0
+  else
+    local t="${1%%.*}"; t="${t%Z}"
+    date -j -u -f "%Y-%m-%dT%H:%M:%S" "$t" +%s 2>/dev/null || echo 0
+  fi
+}
 
 # Return 0 (stale) only when the debug log's latest RC transport event is a
 # disconnect/error AND it has been down longer than STALE_SECS. Any uncertainty
@@ -72,7 +80,7 @@ kill_session(){
 launch_session(){
   local name="$1" dir="$2" id="$3" sock="$4" dbg="$DBGDIR/${name}.log"
   # keep debug logs bounded
-  if [ -f "$dbg" ] && [ "$(stat -c%s "$dbg" 2>/dev/null || echo 0)" -gt "$DBG_MAX_BYTES" ]; then
+  if [ -f "$dbg" ] && [ "$(stat -c%s "$dbg" 2>/dev/null || stat -f%z "$dbg" 2>/dev/null || echo 0)" -gt "$DBG_MAX_BYTES" ]; then
     tail -n 3000 "$dbg" > "$dbg.tmp" 2>/dev/null && mv "$dbg.tmp" "$dbg"
   fi
   # ensure the session jsonl is resolvable from this dir's project folder (resume looks there)
@@ -119,7 +127,7 @@ while IFS=$'\t' read -r name dir id flag created; do
       ''|*[!0-9]*)
         # transition-era row with no createdEpoch — fall back to the session's jsonl mtime
         jf=$(ls "$HOME/.claude/projects"/*/"$id.jsonl" 2>/dev/null | head -1)
-        if [ -n "$jf" ]; then age=$(( now - $(stat -c %Y "$jf" 2>/dev/null || echo "$now") )); else age=0; fi
+        if [ -n "$jf" ]; then age=$(( now - $(stat -c %Y "$jf" 2>/dev/null || stat -f %m "$jf" 2>/dev/null || echo "$now") )); else age=0; fi
         ;;
       *) age=$(( now - created ));;
     esac
