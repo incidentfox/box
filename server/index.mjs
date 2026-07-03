@@ -25,6 +25,7 @@ import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
+import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
 import { renderMeetingContextForIssue } from './meeting-context.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -34,6 +35,7 @@ const rcEngine = new RCEngine();
 const codexEngine = new CodexExecEngine();
 const geminiEngine = new GeminiExecEngine();
 const agyEngine = new AgyExecEngine();
+const macEngine = new MacExecEngine();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -180,7 +182,7 @@ const PORT = Number(cfg('PORT', 7321));
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
 const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
 const APP_SETTINGS_FILE = join(STATE_DIR, 'app-settings.json');
-const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy']);
+const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy', 'mac']);
 const VALID_CODEX_SANDBOX = new Set(['off', 'read-only', 'workspace-write']);
 const expandUserPath = (p) => {
   const s = String(p || '').trim();
@@ -937,6 +939,11 @@ const saveGemini = (state) => { writeJsonAtomic(GEMINI_FILE, state); rememberJso
 const AGY_FILE = join(STATE_DIR, 'agy-sessions.json');
 const loadAgy = () => loadJsonCached(AGY_FILE, () => ({ sessions: {} }));
 const saveAgy = (state) => { writeJsonAtomic(AGY_FILE, state); rememberJsonCache(AGY_FILE, state); invalidateSessionLists(); };
+// Mac "Computer Use" sessions run codex on the user's Mac (via cu-bridge) — same on-disk
+// transcript shape as Codex/Gemini so the list + reopen "just work".
+const MAC_FILE = join(STATE_DIR, 'mac-sessions.json');
+const loadMac = () => loadJsonCached(MAC_FILE, () => ({ sessions: {} }));
+const saveMac = (state) => { writeJsonAtomic(MAC_FILE, state); rememberJsonCache(MAC_FILE, state); invalidateSessionLists(); };
 function codexMessageText(m) {
   if (!m) return '';
   const out = [];
@@ -973,7 +980,7 @@ function codexUserMessagesFromSession(session) {
 function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
   const safeTitle = title || 'conversation';
   const header = `# ${safeTitle}\n\nExported ${messages.length} messages\n\n`;
-  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : 'Claude';
+  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
   const body = messages.map((m) => {
     const role = m.role === 'user' ? '**You**' : `**${assistantName}**`;
     const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
@@ -1009,6 +1016,7 @@ const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.5', reasoningEffort: 'high', sandbox: appCodexSandbox() },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
+  mac: { model: 'gpt-5.5', reasoningEffort: 'medium' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
 const refreshRuntimeDefaults = () => {
@@ -1020,6 +1028,7 @@ function normalizeSettings(settings = {}) {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
+    mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
 }
@@ -1044,6 +1053,7 @@ const DEFAULT_CONTEXT_WINDOWS = {
   codex: 258400,
   claude: 1000000,
   gemini: 1000000,   // Gemini 2.5 / 3.x all expose a ~1M-token context window
+  mac: 258400,       // Computer Use = codex on the Mac (gpt-5.5)
 };
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
@@ -1470,6 +1480,68 @@ function appendAgyMessage(id, role, text, extra = {}) {
   state.sessions[id] = prev;
   saveAgy(state);
 }
+// ---- Mac "Computer Use" session store (mirrors Gemini: streamed {text|tool} transcript) ----
+function ensureMacSession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadMac();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  const established = prev.title && prev.title !== 'Computer Use chat' ? prev.title : '';
+  state.sessions[id] = {
+    id,
+    agent: 'mac',
+    title: established || attrs.title || prev.title || 'Computer Use chat',
+    cwd: attrs.cwd || prev.cwd || DEFAULT_CWD,
+    created: prev.created || attrs.created || now,
+    lastUsed: attrs.lastUsed || now,
+    updatedAt: attrs.updatedAt || now,
+    preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
+    messages: attrs.messages || prev.messages || [],
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context != null ? attrs.context : (prev.context || null),
+  };
+  saveMac(state);
+  return state.sessions[id];
+}
+function appendMacMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadMac();
+  const now = Date.now();
+  const prev = state.sessions[id] || { id, agent: 'mac', title: 'Computer Use chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'Computer Use chat')) prev.title = plain.slice(0, 80) || 'Computer Use chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = now;
+  prev.updatedAt = now;
+  state.sessions[id] = prev;
+  saveMac(state);
+}
+let MAC_TURN_SEQ = 0;
+function flushMacAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadMac();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.macTurnId, ts: (last && last.live && last.turnId === s.macTurnId && last.ts) || Date.now() };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.live && last.turnId === s.macTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  prev.updatedAt = Date.now();
+  state.sessions[s.sessionId] = prev;
+  saveMac(state);
+}
 
 // META: the real skill / slash-command list as reported by claude's init event
 // (plugin & built-in skills aren't on disk, so we can't find them by scanning dirs).
@@ -1596,8 +1668,13 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     title: s.title || 'Antigravity chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
   }));
+  const macSessions = Object.values(loadMac().sessions || {}).map((s) => ({
+    id: s.id, agent: 'mac', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'Computer Use chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
+    parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+  }));
   files.sort((a, b) => b.mtime - a.mtime);
-  const items = files.concat(codexSessions, geminiSessions, agySessions).sort((a, b) => b.mtime - a.mtime);
+  const items = files.concat(codexSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
   const codexLiveIds = liveCodexSessionIds(codexSessions);
@@ -1811,6 +1888,8 @@ function sessionHistory(id, { before = null } = {}) {
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const agy = (loadAgy().sessions || {})[id];
   if (agy) return { messages: (agy.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: agy.cwd || DEFAULT_CWD, agent: 'agy', settings: normalizeSettings(agy.settings || {}), parentId: agy.parentId || null, parentTitle: agy.parentTitle || '', context: normalizeContext({ agent: 'agy' }) };
+  const mac = (loadMac().sessions || {})[id];
+  if (mac) return { messages: enrichCodexHistory(id, (mac.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: mac.cwd || DEFAULT_CWD, agent: 'mac', settings: normalizeSettings(mac.settings || {}), parentId: mac.parentId || null, parentTitle: mac.parentTitle || '', context: normalizeContext(mac.context || { agent: 'mac' }) };
   const file = findSessionFile(id);
   if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD, context: normalizeContext({ agent: 'claude' }) };
   const { raw, startOffset } = readJsonlChunk(file, before);
@@ -1964,7 +2043,7 @@ app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  const stored = (loadCodex().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id];
+  const stored = (loadCodex().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
   if (stored) return res.json({ messages: codexUserMessagesFromSession(stored) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
@@ -2059,9 +2138,11 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   const isCodex = !!(loadCodex().sessions || {})[id];
   const isGemini = !!(loadGemini().sessions || {})[id];
   const isAgy = !!(loadAgy().sessions || {})[id];
+  const isMac = !!(loadMac().sessions || {})[id];
   let wrote = false;
   if (isGemini) { ensureGeminiSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
   else if (isAgy) { ensureAgySession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
+  else if (isMac) { ensureMacSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
   else wrote = isCodex ? false : writeCustomTitle(id, name);
   const names = loadNames();
   if (wrote) { if (names[id] != null) { delete names[id]; saveNames(names); } } // drop legacy shadow
@@ -2069,7 +2150,7 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   res.json({ ok: true, synced: wrote });
 });
 app.get('/api/commands', requireAuth, (req, res) => res.json({
-  commands: req.query.agent === 'codex' ? scanCodexCommands() : (req.query.agent === 'gemini' || req.query.agent === 'agy') ? [] : scanCommands(),
+  commands: req.query.agent === 'codex' ? scanCodexCommands() : (req.query.agent === 'gemini' || req.query.agent === 'agy' || req.query.agent === 'mac') ? [] : scanCommands(),
 }));
 
 // ---- Accounts: pool/switch Claude accounts via an external account broker -----
@@ -2386,10 +2467,23 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
     codex: codexAvailable(),
     gemini: !!GEMINI_KEY,
     agy: agyAvailable(),
+    mac: macAvailable(),
   },
   // Display names for Automated-tab sub-buckets; a private overlay can add its own.
   subLabels: overlay.subLabels || {},
 }));
+
+// Live screenshot of the user's Mac (the composer "View screen" button) — proxies the
+// cu-bridge worker's /screenshot over the reverse tunnel; no agent, no cost. Only useful
+// when features.mac is on (bridge reachable).
+app.get('/api/mac/screenshot', requireAuth, (req, res) => {
+  macScreenshotStream((up) => {
+    if (up.statusCode !== 200) { res.status(502).json({ error: 'mac screenshot failed' }); up.resume(); return; }
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    up.pipe(res);
+  }, (e) => res.status(502).json({ error: String((e && e.message) || e) }));
+});
 app.get('/api/app-settings', requireAuth, (req, res) => res.json(appSettingsPayload()));
 app.post('/api/app-settings', requireAuth, (req, res) => {
   const body = req.body || {};
@@ -2715,7 +2809,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
       const det = await linearGql(`{ issues(filter:{ number:{ eq:${issueNum(inc)} }${TEAM_KEY_FILTER} }){ nodes { id state{ type } labels{ nodes{ id } } } } }`);
       const it = (det.issues.nodes || [])[0];
       if (it) {
-        const agentName = rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : 'Claude';
+        const agentName = rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : rec.agent === 'mac' ? 'Computer Use' : 'Claude';
         const verb = rec.kind === 'resume' ? 'Resumed in' : 'Delegated to';
         const body = `🤖 ${verb} a box ${agentName} agent${rec.sessionTitle ? ` — “${rec.sessionTitle}”` : ''}.`
           + (rec.sessionId ? `\n<!-- box-session:${rec.sessionId} -->` : '');
@@ -3241,7 +3335,7 @@ function scanRecentImages(sessionId) {
   return results.slice(-8).reverse(); // newest first, cap at 8 batches
 }
 function agentDisplayName(agent) {
-  return agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : 'Claude';
+  return agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
 }
 function recentImagesForHistory(sessionId, hist) {
   if (!hist || hist.agent === 'claude' || !hist.agent) return scanRecentImages(sessionId);
@@ -3506,6 +3600,7 @@ function runTurn(s, msg) {
     if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
+    if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
 	    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
     let prompt = msg.text || '';
     if (Array.isArray(msg.images) && msg.images.length) {
@@ -3836,6 +3931,94 @@ function runAgyTurn(s, msg, resolve) {
   s.proc.on('close', finish);
   s.proc.on('error', (e) => { bcast(s, { type: 'error', msg: String(e.message || e) }); finish(); });
 }
+// Computer Use turn: runs codex ON THE MAC (cu-bridge) with the SAME streamed {session,text,
+// tool,tool_result} events Codex emits — so tool chips + live text + multi-turn resume all
+// work. Modeled on runCodexTurn (id arrives via `session`), persisted in the Mac store.
+function runMacTurn(s, msg, resolve) {
+  if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  let done = false;
+  s.macTurnId = `${Date.now()}-${++MAC_TURN_SEQ}`;
+  let lastError = '';
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
+  const isNew = !s.sessionId;
+  const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNew && initialTitle) s.title = initialTitle;
+  // Provisional registration (like Codex): show the chat + hold the user's message the instant
+  // they hit send, keyed by the box's internal `new-…` key; migrate onto the real codex thread
+  // id when `session` arrives. If the Mac never answers, the message stays as a retryable chat.
+  if (isNew) {
+    s.provKey = s.key;
+    ensureMacSession(s.provKey, { cwd: s.cwd, title: initialTitle || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '' });
+    appendMacMessage(s.provKey, 'user', userText, { parts: userParts });
+    addRunning(s.provKey);
+  }
+  const finish = () => {
+    if (done) return; done = true;
+    clearTimeout(s.turnTimer); s.proc = null;
+    if (s.sessionId) {
+      flushMacAssistant(s, { finalize: true });
+      if (lastError && !s.canceled) appendMacMessage(s.sessionId, 'assistant', `⚠️ Computer Use error: ${lastError}`);
+    } else if (s.provKey) {
+      deleteRunning(s.provKey);
+      if (!s.canceled) appendMacMessage(s.provKey, 'assistant', lastError ? `⚠️ Computer Use didn't start: ${lastError}` : "⚠️ Computer Use didn't start — is your Mac connected (cu-bridge)? Send again to retry.");
+    }
+    bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
+    resolve();
+  };
+  s.turnTimer = setTimeout(() => {
+    if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
+    finish();
+  }, CODEX_TURN_TIMEOUT_MS);
+  s.proc = macEngine.run({
+    sessionId: s.sessionId,
+    cwd: s.cwd,
+    prompt: msg.text || '',
+    images: msg.images || [],
+    settings: (s.settings || {}).mac || DEFAULT_SETTINGS.mac,
+    onEvent: (ev) => {
+      if (ev.type === 'session' && ev.id) {
+        const provKey = s.provKey || null;
+        s.sessionId = ev.id; s.agent = 'mac';
+        ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+        if (provKey && provKey !== s.sessionId) {
+          const st = loadMac(); const rec = st.sessions[provKey];
+          if (rec) { rec.id = s.sessionId; st.sessions[s.sessionId] = rec; delete st.sessions[provKey]; saveMac(st); }
+          deleteRunning(provKey);
+        }
+        s.provKey = null;
+        if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+        ensureMacSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '' });
+        if (!provKey) appendMacMessage(s.sessionId, 'user', userText, { parts: userParts });
+        persist(s);
+        bcast(s, { type: 'session', id: s.sessionId, agent: 'mac', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
+      } else if (ev.type === 'text') {
+        const raw = ev.delta || '';
+        const last = s.curParts[s.curParts.length - 1];
+        const delta = ((last && last.t === 'text' && last.text) ? '\n\n' : '') + raw;
+        pushTextPart(s, delta);
+        if (s.sessionId) flushMacAssistant(s);
+        bcast(s, { type: 'text', delta });
+      } else if (ev.type === 'tool') {
+        s.curTools.push(ev);
+        s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        if (s.sessionId) flushMacAssistant(s);
+        bcast(s, ev);
+      } else if (ev.type === 'tool_result') {
+        const t = s.curTools.find((x) => x.id === ev.id); if (t) t.result = ev.content;
+        const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
+        bcast(s, ev);
+      } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = String(ev.msg || '').slice(0, 300);
+        bcast(s, ev);
+      }
+      // 'context' events are ignored for Computer Use v1 (codex rollout lives on the Mac).
+    },
+  });
+  s.proc.on('close', finish);
+  s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
+}
 // resume persisted, non-empty queues on startup (after a restart) so a queued message is never
 // lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
 // message was queued before its session was created (keyed by the filename, e.g. `new-abc123`) —
@@ -3963,6 +4146,7 @@ wss.on('connection', (ws) => {
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      if (s.sessionId && s.agent === 'mac') ensureMacSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       bcast(s, { type: 'settings', settings: s.settings, cwd: s.cwd || null });
     } else if (m.type === 'dequeue') { dequeue(m.key, m.qid); }
     else if (m.type === 'cancel') { cancelCurrent(m.key); }

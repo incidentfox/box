@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.5', reasoningEffort: 'high', sandbox: 'off' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
+  mac: { model: 'gpt-5.5', reasoningEffort: 'medium' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
 const AGENT_META = {
@@ -16,24 +17,25 @@ const AGENT_META = {
   codex: { label: 'Codex', icon: '◆' },
   gemini: { label: 'Gemini', icon: '✦' },
   agy: { label: 'Antigravity', icon: '△' },
+  mac: { label: 'Computer Use', icon: '🖥️' },
 };
 const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) => [k, v.label]));
-const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000 };
+const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000, mac: 258400 };
 const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
 const agentIcon = (agent) => (AGENT_META[agent] && AGENT_META[agent].icon) || '⌘';
-const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy') ? agent : 'claude';
-const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : 'claude');
+const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy' || agent === 'mac') ? agent : 'claude';
+const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : agent === 'mac' ? 'mac' : 'claude');
 const agentModelLabel = (agent, rawModel) => {
   const raw = String(rawModel || '');
   if (!raw) return '';
-  const found = (agent === 'codex' ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
+  const found = ((agent === 'codex' || agent === 'mac') ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
   if (found) return found.label;
   if (agent === 'agy') return raw ? raw.replace(/-/g, ' ') : 'Antigravity default';
   if (agent === 'gemini') return raw.replace(/^gemini-/, 'Gemini ').replace(/-/g, ' ');
-  if (agent === 'codex') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
+  if (agent === 'codex' || agent === 'mac') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
   return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
 };
-let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
+let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -1037,7 +1039,7 @@ function openDefaultWorkspaceSheet() {
 }
 function openDefaultAgentSheet() {
   const curDefault = configuredDefaultAgent();
-  const rows = ['claude', 'codex', 'gemini', 'agy'].filter(agentEnabled).map((agent) => ({
+  const rows = ['claude', 'codex', 'gemini', 'agy', 'mac'].filter(agentEnabled).map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
     desc: agent === curDefault ? 'Current default for new chats' : 'Use for new chats',
@@ -1107,7 +1109,7 @@ $('newBtn').onclick = () => {
     agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
   };
   const def = configuredDefaultAgent();
-  const order = [def, 'codex', 'claude', 'gemini', 'agy'].filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
+  const order = [def, 'codex', 'claude', 'gemini', 'agy', 'mac'].filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
   const rows = order.map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
@@ -2604,6 +2606,7 @@ function normalizeSettings(settings) {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
+    mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
 }
@@ -2784,13 +2787,16 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.5' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : 'opus');
-  const effort = agent === 'codex' ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.5' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.5' : 'opus');
+  const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
   $('agentChip').classList.toggle('codex', agent === 'codex');
   $('agentChip').classList.toggle('gemini', agent === 'gemini');
   $('agentChip').classList.toggle('agy', agent === 'agy');
+  $('agentChip').classList.toggle('mac', agent === 'mac');
+  // "View screen" button only makes sense while driving the Mac.
+  { const vb = $('viewScreenBtn'); if (vb) vb.classList.toggle('hidden', agent !== 'mac'); }
 }
 function setAgent(agent) {
   cur.agent = agentType(agent);
@@ -2805,11 +2811,12 @@ $('agentChip').onclick = () => {
   ];
   if (agentEnabled('gemini') || cur.agent === 'gemini') rows.push({ ic: agentIcon('gemini'), label: 'Gemini', sel: cur.agent === 'gemini', desc: 'Run Gemini on the box', fn: () => setAgent('gemini') });
   if (agentEnabled('agy') || cur.agent === 'agy') rows.push({ ic: agentIcon('agy'), label: 'Antigravity', sel: cur.agent === 'agy', desc: 'Use local agy / AI Pro', fn: () => setAgent('agy') });
+  if (agentEnabled('mac') || cur.agent === 'mac') rows.push({ ic: agentIcon('mac'), label: 'Computer Use', sel: cur.agent === 'mac', desc: 'Drive your Mac (Codex Computer Use)', fn: () => setAgent('mac') });
   // Tapping the CURRENT agent always opens its model switcher (works in a new chat too, not just
   // once the thread has an id). Tapping a DIFFERENT agent switches to it — continuing the transcript
   // when one exists, otherwise just selecting it for the new chat (its original fn).
   for (const row of rows) {
-    const target = row.label === 'Antigravity' ? 'agy' : row.label.toLowerCase();
+    const target = row.label === 'Antigravity' ? 'agy' : row.label === 'Computer Use' ? 'mac' : row.label.toLowerCase();
     if (cur.agent === target) { row.desc = 'Current agent · tap to switch model'; row.fn = () => openModelSheet(); }
     else if (cur.id) { row.desc = `Continue this transcript in ${row.label}`; row.fn = () => continueWithAgent(target); }
   }
@@ -2819,6 +2826,18 @@ $('agentChip').onclick = () => {
 
 /* ---------- attach files (images + any file type) ---------- */
 // Straight to the native iOS picker (it already offers Take Photo / Photo Library / Choose Files).
+// "View screen" — grab a live screenshot of the Mac (no agent, no cost) and pop it in the
+// shared image lightbox. Works whenever the Computer Use bridge is up.
+async function viewMacScreen() {
+  try {
+    toast('Capturing your Mac screen…');
+    const r = await api('/api/mac/screenshot');
+    if (!r.ok) { toast('Screen capture failed — is your Mac connected?'); return; }
+    const blob = await r.blob();
+    window.openImageLightbox([URL.createObjectURL(blob)], 0);
+  } catch (e) { toast('Screen capture failed'); }
+}
+$('viewScreenBtn').onclick = viewMacScreen;
 $('attachBtn').onclick = () => $('fileInput').click();
 $('fileInput').onchange = (e) => uploadFiles(e.target.files);
 $('camInput').onchange = (e) => uploadFiles(e.target.files);
@@ -2959,6 +2978,13 @@ const BUILTIN_CMDS = {
     { name: 'context', desc: 'Show context / token usage', send: true },
     { name: 'review', desc: 'Review the current diff', send: true },
     { name: 'new', desc: 'Start a fresh Antigravity thread', action: 'new' },
+  ],
+  mac: [
+    { name: 'screen', desc: 'Snapshot your Mac screen right now', action: 'macscreen' },
+    { name: 'model', desc: 'Switch the Computer Use model / effort', action: 'model' },
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
+    { name: 'new', desc: 'Start a fresh Computer Use chat', action: 'new' },
   ],
 };
 async function showCommands(tok) {
@@ -3168,6 +3194,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'prompts') return openPromptHub();
   if (cmd.action === 'workspace') return openChatWorkspaceSheet();
   if (cmd.action === 'model') return openModelSheet();
+  if (cmd.action === 'macscreen') return viewMacScreen();
   if (cmd.action === 'theme') return toggleTheme();
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
@@ -3248,6 +3275,13 @@ function openModelSheet() {
     for (const m of AGY_MODELS) rows.push(settingRow(m, (cfg.model || '') === m.id, () => { cur.settings.agy.model = m.id; sendSettings(); toast(`Antigravity model: ${m.label}`); openModelSheet(); }));
     openSheet('Antigravity model', rows);
     return;
+  }
+  if (agent === 'mac') {
+    rows.push({ ic: '', label: 'Model', desc: 'Codex model used on the next Computer Use turn (runs on your Mac)', fn: () => openModelSheet() });
+    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.mac.model = m.id; sendSettings(); toast(`Computer Use model: ${m.label}`); openModelSheet(); }));
+    rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
+    for (const e of CODEX_EFFORTS) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.mac.reasoningEffort = e.id; sendSettings(); toast(`Computer Use effort: ${e.label}`); openModelSheet(); }));
+    return openSheet('Computer Use model', rows);
   }
   rows.push({ ic: '', label: 'Model', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
   for (const m of CLAUDE_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.claude.model = m.id; sendSettings(); toast(`Claude model: ${m.label}`); openModelSheet(); }));
