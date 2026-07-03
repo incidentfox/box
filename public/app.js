@@ -1231,6 +1231,7 @@ $('newBtn').onclick = () => {
     claude: ['Remote-control Claude Code', 'New Claude chat'],
     gemini: ['Run Gemini on the box', 'New Gemini chat'],
     agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
+    mac: ['Drive your Mac (Computer Use)', 'New Computer Use chat'],
   };
   const def = configuredDefaultAgent();
   const order = [def, 'codex', 'claude', 'gemini', 'agy', 'mac'].filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
