@@ -1976,6 +1976,32 @@ app.post('/api/login', (req, res) =>
   (req.body && req.body.token) === AUTH_TOKEN ? res.json({ ok: true }) : res.status(401).json({ error: 'bad token' }));
 
 app.get('/api/sessions', requireAuth, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD, defaultAgent: appDefaultAgent() }); });
+app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const on = !(body.archived === false);
+  const preserve = new Set(Array.isArray(body.preserveIds) ? body.preserveIds.map(String) : []);
+  const explicitIds = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : null;
+  const filter = String(body.filter || 'all');
+  const fullList = listSessions({ filter, limit: 10000 }).sessions;
+  const sessionById = new Map(fullList.map((s) => [s.id, s]));
+  const candidates = explicitIds || fullList.map((s) => s.id);
+  const set = loadArchived(); const at = loadArchivedAt(); const now = Date.now();
+  let changed = 0, killed = 0;
+  for (const raw of candidates) {
+    const id = String(raw || '').trim();
+    if (!id || preserve.has(id)) continue;
+    const s = sessionById.get(id);
+    if (body.preserveActive && s && (s.live || s.status === 'working' || s.status === 'needs_input' || s.status === 'live')) continue;
+    if (body.preserveLive && s && s.live) continue;
+    if (body.preserveFavorites && s && s.favorite) continue;
+    const had = set.has(id);
+    if (on) { if (!had) { set.add(id); at[id] = now; changed++; } }
+    else { if (had) { set.delete(id); delete at[id]; changed++; } }
+    if (on) { try { killed += killSessionBridge(id).killed || 0; } catch {} }
+  }
+  saveArchived(set); saveArchivedAt(at);
+  res.json({ ok: true, archived: on, changed, killed });
+});
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const set = loadArchived(); const at = loadArchivedAt();
   const id = req.params.id; const on = !(req.body && req.body.archived === false);

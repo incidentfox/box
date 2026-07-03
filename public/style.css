@@ -113,6 +113,14 @@ body.boardDragging .tkt:active { transform: none; }
 .boardSearchIc { width: 18px; height: 18px; color: var(--muted); flex: none; display: inline-flex; }
 .boardSearchInput { flex: 1; min-width: 0; border: none; background: transparent; font: inherit; font-size: 15px; color: var(--ink); outline: none; }
 .boardSearch .iconbtn { flex: none; }
+.bulkBar { display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-bottom: 1px solid var(--line); overflow-x: auto; -webkit-overflow-scrolling: touch; flex: none; scrollbar-width: none; }
+.bulkBar::-webkit-scrollbar { display: none; }
+.bulkMeta { flex: none; min-width: 92px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.bulkChip { flex: none; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 9px; padding: 6px 10px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.bulkChip.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.bulkChip.danger { color: #c0392b; border-color: color-mix(in srgb, #c0392b 38%, var(--line)); }
+.bulkChip:disabled { opacity: .45; }
+.iconbtn.on { background: var(--subtle-2); color: var(--accent); }
 .boardResults { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; }
 .bres { display: flex; gap: 10px; align-items: flex-start; background: var(--card); border-radius: 12px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(40,30,20,.05); cursor: pointer; }
 .bres:active { transform: scale(.99); }
@@ -298,6 +306,14 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .sAct.arch { background: var(--accent); }
 .sAct.unarch { background: #3aa55e; }
 .sCard .srow { display: flex; align-items: center; gap: 13px; }
+.sSelect { display: none; flex: none; width: 28px; height: 28px; place-items: center; margin-left: -3px; }
+.sSelect input { position: absolute; opacity: 0; pointer-events: none; }
+.sSelect span { width: 22px; height: 22px; border-radius: 7px; border: 1.5px solid var(--line); background: var(--card); display: grid; place-items: center; }
+.sSelect input:checked + span { background: var(--accent); border-color: var(--accent); }
+.sSelect input:checked + span::after { content: ''; width: 9px; height: 5px; border-left: 2px solid #fff; border-bottom: 2px solid #fff; transform: rotate(-45deg) translate(1px, -1px); }
+body.bulkMode .sSelect { display: grid; }
+body.bulkMode .sCardFront { cursor: pointer; }
+.sCard.selected .sCardFront { background: color-mix(in srgb, var(--accent) 9%, var(--card)); }
 .savatar { width: 40px; height: 40px; border-radius: 50%; background: var(--subtle-2); display: grid; place-items: center; flex: none; }
 .savatar.idle, .savatar.archived { background: var(--subtle); }
 .sCard .conn.archived { color: var(--muted); }
@@ -884,7 +900,8 @@ textarea.acctInput { resize: vertical; }
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .bar,
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .boardSearch,
-  body:not([data-view="login"]):not([data-view="sessions"]) #sessions .tabs {
+  body:not([data-view="login"]):not([data-view="sessions"]) #sessions .tabs,
+  body:not([data-view="login"]):not([data-view="sessions"]) #sessions .bulkBar {
     background: var(--subtle);
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .sbar {
@@ -913,6 +930,7 @@ textarea.acctInput { resize: vertical; }
   }
   body[data-view="sessions"] #sessions .list,
   body[data-view="sessions"] #sessions .tabs,
+  body[data-view="sessions"] #sessions .bulkBar,
   body[data-view="sessions"] #sessions .boardSearch {
     max-width: 1180px; width: 100%; margin-inline: auto;
   }
@@ -1005,6 +1023,11 @@ textarea.acctInput { resize: vertical; }
   .sCard.current .sCardFront {
     background: color-mix(in srgb, var(--accent) 14%, var(--card));
     box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .sCard.selected,
+  html[data-theme="dark"] .sCard.selected,
+  body[data-view="sessions"] #sessionList .sCard.selected {
+    border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
   }
   .sCard.current .nm { color: var(--accent); }
   .sCardFront { padding: 11px 12px; border-radius: 10px; }
