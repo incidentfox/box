@@ -285,6 +285,7 @@ const ICONS = {
   'star-filled': SVG('<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>', { fill: 'currentColor' }),
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
+  'list-check': SVG('<path d="M10 6h11M10 12h11M10 18h9"/><path d="M3 6.5l1.5 1.5L8 4.5M3 12.5l1.5 1.5L8 10.5M3 18.5l1.5 1.5L8 16.5"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
   'sidebar-collapse': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M16 9l-3 3 3 3"/>', { w: 1.9 }),
   'sidebar-expand': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9l3 3-3 3"/>', { w: 1.9 }),
@@ -621,6 +622,8 @@ let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
 let chatRenderSeq = 0;
 let sessionRefreshTimer = null;
 let lastSessionFetchAt = 0;
+let bulkMode = false;
+const bulkSelected = new Set();
 const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
@@ -633,8 +636,9 @@ async function fetchSessions(filter) {
   lastSessionFetchAt = Date.now();
   defaultCwd = d.defaultCwd; cur.cwd = cur.cwd || d.defaultCwd;
   allSessions = d.sessions || [];
+  for (const id of [...bulkSelected]) if (!allSessions.some((s) => s.id === id)) bulkSelected.delete(id);
   sessionCounts = d.counts || { all: allSessions.length };
-  renderTabs(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
+  renderTabs(); renderBulkBar(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
 }
 function refreshSessionsSoon(delay = 350) {
   if (!TOKEN) return;
@@ -681,6 +685,79 @@ function renderTabs() {
       mk(k, labelMap[k] || humanize(k), sub[k]);
     }
   }
+}
+function isActiveSession(s) {
+  return !!(s && (s.live || s.status === 'working' || s.status === 'needs_input' || s.status === 'live'));
+}
+function keepActiveFavoriteCount() {
+  const active = Number(sessionCounts.live || 0) + Number(sessionCounts.working || 0) + Number(sessionCounts.needs_input || 0);
+  const fav = Number(sessionCounts.favorites || 0);
+  const overlap = allSessions.filter((s) => isActiveSession(s) && s.favorite && !s.archived).length;
+  return Math.max(0, active + fav - overlap);
+}
+function selectedSessions() {
+  return allSessions.filter((s) => bulkSelected.has(s.id));
+}
+function syncBulkButton() {
+  const btn = $('bulkBtn'); if (!btn) return;
+  btn.title = bulkMode ? 'done selecting' : 'select chats';
+  btn.setAttribute('aria-label', btn.title);
+  btn.classList.toggle('on', bulkMode);
+  btn.dataset.icon = bulkMode ? 'check' : 'list-check';
+  btn._painted = 0; btn.innerHTML = '';
+  paintIcons(btn.parentElement || document);
+}
+function setBulkMode(on) {
+  bulkMode = !!on;
+  if (!bulkMode) bulkSelected.clear();
+  document.body.classList.toggle('bulkMode', bulkMode);
+  syncBulkButton();
+  renderBulkBar();
+  renderSessionList();
+  paintIcons($('sessions'));
+}
+function toggleBulkSelection(id, on) {
+  if (!id) return;
+  if (on) bulkSelected.add(id); else bulkSelected.delete(id);
+  renderBulkBar();
+  const card = $('sessionList') && [...$('sessionList').querySelectorAll('.sCard')].find((c) => c.dataset.sid === id);
+  if (card) {
+    card.classList.toggle('selected', bulkSelected.has(id));
+    const cb = card.querySelector('.sSelect input');
+    if (cb) cb.checked = bulkSelected.has(id);
+  }
+}
+function selectVisibleSessions() {
+  const target = curFilter === 'archived'
+    ? allSessions
+    : allSessions.filter((s) => !s.archived && !isActiveSession(s) && !s.favorite);
+  for (const s of target) if (s.id) bulkSelected.add(s.id);
+  renderBulkBar(); renderSessionList(); paintIcons($('sessions'));
+}
+function clearBulkSelection() {
+  bulkSelected.clear();
+  renderBulkBar(); renderSessionList(); paintIcons($('sessions'));
+}
+function renderBulkBar() {
+  const bar = $('bulkBar'); if (!bar) return;
+  const count = bulkSelected.size;
+  const canBulkStale = curFilter !== 'archived' && curFilter !== 'favorites' && curFilter !== 'auto' && !curFilter.startsWith('auto:');
+  const keepCount = keepActiveFavoriteCount();
+  const allCount = Number(sessionCounts.all || 0);
+  const staleEstimate = Math.max(0, allCount - keepCount);
+  bar.classList.toggle('hidden', !bulkMode);
+  if (!bulkMode) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `
+    <div class="bulkMeta">${count ? `${count} selected` : 'Select chats to archive'}</div>
+    <button id="bulkSelectVisible" class="bulkChip" type="button">${curFilter === 'archived' ? 'Select visible' : 'Select stale visible'}</button>
+    <button id="bulkClear" class="bulkChip" type="button" ${count ? '' : 'disabled'}>Clear</button>
+    <button id="bulkArchiveSelected" class="bulkChip danger" type="button" ${count ? '' : 'disabled'}>${curFilter === 'archived' ? 'Unarchive selected' : 'Archive selected'}</button>
+    ${canBulkStale ? `<button id="bulkArchiveStale" class="bulkChip primary" type="button" ${staleEstimate ? '' : 'disabled'}>Archive stale (${staleEstimate})</button>` : ''}
+  `;
+  $('bulkSelectVisible').onclick = selectVisibleSessions;
+  $('bulkClear').onclick = clearBulkSelection;
+  $('bulkArchiveSelected').onclick = () => bulkArchiveSelected(curFilter === 'archived' ? false : true);
+  if ($('bulkArchiveStale')) $('bulkArchiveStale').onclick = bulkArchiveStale;
 }
 function timeGroup(ms) {
   const now = new Date(), d = new Date(ms);
@@ -735,6 +812,7 @@ function sessionCard(s) {
   const el = document.createElement('div'); el.className = 'sCard';
   el.dataset.sid = s.id || '';   // lets syncCurrentCard() re-target the .current highlight without a re-render
   if (cur && cur.id && s.id === cur.id) el.classList.add('current');
+  if (bulkSelected.has(s.id)) el.classList.add('selected');
   const agent = s.agent || 'claude';
   const sub = s.parentId ? `Fork of ${s.parentTitle || s.parentId.slice(0, 8)}` : (s.note ? s.note : shortCwd(s.cwd));
   const label = STATUS_LABEL[s.status];
@@ -747,6 +825,7 @@ function sessionCard(s) {
      </div>
      <div class="sCardFront">
        <div class="srow">
+         <label class="sSelect" title="Select chat"><input type="checkbox" ${bulkSelected.has(s.id) ? 'checked' : ''}><span></span></label>
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
 	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time" data-rel-time="${when}">${relTime(when)}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
@@ -767,6 +846,8 @@ function sessionCard(s) {
   const cw = document.createElement('span'); cw.className = 'cwd'; cw.textContent = sub; sl.appendChild(cw);
   if (s.preview) front.querySelector('.preview').textContent = stripMd(s.preview);
   const swipe = attachSwipeActions(el, front, s);
+  el.querySelector('.sSelect input').addEventListener('change', (e) => { e.stopPropagation(); toggleBulkSelection(s.id, e.target.checked); });
+  el.querySelector('.sSelect').addEventListener('click', (e) => e.stopPropagation());
   // swipe-left action buttons (revealed behind the front)
   el.querySelector('.sAct.edit').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); renameChat(s, () => fetchSessions(curFilter)); });
   el.querySelector('.archBtn').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); doArchive(s, !s.archived); });
@@ -789,6 +870,7 @@ function attachSwipeActions(card, front, s) {
   const close = () => { open = false; front.classList.remove('dragging'); card.classList.remove('swiping'); setX(0); if (closeOpenSwipe === close) closeOpenSwipe = null; };
   const openIt = () => { if (closeOpenSwipe && closeOpenSwipe !== close) closeOpenSwipe(); open = true; front.classList.remove('dragging'); card.classList.add('swiping'); setX(-MAX); closeOpenSwipe = close; };
   front.addEventListener('touchstart', (e) => {
+    if (bulkMode) return;
     if (e.touches.length !== 1) return;
     const t = e.touches[0]; sx = t.clientX; sy = t.clientY; dx = 0; dragging = true; decided = false; horiz = false; moved = false;
     front.classList.add('dragging');
@@ -814,6 +896,7 @@ function attachSwipeActions(card, front, s) {
   front.addEventListener('touchend', end);
   front.addEventListener('touchcancel', end);
   front.addEventListener('click', (e) => {
+    if (bulkMode) { e.preventDefault(); e.stopPropagation(); toggleBulkSelection(s.id, !bulkSelected.has(s.id)); return; }
     if (open) { e.preventDefault(); e.stopPropagation(); close(); return; }   // tap front to dismiss
     if (moved && horiz) { e.preventDefault(); return; }                       // was a swipe, not a tap
     openChat(s);
@@ -850,6 +933,47 @@ async function doArchive(s, on) {
   if (s.archived) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
   else toast(j.restored && j.restored.started ? '📤 Unarchived and reconnected' : '📤 Unarchived');
   fetchSessions(curFilter);
+  return j;
+}
+async function bulkArchiveSelected(on = true) {
+  const ids = [...bulkSelected];
+  if (!ids.length) return;
+  const action = on ? 'Archive' : 'Unarchive';
+  if (!confirm(`${action} ${ids.length} selected chat${ids.length === 1 ? '' : 's'}?`)) return;
+  await bulkArchive({
+    ids,
+    archived: on,
+    success: (j) => `${on ? 'Archived' : 'Unarchived'} ${j.changed || ids.length} chat${(j.changed || ids.length) === 1 ? '' : 's'}`,
+  });
+}
+async function bulkArchiveStale() {
+  const keep = selectedSessions().map((s) => s.title || s.id).slice(0, 8);
+  const keepMsg = keep.length ? `\n\nAlso keep selected:\n${keep.map((s) => `- ${s}`).join('\n')}` : '';
+  const keepCount = keepActiveFavoriteCount() + bulkSelected.size;
+  if (!confirm(`Archive every inactive, non-favorite chat in ${curFilter === 'all' ? 'All' : curFilter}? This keeps Working, Needs input, Live, Favorites, and your selected chats (${keepCount} kept).${keepMsg}`)) return;
+  await bulkArchive({
+    filter: curFilter || 'all',
+    archived: true,
+    preserveActive: true,
+    preserveFavorites: true,
+    preserveIds: [...bulkSelected],
+    success: (j) => `Archived ${j.changed || 0} stale chat${(j.changed || 0) === 1 ? '' : 's'}`,
+  });
+}
+async function bulkArchive(payload) {
+  let j = null;
+  try {
+    const r = await api('/api/sessions/bulk-archive', { method: 'POST', body: JSON.stringify(payload) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'bulk archive failed');
+  } catch {
+    toast('Bulk archive failed', 3200);
+    return null;
+  }
+  bulkSelected.clear();
+  toast(payload.success ? payload.success(j) : 'Updated chats');
+  await fetchSessions(curFilter === 'archived' && payload.archived ? 'all' : curFilter);
+  if (j && j.changed === 0) renderBulkBar();
   return j;
 }
 async function doFavorite(s, on) {
@@ -1119,6 +1243,7 @@ $('newBtn').onclick = () => {
   openSheet('New chat', rows);
 };
 if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
+if ($('bulkBtn')) $('bulkBtn').onclick = () => setBulkMode(!bulkMode);
 $('themeBtn').onclick = toggleTheme;
 if ($('sidebarCollapseBtn')) $('sidebarCollapseBtn').onclick = toggleSidebarCollapsed;
 if ($('sidebarRestoreBtn')) $('sidebarRestoreBtn').onclick = () => setSidebarCollapsed(false);
@@ -1149,7 +1274,7 @@ function setSessQuery(q) {
   const results = $('sessResults'), list = $('sessionList');
   if (!q) {
     results.classList.add('hidden'); results.innerHTML = '';
-    list.classList.remove('hidden'); renderTabs();   // restores #tabs/#subtabs for the current filter
+    list.classList.remove('hidden'); renderTabs(); renderBulkBar();   // restores #tabs/#subtabs/bulk bar for the current filter
     return;
   }
   $('tabs').classList.add('hidden'); $('subtabs').classList.add('hidden'); list.classList.add('hidden');
