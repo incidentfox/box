@@ -112,16 +112,31 @@ const rcSockPath = (sessionId, name) => {
 
 // Search all project dirs for a session's JSONL (sessions live under their
 // start cwd, which may differ from PROJ_DIR for cross-project sessions).
+//
+// A session id can have MULTIPLE JSONL copies across project dirs: cross-project
+// box sessions, pooled-account config dirs (~/.claude-<id>), and — when ~/.claude is
+// synced between machines — a copy under the OTHER machine's cwd (e.g. a laptop's
+// "-Users-…" dir beside the box's "-home-…" dir). The first-enumerated copy is NOT
+// reliably the live one: a stale synced copy would pin the chat to OLD history. So
+// pick the most-recently-written copy (the machine actively appending right now),
+// tie-breaking toward the box's own project dir so its live session wins over a
+// foreign snapshot.
 function findJsonl(sessionId) {
+  let best = null;
   for (const base of projectsBases()) {
     try {
       for (const d of fs.readdirSync(base)) {
         const cand = path.join(base, d, sessionId + '.jsonl');
-        if (fs.existsSync(cand)) return cand;
+        let mtime;
+        try { mtime = fs.statSync(cand).mtimeMs; } catch { continue; } // missing → skip
+        const preferred = cand.startsWith(PROJ_DIR + path.sep);
+        if (!best || mtime > best.mtime || (mtime === best.mtime && preferred && !best.preferred)) {
+          best = { cand, mtime, preferred };
+        }
       }
     } catch {}
   }
-  return path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback (primary)
+  return best ? best.cand : path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback (primary)
 }
 
 function childEnv() {
