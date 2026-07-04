@@ -2814,7 +2814,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
   const rec = {
     sessionId: b.sessionId ? String(b.sessionId) : null,
     sessionTitle: (b.sessionTitle || '').toString().slice(0, 120),
-    agent: b.agent === 'codex' ? 'codex' : 'claude',
+    agent: VALID_APP_AGENTS.has(String(b.agent || '')) ? String(b.agent) : 'claude',
     kind: b.kind === 'resume' ? 'resume' : 'new',
     ts: Date.now(),
   };
