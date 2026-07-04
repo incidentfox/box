@@ -10,6 +10,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
+import { basename as pathBasename } from 'node:path';
 import { buildCodexArgs } from './codex-exec-engine.mjs';
 
 export const MAC_BRIDGE_URL = process.env.MAC_BRIDGE_URL || 'http://127.0.0.1:8781';
@@ -108,10 +109,32 @@ function stripCwd(args) {
   return out;
 }
 
+function bridgeFiles(images = []) {
+  const out = [];
+  for (const image of images || []) {
+    const path = String(image || '');
+    if (!path) continue;
+    try {
+      const st = fs.statSync(path);
+      if (!st.isFile() || st.size > 25 * 1024 * 1024) continue;
+      out.push({
+        path,
+        name: pathBasename(path),
+        dataBase64: fs.readFileSync(path).toString('base64'),
+      });
+    } catch {}
+  }
+  return out;
+}
+
+export function buildMacBridgeRequest({ sessionId, cwd, prompt, images = [], settings = {} } = {}) {
+  const args = stripCwd(buildCodexArgs({ sessionId, cwd, prompt, images, settings }));
+  return { argv: args, timeout: 40 * 60, files: bridgeFiles(images) };
+}
+
 export class MacExecEngine {
   run({ sessionId, cwd, prompt, images = [], settings = {}, onEvent }) {
-    const args = stripCwd(buildCodexArgs({ sessionId, cwd, prompt, images: [], settings }));
-    const body = JSON.stringify({ argv: args, timeout: 40 * 60 });
+    const body = JSON.stringify(buildMacBridgeRequest({ sessionId, cwd, prompt, images, settings }));
     const u = new URL(MAC_BRIDGE_URL.replace(/\/$/, '') + '/chat');
     const seenTools = new Set();
     const emit = (e) => { try { onEvent && onEvent(e); } catch {} };
