@@ -1438,7 +1438,14 @@ function ticketCard(t) {
     const who = dg.sessionTitle || `${agentLabel(dg.agent)} agent`;
     el.innerHTML = `<span class="tktDelegIc">🤖</span><span class="tktDelegTxt"></span>${dg.sessionId ? '<span class="tktDelegGo">→</span>' : ''}`;
     el.querySelector('.tktDelegTxt').textContent = `delegated · ${who}`;
-    if (dg.sessionId) { el.classList.add('clk'); el.onclick = (e) => { e.stopPropagation(); openChat({ id: dg.sessionId, title: who, agent: dg.agent }); }; }
+    if (dg.sessionId) {
+      el.classList.add('clk');
+      el.setAttribute('role', 'button');
+      el.tabIndex = 0;
+      el.title = 'Open delegated chat';
+      el.onclick = (e) => openDelegatedChat(dg, e);
+      el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') openDelegatedChat(dg, e); };
+    }
     card.appendChild(el);
   }
   card.onclick = () => { if (card._justDragged) return; issueOrigin = { kind: 'board' }; openIssue(t.id); };
@@ -1717,6 +1724,24 @@ function renderIssueSessions(list) {
 }
 // The current (most recent) delegation record for an open issue, or null.
 function latestDeleg(arr) { return (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null; }
+async function openDelegatedChat(dg, ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  const sessionId = dg && dg.sessionId;
+  if (!sessionId) return toast('No delegated chat linked yet');
+  const related = (curIssueSessions || []).find((s) => s.id === sessionId) || {};
+  const fallbackTitle = dg.sessionTitle || related.title || `${agentLabel(dg.agent)} agent`;
+  let hist = {};
+  try { hist = await (await api(`/api/sessions/${sessionId}/history`)).json(); } catch {}
+  await openChat({
+    id: sessionId,
+    title: related.title || fallbackTitle,
+    cwd: related.cwd || hist.cwd || defaultCwd,
+    agent: agentType(hist.agent || related.agent || dg.agent),
+    settings: hist.settings,
+    parentId: hist.parentId || null,
+    parentTitle: hist.parentTitle || '',
+  });
+}
 function renderIssue(d) {
   $('issueId').textContent = d.identifier;
   const [plabel, pcolor] = PRIO[d.priority] || [];
@@ -1738,11 +1763,16 @@ function renderIssue(d) {
   const dl = latestDeleg(d.delegations);
   if (dl) {
     const who = dl.sessionTitle || `${agentLabel(dl.agent)} agent`;
-    const card = document.createElement('div'); card.className = 'delegCard' + (dl.sessionId ? ' clk' : '');
+    const card = document.createElement(dl.sessionId ? 'button' : 'div'); card.className = 'delegCard' + (dl.sessionId ? ' clk' : '');
+    if (dl.sessionId) {
+      card.type = 'button';
+      card.title = 'Open delegated chat';
+      card.setAttribute('aria-label', `Open delegated chat: ${who}`);
+    }
     card.innerHTML = `<div class="delegHd">🤖 Delegated to</div><div class="delegRow"><span class="sessIc">${agentIcon(dl.agent)}</span><div class="sessMain"><div class="delegName"></div><div class="delegSub"></div></div>${dl.sessionId ? '<span class="sessGo">→</span>' : ''}</div>`;
     card.querySelector('.delegName').textContent = who;
     card.querySelector('.delegSub').textContent = `${dl.agent}${dl.kind === 'resume' ? ' · resumed' : ''} · delegated ${relTime(dl.ts)}`;
-    if (dl.sessionId) card.onclick = () => openChat({ id: dl.sessionId, title: who, agent: dl.agent });
+    if (dl.sessionId) card.onclick = (e) => openDelegatedChat(dl, e);
     wrap.appendChild(card);
   }
   if (d.pr) {

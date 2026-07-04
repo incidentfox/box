@@ -180,14 +180,16 @@ body.boardDragging .tkt:active { transform: none; }
 .sessRow.sessDeleg { border-color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
 /* delegation badge on a board ticket card */
 .tktDeleg { display: flex; align-items: center; gap: 5px; margin-top: 7px; font-size: 10.5px; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent); border-radius: 7px; padding: 3px 7px; }
-.tktDeleg.clk { cursor: pointer; }
+.tktDeleg.clk { cursor: pointer; touch-action: manipulation; }
+.tktDeleg.clk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tktDeleg.clk:active { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .tktDelegIc { font-size: 11px; }
 .tktDelegTxt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tktDelegGo { flex: none; font-size: 13px; }
 /* highlighted "Delegated to" card at the top of the issue detail */
-.delegCard { margin-top: 4px; background: color-mix(in srgb, var(--accent) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); border-radius: 11px; padding: 9px 11px; }
-.delegCard.clk { cursor: pointer; }
+.delegCard { display: block; width: 100%; margin-top: 4px; background: color-mix(in srgb, var(--accent) 8%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); border-radius: 11px; padding: 9px 11px; color: inherit; text-align: left; }
+.delegCard.clk { cursor: pointer; touch-action: manipulation; }
+.delegCard.clk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .delegCard.clk:active { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
 .delegHd { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); margin-bottom: 6px; }
 .delegRow { display: flex; align-items: center; gap: 10px; }
