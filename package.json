@@ -12,7 +12,7 @@
     "test:linear-lite": "node lib/linear-lite/test.mjs",
     "test:codex-context": "node server/codex-context.test.mjs",
     "test:codex-exec": "node server/codex-exec-engine.test.mjs",
-    "test": "node lib/linear-lite/test.mjs && node server/codex-context.test.mjs && node server/codex-exec-engine.test.mjs && node server/meeting-context.test.mjs"
+    "test": "node lib/linear-lite/test.mjs && node server/codex-context.test.mjs && node server/codex-exec-engine.test.mjs && node server/mac-exec-engine.test.mjs && node server/meeting-context.test.mjs"
   },
   "engines": {
     "node": ">=18"
