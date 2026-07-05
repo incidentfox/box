@@ -31,6 +31,7 @@ let voUserItems = new Map();    // item_id -> bubble el (streaming user transcri
 let voAsstBubble = null, voAsstText = '';
 let voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
 let voAnalyser = null, voOrbRaf = 0;
+let voSpeechStopAt = 0, voLatencies = [];   // end-of-user-speech → first spoken output, ms
 
 const VO_PRICES = { atIn: 32, atInCached: 0.4, txIn: 4, txInCached: 0.4, atOut: 64, txOut: 24 }; // $/1M tok (gpt-realtime-2)
 
@@ -121,7 +122,13 @@ function voClockTick() {
   const cost = (voUsage.atIn * VO_PRICES.atIn + voUsage.atInCached * VO_PRICES.atInCached
     + voUsage.txIn * VO_PRICES.txIn + voUsage.txInCached * VO_PRICES.txInCached
     + voUsage.atOut * VO_PRICES.atOut + voUsage.txOut * VO_PRICES.txOut) / 1e6;
-  $('voCost').textContent = cost > 0.005 ? '$' + cost.toFixed(2) : '';
+  let label = cost > 0.005 ? '$' + cost.toFixed(2) : '';
+  if (voLatencies.length >= 2) {
+    const sorted = [...voLatencies].sort((a, b) => a - b);
+    const p50 = sorted[Math.floor(sorted.length / 2)];
+    label += `${label ? ' · ' : ''}${(p50 / 1000).toFixed(1)}s`;
+  }
+  $('voCost').textContent = label;
 }
 
 /* ---------- session lifecycle ---------- */
@@ -130,6 +137,7 @@ async function voStart() {
   voBuild();
   voVsid = null; voCursor = 0; voReconnectAttempt = 0;
   voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
+  voLatencies = []; voSpeechStopAt = 0; voClearFalseInterrupt();
   voStartedAt = Date.now();
   voFeedEl().innerHTML = '';
   await voConnect(false);
@@ -258,11 +266,23 @@ function voSend(obj) { if (voDc && voDc.readyState === 'open') { try { voDc.send
 
 function voHandleEvent(ev) {
   const t = ev.type || '';
-  if (t === 'input_audio_buffer.speech_started') { voOrbMode('listening'); return; }
-  if (t === 'input_audio_buffer.speech_stopped') { voOrbMode('thinking'); return; }
+  if (t === 'input_audio_buffer.speech_started') {
+    voOrbMode('listening');
+    // Possible barge-in. If the assistant was mid-answer, this cancels it server-side —
+    // but road noise / a cough triggers the same thing (a "false interruption"). Arm a
+    // recovery: if no user words get transcribed within 2.8s, resume the answer.
+    if (voActiveResponse && voAsstText && voAsstText.length > 10) {
+      voFalseInt.text = voAsstText;
+      if (voFalseInt.timer) clearTimeout(voFalseInt.timer);
+      voFalseInt.timer = setTimeout(voResumeFalseInterrupt, 2800);
+    }
+    return;
+  }
+  if (t === 'input_audio_buffer.speech_stopped') { voOrbMode('thinking'); voSpeechStopAt = Date.now(); return; }
 
   // user speech transcription (streams in after each utterance)
   if (t === 'conversation.item.input_audio_transcription.delta') {
+    voClearFalseInterrupt(); // real words — the interruption was genuine
     let b = voUserItems.get(ev.item_id);
     if (!b) { b = voBubble('user', ''); voUserItems.set(ev.item_id, b); }
     b.textContent += ev.delta || '';
@@ -270,6 +290,7 @@ function voHandleEvent(ev) {
     return;
   }
   if (t === 'conversation.item.input_audio_transcription.completed') {
+    voClearFalseInterrupt();
     let b = voUserItems.get(ev.item_id);
     if (!b) { b = voBubble('user', ''); voUserItems.set(ev.item_id, b); }
     if (ev.transcript) b.textContent = ev.transcript;
@@ -282,7 +303,11 @@ function voHandleEvent(ev) {
 
   // assistant speech transcript (both GA and legacy event names)
   if (t === 'response.output_audio_transcript.delta' || t === 'response.audio_transcript.delta') {
-    if (!voAsstBubble) voAsstBubble = voBubble('asst', '');
+    if (!voAsstBubble) {
+      voAsstBubble = voBubble('asst', '');
+      // turn latency: end of user speech → first spoken output (includes tool time — honest UX number)
+      if (voSpeechStopAt) { voLatencies.push(Date.now() - voSpeechStopAt); voSpeechStopAt = 0; }
+    }
     voAsstText += ev.delta || '';
     voAsstBubble.textContent = voAsstText;
     voOrbMode('speaking'); voScroll();
@@ -335,10 +360,32 @@ const VO_TOOL_LABELS = {
   needs_jimmy: 'Checking decisions…', web_search: 'Searching the web…', deep_research: 'Launching research…',
   check_tasks: 'Checking tasks…', brain_search: 'Searching the brain…', brain_read: 'Reading the brain…',
   get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
-  email_jimmy: 'Sending email…', calendar: 'Checking calendar…',
+  email_jimmy: 'Sending email…', calendar: 'Checking calendar…', think_hard: 'Thinking hard…',
 };
 
+/* ---------- false-interruption recovery (road noise cancels a reply → resume it) ---------- */
+
+const voFalseInt = { timer: null, text: '' };
+function voClearFalseInterrupt() {
+  if (voFalseInt.timer) { clearTimeout(voFalseInt.timer); voFalseInt.timer = null; }
+  voFalseInt.text = '';
+}
+function voResumeFalseInterrupt() {
+  voFalseInt.timer = null;
+  if (!voFalseInt.text || voActiveResponse || !voDc || voDc.readyState !== 'open') { voFalseInt.text = ''; return; }
+  const tail = voFalseInt.text.slice(-300);
+  voFalseInt.text = '';
+  voInjectSystem(`[FALSE INTERRUPT] That sound was background noise, not the user. Your previous answer was cut off — it ended with: "${tail}". Continue it from where it stopped, without re-greeting or restarting.`);
+}
+
 async function voRunTool(item) {
+  // wait_for_user = the model deciding NOT to answer noise/side-speech. No chip, and
+  // crucially no response.create — forcing a response would defeat the whole point.
+  if (item.name === 'wait_for_user') {
+    voSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: item.call_id, output: '{"ok":true}' } });
+    voOrbMode('listening');
+    return;
+  }
   const chip = voChip(VO_TOOL_LABELS[item.name] || item.name);
   let output = '';
   try {
