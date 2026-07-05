@@ -466,12 +466,6 @@ function messagePathRefs(m) {
   if (!m || m.role === 'user') return [];
   return (m.parts || []).filter((p) => p && p.t === 'text').flatMap((p) => collectLocalPathRefs(p.text || ''));
 }
-async function preResolveMessages(messages, seq) {
-  const refs = (messages || []).flatMap(messagePathRefs);
-  if (!refs.length) return true;
-  await resolvePathRefs(refs);
-  return seq == null || seq === chatRenderSeq;
-}
 function rerenderResolvedMarkdown() {
   for (const el of document.querySelectorAll('.mdBlock')) {
     if (el._rawMdText != null) el.innerHTML = md(el._rawMdText);
@@ -2122,6 +2116,8 @@ async function openPipeDetail(path, title) {
 }
 
 /* ---------- chat ---------- */
+const INITIAL_HISTORY_RENDER_LIMIT = 120;
+const EARLIER_HISTORY_BATCH = 120;
 let wsLastMsg = 0, wsWatchdog = null;
 function resetWsWatchdog() {
   wsLastMsg = Date.now();
@@ -2155,6 +2151,16 @@ function setNewChatIntro(on) {
   const chat = $('chat');
   if (chat) chat.classList.toggle('newChatIntro', !!on);
 }
+function focusComposerSoon(delay = 60) {
+  setTimeout(() => { try { $('input').focus(); } catch {} }, delay);
+}
+function addHistoryLoader() {
+  const loader = document.createElement('div');
+  loader.className = 'histLoader';
+  loader.textContent = 'Loading…';
+  $('messages').appendChild(loader);
+  return loader;
+}
 async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
@@ -2174,19 +2180,31 @@ async function openChat(s) {
   // Linear-agent session → show an approval bar (merge PR / mark done / archive)
   const inc = (s.subcat === 'linear' || /linear-dispatch/.test(s.cwd || '')) && (String(s.cwd || '') + ' ' + (s.title || '')).match(/INC-\d+/);
   renderLinearBar(inc ? inc[0] : null, s.id);
-  cur.histCursor = 0; cur.hasMoreHistory = false; cur.loadingEarlier = false;
+  cur.histCursor = 0; cur.hasMoreHistory = false; cur.remoteHasMoreHistory = false; cur.loadingEarlier = false; cur.localEarlier = [];
+  refreshButton();
+  setAttnBadge(0); // reset badge on every new chat; refreshAttnBadge below will set the real count
+  focusComposerSoon();
   if (s.id) {
-    const h = await (await api(`/api/sessions/${s.id}/history`)).json();
-    if (renderSeq !== chatRenderSeq) return;
-    cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
-    if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
-    if (typeof h.favorite === 'boolean') { cur.favorite = h.favorite; updateFavoriteButton(); }
-    cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
-    cur.context = h.context || cur.context; renderContextMeter();
-    cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
-    await renderHistoryBatch(h.messages, renderSeq);
-    if (renderSeq !== chatRenderSeq) return;
-    scrollBottom();
+    const loader = addHistoryLoader();
+    try {
+      const h = await (await api(`/api/sessions/${s.id}/history`)).json();
+      if (renderSeq !== chatRenderSeq) return;
+      loader.remove();
+      cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
+      if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
+      if (typeof h.favorite === 'boolean') { cur.favorite = h.favorite; updateFavoriteButton(); }
+      cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
+      cur.context = h.context || cur.context; renderContextMeter();
+      cur.histCursor = h.cursor || 0; cur.remoteHasMoreHistory = !!h.hasMore;
+      const messages = h.messages || [];
+      cur.localEarlier = messages.length > INITIAL_HISTORY_RENDER_LIMIT ? messages.slice(0, -INITIAL_HISTORY_RENDER_LIMIT) : [];
+      cur.hasMoreHistory = cur.remoteHasMoreHistory || cur.localEarlier.length > 0;
+      await renderHistoryBatch(messages.slice(-INITIAL_HISTORY_RENDER_LIMIT), renderSeq);
+      if (renderSeq !== chatRenderSeq) return;
+      scrollBottom();
+    } catch {
+      loader.textContent = 'Could not load history.';
+    }
   } else if (s.carry && s.carry.length) {
     // Agent switch: render the prior transcript inline so it reads as ONE continuous
     // conversation, capped to the last 40 messages for snappiness (the agent still gets
@@ -2200,10 +2218,7 @@ async function openChat(s) {
     renderContextMeter();
   }
   connectWS();
-  refreshButton();
-  setAttnBadge(0); // reset badge on every new chat; refreshAttnBadge below will set the real count
   refreshAttnBadge();
-  setTimeout(() => $('input').focus(), 100);
 }
 async function renderLinearBar(inc, sessionId) {
   const bar = $('linearBar'); if (!bar) return;
@@ -2314,8 +2329,8 @@ function nextPaint() {
 }
 async function renderHistoryBatch(messages, seq) {
   const list = messages || [];
-  if (!await preResolveMessages(list, seq)) return false;
   const batchSize = list.length > 140 ? 12 : 24;
+  scheduleHistoryPathResolve(list, seq);
   for (let i = 0; i < list.length; i += batchSize) {
     if (seq !== chatRenderSeq) return false;
     const frag = document.createDocumentFragment();
@@ -2324,6 +2339,17 @@ async function renderHistoryBatch(messages, seq) {
     if (i + batchSize < list.length) await nextPaint();
   }
   return true;
+}
+function scheduleHistoryPathResolve(messages, seq) {
+  const refs = (messages || []).flatMap(messagePathRefs);
+  if (!refs.length) return;
+  const cwd = (cur && cur.cwd) || '';
+  setTimeout(() => {
+    if (seq != null && seq !== chatRenderSeq) return;
+    resolvePathRefs(refs, cwd).then((changed) => {
+      if (changed && (seq == null || seq === chatRenderSeq)) rerenderResolvedMarkdown();
+    }).catch(() => {});
+  }, 0);
 }
 
 /* load older history when user scrolls to top */
@@ -2335,15 +2361,28 @@ async function loadEarlierMessages() {
   container.insertBefore(loader, container.firstChild);
   const prevHeight = container.scrollHeight;
   try {
+    if (cur.localEarlier && cur.localEarlier.length) {
+      const start = Math.max(0, cur.localEarlier.length - EARLIER_HISTORY_BATCH);
+      const messages = cur.localEarlier.splice(start);
+      loader.remove();
+      scheduleHistoryPathResolve(messages);
+      for (let i = messages.length - 1; i >= 0; i--) {
+        container.insertBefore(buildHistElement(messages[i]), container.firstChild);
+      }
+      cur.hasMoreHistory = cur.localEarlier.length > 0 || !!cur.remoteHasMoreHistory;
+      if (!cur.hasMoreHistory) { const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); }
+      container.scrollTop += container.scrollHeight - prevHeight;
+      return;
+    }
     const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`)).json();
     loader.remove();
     if (!h.messages || !h.messages.length) { cur.hasMoreHistory = false; const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); return; }
-    await preResolveMessages(h.messages);
+    scheduleHistoryPathResolve(h.messages);
     // prepend in order (oldest first = same as h.messages array order)
     for (let i = h.messages.length - 1; i >= 0; i--) {
       container.insertBefore(buildHistElement(h.messages[i]), container.firstChild);
     }
-    cur.histCursor = h.cursor; cur.hasMoreHistory = h.hasMore;
+    cur.histCursor = h.cursor; cur.remoteHasMoreHistory = !!h.hasMore; cur.hasMoreHistory = cur.remoteHasMoreHistory;
     if (!cur.hasMoreHistory) { const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); }
     // restore scroll position — shift by how much content was added above
     container.scrollTop += container.scrollHeight - prevHeight;

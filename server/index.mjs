@@ -1781,6 +1781,20 @@ const HIST_MSG_LIMIT = 400;
 const HIST_TAIL_BYTES = 6 * 1024 * 1024; // read last 6MB for large files
 const HIST_TOOL_RESULT_LIMIT = 1200;
 const HIST_TOOL_INPUT_LIMIT = 2200;
+const HISTORY_CACHE_LIMIT = 48;
+const HISTORY_CACHE = new Map();
+function getHistoryCache(key) {
+  const hit = HISTORY_CACHE.get(key);
+  if (!hit) return null;
+  HISTORY_CACHE.delete(key);
+  HISTORY_CACHE.set(key, hit);
+  return { ...hit, messages: hit.messages || [] };
+}
+function setHistoryCache(key, value) {
+  HISTORY_CACHE.set(key, { ...value, messages: value.messages || [] });
+  while (HISTORY_CACHE.size > HISTORY_CACHE_LIMIT) HISTORY_CACHE.delete(HISTORY_CACHE.keys().next().value);
+  return value;
+}
 function compactString(s, limit) {
   s = String(s == null ? '' : s);
   if (s.length <= limit) return s;
@@ -1881,6 +1895,16 @@ function readJsonlChunk(file, endOffset) {
   const nl = raw.indexOf('\n');
   return { raw: start > 0 && nl >= 0 ? raw.slice(nl + 1) : raw, startOffset: start };
 }
+function claudeSessionHistory(id, file, before = null) {
+  const st = statSync(file);
+  const end = before != null ? Math.min(before, st.size) : st.size;
+  const key = `${id}:${end}:${st.size}:${st.mtimeMs}`;
+  const cached = getHistoryCache(key);
+  if (cached) return cached;
+  const { raw, startOffset } = readJsonlChunk(file, end);
+  const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
+  return setHistoryCache(key, { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) });
+}
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) return { messages: enrichCodexHistory(id, (codex.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
@@ -1892,9 +1916,7 @@ function sessionHistory(id, { before = null } = {}) {
   if (mac) return { messages: enrichCodexHistory(id, (mac.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: mac.cwd || DEFAULT_CWD, agent: 'mac', settings: normalizeSettings(mac.settings || {}), parentId: mac.parentId || null, parentTitle: mac.parentTitle || '', context: normalizeContext(mac.context || { agent: 'mac' }) };
   const file = findSessionFile(id);
   if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD, context: normalizeContext({ agent: 'claude' }) };
-  const { raw, startOffset } = readJsonlChunk(file, before);
-  const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
-  return { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) };
+  return claudeSessionHistory(id, file, before);
 }
 
 // ---- helpers: available skills/commands for the "/" picker ----------------
