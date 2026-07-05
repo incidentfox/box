@@ -41,6 +41,7 @@
     <button id="themeBtn" class="iconbtn ghost" title="theme" data-icon="moon"></button>
     <button id="boardBtn" class="iconbtn ghost" title="Linear board" data-icon="board"></button>
     <button id="pipesBtn" class="iconbtn ghost" title="pipelines" data-icon="pulse"></button>
+    <button id="voiceBtn" class="iconbtn ghost hidden" title="voice assistant" data-icon="mic"></button>
     <button id="newBtn" class="compose" title="new chat" data-icon="plus"></button>
   </header>
   <div id="sessSearch" class="boardSearch hidden">
@@ -55,6 +56,9 @@
 </section>
 
 <button id="sidebarRestoreBtn" class="iconbtn ghost sidebarRestore" title="expand sidebar" data-icon="sidebar-expand"></button>
+
+<!-- VOICE ASSISTANT (contents built by voice.js on first open) -->
+<section id="voice" class="screen hidden"></section>
 
 <section id="pipelines" class="screen hidden">
   <header class="bar">
@@ -239,5 +243,6 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/voice.js"></script>
 </body>
 </html>

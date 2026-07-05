@@ -1208,3 +1208,44 @@ textarea.acctInput { resize: vertical; }
 /* readonly code display in the login form — never raises the keyboard */
 .acctCodeView { font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; opacity: .85; margin-top: 8px; }
 .acctCodeView:focus { outline: none; }
+
+/* ===== voice assistant ===== */
+.voStatus { font-size: 11px; padding: 3px 9px; border-radius: 999px; background: var(--subtle); color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.voStatus.live { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+.voStatus.live.muted { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.voStatus.connecting, .voStatus.reconnecting { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); animation: voBlink 1.2s ease-in-out infinite; }
+@keyframes voBlink { 50% { opacity: .45; } }
+.voClock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; margin-left: 8px; }
+.voCost { color: var(--muted); font-size: 12px; }
+.voBanner { padding: 8px 14px; text-align: center; font-size: 13px; background: color-mix(in srgb, var(--accent) 10%, var(--bg)); color: var(--accent); border-bottom: 1px solid var(--line); }
+.voFeed { flex: 1; overflow-y: auto; padding: 14px 14px calc(20px + var(--safe-b)); display: flex; flex-direction: column; gap: 10px; -webkit-overflow-scrolling: touch; }
+
+
+.voHint { margin: auto; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.6; padding: 30px 20px; }
+.voBub { max-width: 86%; padding: 10px 14px; border-radius: 16px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.voBub.user { align-self: flex-end; background: var(--user-bub); color: var(--ink); border-bottom-right-radius: 5px; }
+.voBub.asst { align-self: flex-start; background: var(--card); border: 1px solid var(--line); color: var(--ink); border-bottom-left-radius: 5px; }
+.voBub.notice { align-self: center; background: transparent; color: var(--muted); font-size: 12.5px; padding: 2px 8px; }
+.voToolChip { align-self: flex-start; display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); background: var(--subtle); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; }
+.voToolChip.ok { color: var(--green); }
+.voToolChip.fail { color: #c0392b; }
+.voSpin { width: 11px; height: 11px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: voSpin .8s linear infinite; }
+@keyframes voSpin { to { transform: rotate(360deg); } }
+.voDock { display: flex; align-items: center; justify-content: center; gap: 34px; padding: 14px 0 calc(18px + var(--safe-b)); border-top: 1px solid var(--line); background: var(--bg); }
+.voCtl { width: 62px; height: 62px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); color: var(--ink); display: flex; align-items: center; justify-content: center; font-size: 20px; }
+.voCtl:active { transform: scale(.94); }
+.voCtl.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.voCtl svg { width: 24px; height: 24px; }
+.voEndBtn:not(:disabled) { background: #d64541; border-color: #d64541; color: #fff; }
+.voEndBtn:disabled { opacity: .35; }
+.voOrbBtn { position: relative; width: 132px; height: 132px; border-radius: 50%; border: none; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.voOrb { --lvl: 1; width: 104px; height: 104px; border-radius: 50%; background: radial-gradient(circle at 32% 30%, color-mix(in srgb, var(--accent) 82%, #fff), var(--accent)); box-shadow: 0 4px 22px color-mix(in srgb, var(--accent) 40%, transparent); transition: transform .12s ease, box-shadow .3s ease, background .3s ease; transform: scale(var(--lvl)); }
+.voOrb.off, .voOrb.ended { background: radial-gradient(circle at 32% 30%, #b9b3ac, #8a8580); box-shadow: none; }
+.voOrb.connecting, .voOrb.reconnecting { animation: voPulse 1.1s ease-in-out infinite; }
+.voOrb.listening { animation: voBreathe 3.2s ease-in-out infinite; }
+.voOrb.thinking { background: radial-gradient(circle at 32% 30%, #e8c66a, #d9a63f); box-shadow: 0 4px 22px rgba(217,166,63,.4); animation: voPulse 1s ease-in-out infinite; }
+.voOrb.speaking { background: radial-gradient(circle at 32% 30%, color-mix(in srgb, var(--green) 78%, #fff), var(--green)); box-shadow: 0 4px 26px color-mix(in srgb, var(--green) 45%, transparent); }
+@keyframes voPulse { 50% { transform: scale(calc(var(--lvl) * .92)); opacity: .8; } }
+@keyframes voBreathe { 50% { transform: scale(calc(var(--lvl) * 1.05)); } }
+.voOrbLabel { position: absolute; bottom: -4px; left: 0; right: 0; text-align: center; font-size: 13px; color: var(--muted); pointer-events: none; }
+.voOrbBtn.clickable .voOrbLabel { color: var(--ink); font-weight: 600; }
