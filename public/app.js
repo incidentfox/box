@@ -60,7 +60,7 @@ applyVV();
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
 /* ---------- helpers ---------- */
-const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'];
+const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew', 'voice'];
 const desktopMq = window.matchMedia ? window.matchMedia('(min-width: 900px)') : null;
 const isDesktopShell = () => !!(desktopMq && desktopMq.matches);
 function show(id) {
@@ -99,6 +99,7 @@ function renderRoute(s) {
       case 'login':     show('login'); break;
       case 'pipelines': openPipelines(); break;
       case 'board':     openBoard(); break;
+      case 'voice':     if (typeof openVoice === 'function') openVoice(); else openSessions(); break;
       case 'issue':     openIssue(s.id); break;
       case 'issueNew':  openIssueNew(); break;
       case 'chat':

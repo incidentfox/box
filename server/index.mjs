@@ -27,6 +27,7 @@ import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
 import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
 import { renderMeetingContextForIssue } from './meeting-context.mjs';
+import { registerVoiceAssistant } from './voice-assistant.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -2512,6 +2513,7 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
     linear: LINEAR_ENABLED,
     brain: !!findBrainDir(),
     voice: !!(ELEVEN_KEY || DEEPGRAM_KEY),
+    voiceAssistant: !!OPENAI_KEY,
     codex: codexAvailable(),
     gemini: !!GEMINI_KEY,
     agy: agyAvailable(),
@@ -2607,6 +2609,15 @@ app.post('/api/hooks/:id/reset', requireAuth, (req, res) => {
 // Let a private overlay register extra routes / run init (business endpoints, etc.).
 if (overlay.routes) { try { overlay.routes(app, { requireAuth, HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.routes failed:', e && e.message); } }
 if (overlay.onReady) { try { overlay.onReady({ HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.onReady failed:', e && e.message); } }
+
+// Realtime voice assistant: browser ↔ OpenAI Realtime over WebRTC; every tool call the
+// model makes executes HERE with the box's own powers (sessions, Linear, research, brain…).
+try {
+  registerVoiceAssistant(app, {
+    requireAuth, cfg, HOME, STATE_DIR, PORT, authToken: AUTH_TOKEN, ownerName: OWNER_NAME,
+    defaultCwd: () => DEFAULT_CWD, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
+  });
+} catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
 async function linearGql(query, variables) {
   if (linearLite) return linearLite.gql(query, variables); // local SQLite-backed clone
