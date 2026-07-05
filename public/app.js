@@ -3093,17 +3093,47 @@ window.addEventListener('drop', (e) => {
   const files = filesFrom(e.dataTransfer);
   if (files.length) uploadFiles(files);
 });
+// Downscale + re-encode big photos client-side before upload — on a slow uplink a full-res
+// phone photo (3–8 MB HEIC/JPEG) is the whole wait. Longest edge is capped at RESIZE_MAX_DIM;
+// that's already above the ~1568px Claude's vision downsizes to, so the model loses nothing and
+// Jimmy's lightbox stays sharp. GIF (animated) / SVG (vector) are never rasterized, and if the
+// re-encode fails (e.g. browser can't decode HEIC) or doesn't shrink, we keep the original bytes.
+const RESIZE_MAX_DIM = 1600;             // px, longest edge
+const RESIZE_QUALITY = 0.82;             // jpeg quality
+const RESIZE_MIN_BYTES = 200 * 1024;     // skip files already this small — not worth the CPU
+const NO_RESIZE_RE = /\.(gif|svg)$/i;
+const canResize = (f) => isImageFile(f) && !NO_RESIZE_RE.test((f && f.name) || '') && !/gif|svg/.test((f && f.type) || '');
+async function shrinkImage(file) {
+  if (!canResize(file) || file.size < RESIZE_MIN_BYTES || typeof createImageBitmap !== 'function') return file;
+  let bmp;
+  try {
+    // imageOrientation:'from-image' bakes in EXIF rotation (older Safari ignores/throws → plain decode).
+    try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+    catch { bmp = await createImageBitmap(file); }
+    const scale = Math.min(1, RESIZE_MAX_DIM / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', RESIZE_QUALITY));
+    if (!blob || blob.size >= file.size) return file;   // no win (already-small/opaque source) → keep original
+    const base = ((file.name || 'image').replace(/\.[^.]+$/, '')) || 'image';
+    return new File([blob], base + '.jpg', { type: 'image/jpeg', lastModified: file.lastModified || Date.now() });
+  } catch { return file; }               // decode/encode failed → upload the original untouched
+  finally { if (bmp && bmp.close) bmp.close(); }
+}
 // `images` is the composer's attachment buffer — images AND other files. Each entry:
 // { path, url (object-url preview for images, '' otherwise), name, isImage }.
 async function uploadFiles(files) {
   if (!files || !files.length) return;
   const picked = [...files].slice(0, 6);
-  const fd = new FormData(); picked.forEach((f) => fd.append('images', f));
+  toast('optimizing…');
+  const prepared = await Promise.all(picked.map(shrinkImage));   // order preserved → previews still line up
+  const fd = new FormData(); prepared.forEach((f) => fd.append('images', f));
   toast('uploading…');
   try {
     const d = await (await api('/api/upload', { method: 'POST', body: fd })).json();
     d.paths.forEach((p, i) => {
-      const f = picked[i]; const img = isImageFile(f);
+      const f = picked[i]; const img = isImageFile(f);   // preview from the original (nicer, already local)
       images.push({ path: p, url: img ? URL.createObjectURL(f) : '', name: (f && f.name) || p.split('/').pop(), isImage: img });
     });
     renderAttach();
