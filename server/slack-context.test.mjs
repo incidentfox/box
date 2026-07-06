@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
-import { slackConfigured, slackRecent, slackSearch, renderSlackContext, slackEventForMessage } from './slack-context.mjs';
+import { slackConfigured, slackTokenCandidates, slackRecent, slackSearch, renderSlackContext, slackEventForMessage } from './slack-context.mjs';
 
 function json(body) {
   return { ok: true, status: 200, json: async () => body };
 }
 
-function fakeFetch(url) {
+function fakeFetch(url, opts = {}) {
   const u = new URL(String(url));
   const method = u.pathname.split('/').pop();
+  if (method === 'auth.test') {
+    return json({
+      ok: true,
+      saw_cookie: opts.headers && opts.headers.Cookie || '',
+      saw_auth: opts.headers && opts.headers.Authorization || '',
+    });
+  }
   if (method === 'conversations.list') {
     return json({
       ok: true,
@@ -53,6 +60,18 @@ const cfg = (k, d = '') => ({
 
 assert.equal(slackConfigured(cfg), true);
 assert.equal(slackConfigured(() => ''), false);
+assert.deepEqual(slackTokenCandidates((k) => ({
+  SLACK_USER_TOKEN: 'xoxc-test',
+  SLACK_COOKIE: 'xoxd-cookie',
+}[k] || '')), [{ token: 'xoxc-test', key: 'SLACK_USER_TOKEN', cookie: 'd=xoxd-cookie' }]);
+assert.deepEqual(slackTokenCandidates((k) => ({
+  SLACK_USER_TOKEN: 'xoxc-test',
+  SLACK_COOKIE_D: 'd=xoxd-cookie; other=ignored',
+}[k] || '')), [{ token: 'xoxc-test', key: 'SLACK_USER_TOKEN', cookie: 'd=xoxd-cookie; other=ignored' }]);
+assert.deepEqual(slackTokenCandidates((k) => ({
+  SLACK_BOT_TOKEN: 'xoxb-test',
+  SLACK_COOKIE_D: 'xoxd-cookie',
+}[k] || '')), [{ token: 'xoxb-test', key: 'SLACK_BOT_TOKEN', cookie: '' }]);
 
 const recent = await slackRecent({ cfg, fetchImpl: fakeFetch });
 assert.equal(recent.configured, true);
@@ -67,6 +86,21 @@ assert.match(rendered, /Latest update/);
 const search = await slackSearch({ query: 'invoice', cfg, fetchImpl: fakeFetch });
 assert.equal(search.matches.length, 1);
 assert.equal(search.matches[0].permalink, 'https://slack.test/archives/COPS/p178');
+let xoxcHeaders = {};
+const xoxcSearch = await slackSearch({
+  query: 'invoice',
+  cfg: (k, d = '') => ({
+    SLACK_USER_TOKEN: 'xoxc-test',
+    SLACK_COOKIE: 'xoxd-cookie',
+  }[k] || d),
+  fetchImpl: (url, opts) => {
+    xoxcHeaders = opts.headers || {};
+    return fakeFetch(url, opts);
+  },
+});
+assert.equal(xoxcSearch.matches.length, 1);
+assert.equal(xoxcHeaders.Cookie, 'd=xoxd-cookie');
+assert.equal(xoxcHeaders.Authorization, 'Bearer xoxc-test');
 assert.deepEqual(slackEventForMessage(search.matches[0]), {
   type: 'slack',
   ts: '2026-05-28T20:26:42.000Z',
