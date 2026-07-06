@@ -45,7 +45,7 @@ export function registerVoiceAssistant(app, ctx) {
   const {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
     defaultCwd, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
-    macAvailable,
+    macAvailable, loadCodexMessages,
   } = ctx;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
@@ -133,6 +133,30 @@ export function registerVoiceAssistant(app, ctx) {
     return '';
   }
 
+  // Agent-aware "what did it last say": claude sessions live in JSONLs, but codex/mac/
+  // gemini transcripts moved to per-session sidecars (PR #91) — reading those needs
+  // ctx.loadCodexMessages. Without this, check_session/announcements were BLIND to
+  // codex agents (the exact "started codex sessions but couldn't read the results back"
+  // failure from the 2026-07-06 drive).
+  function lastAgentText(sessionId, agent, chars = 600) {
+    if (!sessionId) return '';
+    if (agent && agent !== 'claude') {
+      try {
+        const msgs = (loadCodexMessages && loadCodexMessages(sessionId)) || [];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i];
+          if ((m.role || m.type) !== 'assistant') continue;
+          const txt = Array.isArray(m.parts)
+            ? m.parts.filter((p) => p && p.t === 'text').map((p) => p.text).join(' ')
+            : (typeof m.content === 'string' ? m.content : m.text || '');
+          if (txt && txt.trim()) return short(txt, chars);
+        }
+      } catch {}
+      return '';
+    }
+    return lastAssistantText(sessionId, chars);
+  }
+
   // ---- background tasks + proactive updates ---------------------------------
 
   let seq = 1;
@@ -190,31 +214,41 @@ export function registerVoiceAssistant(app, ctx) {
     }, 20000);
     iv.unref && iv.unref();
   }
-  // Re-arm pollers for research that was in flight when the server restarted.
+  // Re-arm pollers for research that was in flight when the server restarted. Agent
+  // watches don't survive a restart (their setInterval died with the old process) —
+  // close them out honestly instead of showing them as running forever.
   try {
     for (const t of JSON.parse(readFileSync(TASKS_FILE, 'utf8'))) {
       TASKS.set(t.id, t);
       if (t.status === 'running' && t.kind === 'research' && t.runId) armResearchPoller(t);
+      else if (t.status === 'running') { t.status = 'done'; t.summary = (t.summary || '') + ' (watch ended by server restart — use check_session for current state)'; }
     }
+    saveTasks();
   } catch {}
 
   // Watch a box chat (key) until its current work settles, then announce the outcome.
+  // Watch a launched/steered agent until its turn settles, announce the outcome, and
+  // track it in TASKS so check_tasks/get_overview list running agents (visibility that
+  // was missing on the 2026-07-06 drive).
   function watchSession(key, label) {
     const started = Date.now();
     let sawRunning = false;
+    const task = newTask('agent', label, { key });
     const iv = setInterval(() => {
-      let s; try { s = rt(key); } catch { clearInterval(iv); return; }
+      let s; try { s = rt(key); } catch { clearInterval(iv); finishTask(task, 'failed', 'session state lost', ''); return; }
       const busy = s.running || (s.queue && s.queue.length) || (s.sessionId && RUNNING.has(s.sessionId));
       if (busy) sawRunning = true;
       if (sawRunning && !busy) {
         clearInterval(iv);
-        const tail = s.sessionId ? lastAssistantText(s.sessionId, 700) : '';
-        pushEvent('agent_done', label, `The agent working on "${label}" just finished its turn.${tail ? ' It reported: ' + tail : ''} You can send it a follow-up or leave it.`);
+        const tail = lastAgentText(s.sessionId, s.agent, 700);
+        finishTask(task, 'done', tail || '(no text output captured)',
+          `The ${s.agent && s.agent !== 'claude' ? s.agent + ' ' : ''}agent on "${label}" just finished its pass.${tail ? ' It reported: ' + tail : ' I could not read its output — ask me to check the session for details.'} Want me to send it a follow-up?`);
         return;
       }
       if (Date.now() - started > 50 * 60 * 1000) {
         clearInterval(iv);
-        pushEvent('agent_slow', label, `Heads up — the agent on "${label}" has been running for 50 minutes and isn't done yet. Want me to check on it?`);
+        finishTask(task, 'done', 'still running after 50m (stopped watching)',
+          `Heads up — the agent on "${label}" has been running for 50 minutes and isn't done yet. Want me to check on it?`);
       }
     }, 8000);
     iv.unref && iv.unref();
@@ -369,7 +403,7 @@ export function registerVoiceAssistant(app, ctx) {
         const others = hits.slice(1, 4).map((x) => short(x.title, 50));
         return {
           match: sessBrief(s),
-          latest_reply: lastAssistantText(s.id, 800) || short(s.preview, 200),
+          latest_reply: lastAgentText(s.id, s.agent, 800) || short(s.preview, 200) || '(no output yet)',
           ...(others.length ? { other_candidates: others } : {}),
         };
       },
@@ -721,7 +755,8 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
 - Read tools (get_overview, list_sessions, check_session, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
 - Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, take_note): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
-- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. When a [TASK UPDATE] system message arrives, weave it in naturally: what finished, the one-line result, offer detail.
+- BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
+- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. When a [TASK UPDATE] system message arrives, weave it in naturally: what finished, the one-line result, offer detail. To check on running work yourself: check_tasks lists every agent and research task you started; check_session reads any agent's latest output (including codex).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
 - If a tool errors, say so plainly and move on. NEVER invent tool results, and never claim live state you haven't checked this session.
