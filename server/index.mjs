@@ -246,9 +246,9 @@ How to continue:
   },
   'fork-thread': {
     title: 'Fork thread',
-    desc: 'Seed prompt for a child Codex thread forked from a parent chat.',
+    desc: 'Seed prompt for a child agent thread forked from a parent chat.',
     vars: ['parentTitle', 'parentId', 'workspace', 'transcript'],
-    default: `You are a forked child Codex thread created in the Box mobile app.
+    default: `You are a forked child agent thread created in the Box mobile app.
 
 Parent thread: {{parentTitle}}
 Parent id: {{parentId}}
@@ -1054,6 +1054,59 @@ function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
     return `${role}\n\n${text || ''}${tools ? (text ? '\n\n' : '') + tools : ''}`.trim();
   }).filter((s) => s.length > 10).join('\n\n---\n\n');
   return header + body;
+}
+const SESSION_STORES = [
+  { agent: 'codex', load: loadCodex, save: saveCodex },
+  { agent: 'gemini', load: loadGemini, save: saveGemini },
+  { agent: 'agy', load: loadAgy, save: saveAgy },
+  { agent: 'mac', load: loadMac, save: saveMac },
+];
+function storedSession(id) {
+  for (const spec of SESSION_STORES) {
+    const state = spec.load();
+    const rec = state.sessions && state.sessions[id];
+    if (rec) return { ...spec, state, rec };
+  }
+  return null;
+}
+function fullSessionHistory(id) {
+  const stored = storedSession(id);
+  if (stored) {
+    const rec = stored.rec;
+    return {
+      id,
+      title: rec.title || `${agentDisplayName(stored.agent)} chat`,
+      cwd: rec.cwd || DEFAULT_CWD,
+      agent: stored.agent,
+      settings: normalizeSettings(rec.settings || {}),
+      parentId: rec.parentId || null,
+      parentTitle: rec.parentTitle || '',
+      context: stored.agent === 'codex' ? contextForSession(id, { agent: 'codex', codex: rec }) : normalizeContext(rec.context || { agent: stored.agent }),
+      messages: rec.messages || [],
+      mutable: true,
+    };
+  }
+  const file = findSessionFile(id);
+  if (!file) return { id, title: id.slice(0, 8), cwd: DEFAULT_CWD, agent: 'claude', settings: normalizeSettings({}), messages: [], mutable: false };
+  const MAX = 50 * 1024 * 1024;
+  const { size } = statSync(file);
+  let raw;
+  if (size <= MAX) raw = readFileSync(file, 'utf8');
+  else {
+    const buf = Buffer.allocUnsafe(MAX);
+    const fd = openSync(file, 'r'); readSync(fd, buf, 0, MAX, size - MAX); closeSync(fd);
+    const s = buf.toString('utf8'); const nl = s.indexOf('\n'); raw = nl >= 0 ? s.slice(nl + 1) : s;
+  }
+  return {
+    id,
+    title: sessionTitle(file) || id.slice(0, 8),
+    cwd: decodeCwd(dirname(file)),
+    agent: 'claude',
+    settings: normalizeSettings({}),
+    context: contextForSession(id, { agent: 'claude', file }),
+    messages: parseJsonlMessages(raw),
+    mutable: false,
+  };
 }
 function codexSessionMentionCount(session, issueId) {
   let n = 0;
@@ -2181,6 +2234,19 @@ app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   h.archived = loadArchived().has(req.params.id);
   h.favorite = loadFavorites().has(req.params.id);
   res.json(h);
+});
+app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
+  try {
+    const h = fullSessionHistory(req.params.id);
+    let messages = h.messages || [];
+    if (req.query.through != null) {
+      const idx = Math.max(-1, Math.min(messages.length - 1, parseInt(req.query.through, 10)));
+      messages = idx >= 0 ? messages.slice(0, idx + 1) : [];
+    }
+    res.json({ ...h, messages: compactHistoryMessages(messages), archived: loadArchived().has(req.params.id), favorite: loadFavorites().has(req.params.id) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
