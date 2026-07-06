@@ -45,6 +45,7 @@ export function registerVoiceAssistant(app, ctx) {
   const {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
     defaultCwd, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
+    macAvailable,
   } = ctx;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
@@ -393,18 +394,19 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'start_agent',
-      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness) or codex (good for mechanical coding, runs on OpenAI credits). Runs in the background; you are told when the first turn completes. Give a descriptive short title.',
+      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness), codex (good for mechanical coding), or mac (Computer Use on the paired laptop/browser). Runs in the background; you are told when the first turn completes. Give a descriptive short title.',
       parameters: {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'Full instruction for the agent — context, what to do, what done looks like' },
           project: { type: 'string', description: 'Repo/dir name, e.g. mindbill, software-factory, forta. Omit for the default workspace.' },
-          agent: { type: 'string', enum: ['claude', 'codex'] },
+          agent: { type: 'string', enum: ['claude', 'codex', 'mac'] },
           title: { type: 'string', description: 'Short human title, e.g. "Fix invoice rounding"' },
         },
         required: ['task'],
       },
       handler: async ({ task, project, agent = 'claude', title }) => {
+        if (agent === 'mac' && macAvailable && !macAvailable()) return { error: 'Mac Computer Use bridge is not reachable right now' };
         const key = 'new-' + randomBytes(4).toString('hex');
         const cwd = resolveProjectDir(project);
         const t = title || short(task, 48);
