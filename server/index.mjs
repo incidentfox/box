@@ -2619,6 +2619,7 @@ try {
   registerVoiceAssistant(app, {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken: AUTH_TOKEN, ownerName: OWNER_NAME,
     defaultCwd: () => DEFAULT_CWD, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
+    macAvailable,
   });
 } catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
@@ -3587,6 +3588,32 @@ function enqueue(extKey, msg) {
   runWorker(s);
   return msg.qid;
 }
+app.post('/api/agent/enqueue', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const text = String(body.text || body.prompt || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const agent = String(body.agent || appDefaultAgent() || 'claude').trim().toLowerCase();
+  if (!VALID_APP_AGENTS.has(agent)) return res.status(400).json({ error: `unknown agent ${agent}` });
+  const rawKey = String(body.key || `new-${randomBytes(4).toString('hex')}`).trim();
+  const key = rawKey.replace(/[^\w.-]/g, '').slice(0, 80) || `new-${randomBytes(4).toString('hex')}`;
+  const cwd = validateDirectory(expandUserPath(body.cwd || '')) ? expandUserPath(body.cwd) : DEFAULT_CWD;
+  const title = sanitizeTitle(body.title || '') || text.replace(/\s+/g, ' ').slice(0, 72);
+  if (body.dryRun || body.dry_run) return res.json({ ok: true, dry_run: true, key, agent, cwd, title });
+  if (agent === 'mac' && !macAvailable()) return res.status(409).json({ error: 'mac bridge unavailable' });
+  const qid = enqueue(key, {
+    text,
+    displayText: body.displayText,
+    images: Array.isArray(body.images) ? body.images : [],
+    mode: body.mode === 'bash' ? 'bash' : 'normal',
+    agent,
+    cwd,
+    title,
+    parentId: body.parentId || null,
+    parentTitle: body.parentTitle || '',
+    force: !!body.force,
+  });
+  res.json({ ok: true, key, qid, agent, cwd, title });
+});
 function dequeue(extKey, qid) {
   const s = rt(extKey);
   const idx = s.queue.findIndex((q, i) => q.qid === qid && !(i === 0 && s.running));

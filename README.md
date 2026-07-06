@@ -220,6 +220,19 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
 
 Agents are told about these in `harness/CLAUDE.md`, so they'll use them when it helps.
 
+## Agent launch API (for other agents)
+
+Agents running on the box can start a Box chat without speaking the WebSocket protocol:
+
+```bash
+node bin/box-enqueue.mjs --agent mac --title "Slack token setup" --text "Use the laptop browser..."
+```
+
+`--agent` accepts `claude`, `codex`, `gemini`, `agy`, or `mac` (Computer Use through the
+paired laptop bridge). The helper reads `CC_AUTH_TOKEN` from the environment or `.env` and
+POSTs to `POST /api/agent/enqueue`. Use `--dry-run` to validate routing without starting
+a session.
+
 ## Voice mode (talk to your box like a phone call)
 
 With an `OPENAI_API_KEY` set, a 🎙 button appears in the header: a **realtime,
@@ -232,10 +245,11 @@ that holds the box's controls.
   token whose instructions carry a live snapshot of your box (active agents, board,
   open decisions), and it executes every tool call the model makes.
 - **It can actually do things**: list/check/steer sessions, start new Claude/Codex
-  agents, delegate a Linear ticket to a fresh agent, create/update issues, quick web
-  search and multi-minute **deep research** (Parallel API), search your brain and Slack,
-  take notes, email you, read your calendar. Long tasks run in the background and the
-  assistant **announces them when they finish** — mid-conversation.
+  agents or Mac Computer Use sessions, delegate a Linear ticket to a fresh agent,
+  create/update issues, quick web search and multi-minute **deep research** (Parallel
+  API), search your brain and Slack, take notes, email you, read your calendar. Long
+  tasks run in the background and the assistant **announces them when they finish** —
+  mid-conversation.
 - **Built for bad cellular**: sessions auto-rotate before OpenAI's 60-minute cap and
   auto-reconnect after dead zones, folding the recent transcript into the new session
   so the conversation just continues.
