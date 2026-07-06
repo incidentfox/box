@@ -2337,7 +2337,7 @@ function buildHistElement(m) {
     if (m.ts) { const ts = document.createElement('span'); ts.className = 'msgTs'; ts.textContent = fmtTs(m.ts); acts.appendChild(ts); }
     if (cur.id && m._idx != null) {
       const forkBtn = document.createElement('button'); forkBtn.className = 'iconbtn ghost msgCopy'; forkBtn.title = 'fork from here'; forkBtn.innerHTML = ICONS.branch;
-      forkBtn.onclick = (e) => { e.stopPropagation(); forkCurrent({ throughIndex: Number(m._idx) }); };
+      forkBtn.onclick = (e) => { e.stopPropagation(); confirmFork({ throughIndex: Number(m._idx) }); };
       acts.appendChild(forkBtn);
     }
     acts.appendChild(cpBtn); wrap.appendChild(acts);
@@ -3472,6 +3472,21 @@ async function forkCurrent(opts = {}) {
   enqueueText(prompt, { parentId: parent.id, parentTitle: parent.title, title: childTitle, displayText: `Forked from ${parent.title}` });
   toast(opts.throughIndex != null ? 'Forked from that point' : 'Fork created');
 }
+function confirmFork(opts = {}) {
+  if (!cur.id) return toast('Send at least one message before forking');
+  const scoped = opts.throughIndex != null;
+  openSheet(scoped ? 'Fork from this message?' : 'Fork this chat?', [
+    {
+      ic: '',
+      label: scoped ? 'Create fork from here' : 'Create fork',
+      desc: scoped
+        ? 'Starts a child chat using the transcript up to this message.'
+        : 'Starts a child chat using this conversation transcript.',
+      fn: () => forkCurrent(opts),
+    },
+    { ic: '', label: 'Cancel', desc: 'Keep working in this chat', fn: () => {} },
+  ]);
+}
 async function runBtw(question) {
   question = String(question || '').trim();
   if (!question) return toast('Type a question after /btw');
@@ -3561,7 +3576,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'theme') return toggleTheme();
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
-  if (cmd.action === 'fork') return forkCurrent();
+  if (cmd.action === 'fork') return confirmFork();
   if (cmd.action === 'btw') { $('input').value = '/btw '; autoGrow(); refreshButton(); focusComposerSoon(); return; }
   if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
   if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
@@ -3698,7 +3713,7 @@ function openChatTitleSheet() {
   const title = cur.title || 'New chat';
   openSheet(title, [
     { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
-    { ic: '', label: 'Fork chat', desc: 'Start a child conversation with this transcript', fn: () => forkCurrent() },
+    { ic: '', label: 'Fork chat', desc: 'Start a child conversation with this transcript', fn: () => confirmFork() },
     { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
     { ic: '', label: 'My messages', desc: 'Browse and copy just your prompts', fn: openMyMessages },
     cur.favorite
