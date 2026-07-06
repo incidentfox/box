@@ -28,6 +28,7 @@ import { AgyExecEngine } from './agy-exec-engine.mjs';
 import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
 import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
+import { slackConfigured } from './slack-context.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -342,6 +343,7 @@ function renderTemplate(id, vars = {}) {
 const HOOK_SPECS = [
   { id: 'inject-time', title: 'Inject current time', file: 'inject-time.sh', event: 'UserPromptSubmit' },
   { id: 'surface-attention', title: 'Surface needs-you items', file: 'surface-attention.sh', event: 'SessionStart' },
+  { id: 'surface-slack', title: 'Surface recent Slack context', file: 'surface-slack.sh', event: 'SessionStart' },
   { id: 'skip-automated', title: 'Skip automated sessions helper', file: '_skip-automated.sh', event: 'helper' },
 ];
 const hookSpec = (id) => HOOK_SPECS.find((h) => h.id === id || h.file === id);
@@ -2514,6 +2516,7 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
     brain: !!findBrainDir(),
     voice: !!(ELEVEN_KEY || DEEPGRAM_KEY),
     voiceAssistant: !!OPENAI_KEY,
+    slack: slackConfigured(cfg),
     codex: codexAvailable(),
     gemini: !!GEMINI_KEY,
     agy: agyAvailable(),

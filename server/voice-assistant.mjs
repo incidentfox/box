@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -505,6 +506,22 @@ export function registerVoiceAssistant(app, ctx) {
       },
     },
     {
+      name: 'slack_recent',
+      description: 'Recent Slack messages from the configured Jimmy Slack scope (channels/DMs listed in SLACK_CHANNELS, or the most recently updated accessible conversations). Use for "what happened on Slack" or to catch up on recent Slack context. Preamble: "Checking Slack."',
+      parameters: { type: 'object', properties: { limit: { type: 'number', description: 'Maximum messages to return, default 10' } } },
+      handler: async ({ limit } = {}) => {
+        const r = await slackRecent({ cfg });
+        if (limit && Array.isArray(r.messages)) r.messages = r.messages.slice(0, Math.max(1, Math.min(20, Number(limit) || 10)));
+        return r;
+      },
+    },
+    {
+      name: 'slack_search',
+      description: 'Search Jimmy Slack messages. Best with a Slack user token that has search:read; bot tokens may only support recent channel reads. Use for "did anyone mention X on Slack" or "find the Slack thread about X". Preamble: "Searching Slack."',
+      parameters: { type: 'object', properties: { query: { type: 'string' }, count: { type: 'number' } }, required: ['query'] },
+      handler: async ({ query, count = 8 }) => slackSearch({ query, count, cfg }),
+    },
+    {
       name: 'web_search',
       description: 'Fast web search (a few seconds) for current facts, people, companies, news. Use freely. For big open-ended questions use deep_research instead. Preamble: "Searching now."',
       parameters: { type: 'object', properties: { query: { type: 'string' }, objective: { type: 'string', description: 'Optional: what you are really trying to find out' } }, required: ['query'] },
@@ -700,7 +717,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
-- Read tools (get_overview, list_sessions, check_session, linear_board, needs_jimmy, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
+- Read tools (get_overview, list_sessions, check_session, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
 - Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, take_note): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
 - Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. When a [TASK UPDATE] system message arrives, weave it in naturally: what finished, the one-line result, offer detail.
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
@@ -711,6 +728,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 - If the user's audio is unintelligible or partial (a real attempt to talk to you, not background noise), ask for a repeat — briefly and specifically. Only respond to what you actually heard.
 - take_note proactively whenever a real idea, decision, or follow-up is spoken; confirm with one word ("Noted."). After a meaty discussion, offer to email a summary and file Linear issues for the action items.
 - Quick facts → web_search. Big open questions → deep_research. Company history, deals, people → brain_search FIRST, web second.
+- Slack questions or recent team chatter → slack_recent/slack_search first; Slack is private context, so summarize and do not read long message dumps aloud.
 - get_briefing is his prepared drive agenda (market numbers, prospect targets, daisyBill attack angles, meeting prep, strategy questions). When he asks "what should we talk about" — or drifts — offer two or three agenda items from it.
 - Never ask him to look at the screen, read, or type. Anything visual goes to email or notes.
 - Confirm before anything destructive or hard to reverse. Email goes ONLY to Jimmy's own inbox; any external recipient requires his explicit okay — otherwise refuse and offer to draft it for him instead.
@@ -745,6 +763,12 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     } catch {}
     const running = [...TASKS.values()].filter((t) => t.status === 'running');
     if (running.length) parts.push('Background tasks running: ' + running.map((t) => `${t.kind} "${short(t.title, 50)}"`).join('; ') + '.');
+    try {
+      if (slackConfigured(cfg)) {
+        const slack = await renderSlackContext({ cfg, includeErrors: false, includeEmpty: false });
+        if (slack) parts.push(short(slack, 1600));
+      }
+    } catch {}
     try {
       if (existsSync(BRIEFING_FILE)) {
         const heads = readFileSync(BRIEFING_FILE, 'utf8').split('\n').filter((l) => /^##\s/.test(l)).map((l) => l.replace(/^##\s*/, ''));
@@ -857,6 +881,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     res.json({
       enabled: enabled(), model: MODEL, voice: VOICE,
       briefing: existsSync(BRIEFING_FILE),
+      slack: slackConfigured(cfg),
       tasks: [...TASKS.values()].slice(-20),
       tools: TOOLS.map((t) => t.name),
     });

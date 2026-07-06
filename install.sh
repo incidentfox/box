@@ -297,7 +297,7 @@ echo
 if [ "$DO_HARNESS" = 1 ]; then
   bold "5) Installing the Claude Code harness (hooks + needs-you helper)"
   mkdir -p "$HOME/.claude/hooks"
-  for h in _skip-automated.sh inject-time.sh surface-attention.sh; do
+  for h in _skip-automated.sh inject-time.sh surface-attention.sh surface-slack.sh; do
     cp "harness/hooks/$h" "$HOME/.claude/hooks/$h" && chmod +x "$HOME/.claude/hooks/$h"
   done
   ok "hooks → ~/.claude/hooks/"
