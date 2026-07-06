@@ -8,6 +8,13 @@ const TOKEN_KEYS = [
   'SLACK_TOKEN_MINDPRACTICE',
   'SLACK_TOKEN_EBH',
 ];
+const COOKIE_KEYS = [
+  'SLACK_COOKIE',
+  'SLACK_COOKIE_D',
+  'SLACK_D_COOKIE',
+  'SLACK_XOXC_COOKIE',
+  'SLACK_XOXD_COOKIE',
+];
 
 const DEFAULT_TYPES = 'public_channel,private_channel,im,mpim';
 const short = (s, n) => {
@@ -21,12 +28,23 @@ export function slackToken(cfg = (k) => process.env[k]) {
 
 export function slackTokenCandidates(cfg = (k) => process.env[k]) {
   const out = [];
+  const cookie = slackCookie(cfg);
   for (const key of TOKEN_KEYS) {
     const token = String(cfg(key) || '').trim();
     if (!token || /^xapp-/i.test(token)) continue;
-    if (!out.some((x) => x.token === token)) out.push({ token, key });
+    if (!out.some((x) => x.token === token)) out.push({ token, key, cookie: /^xoxc-/i.test(token) ? cookie : '' });
   }
   return out;
+}
+
+function slackCookie(cfg = (k) => process.env[k]) {
+  for (const key of COOKIE_KEYS) {
+    const raw = String(cfg(key) || '').trim();
+    if (!raw) continue;
+    if (/^d=/i.test(raw) || /;\s*d=/i.test(raw)) return raw;
+    return `d=${raw}`;
+  }
+  return '';
 }
 
 export function slackConfigured(cfg) {
@@ -45,7 +63,8 @@ function slackOptions(opts = {}) {
     cfg,
     token: opts.token || picked.token,
     tokenKey: picked.key,
-    tokenCandidates: opts.token ? [{ token: opts.token, key: 'explicit' }] : candidates,
+    cookie: opts.cookie || picked.cookie || slackCookie(cfg),
+    tokenCandidates: opts.token ? [{ token: opts.token, key: 'explicit', cookie: opts.cookie || slackCookie(cfg) }] : candidates,
     channels,
     types: cfg('SLACK_CONVERSATION_TYPES', DEFAULT_TYPES),
     lookbackHours: Number(cfg('SLACK_RECENT_LOOKBACK_HOURS', 24)) || 24,
@@ -67,8 +86,10 @@ async function slackApi(method, params = {}, opts = {}) {
   const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const t = ctl ? setTimeout(() => ctl.abort(), opts.timeoutMs || 12000) : null;
   try {
+    const headers = { Authorization: `Bearer ${token}` };
+    if (opts.cookie) headers.Cookie = opts.cookie;
     const r = await fetchImpl(url, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers,
       signal: ctl ? ctl.signal : undefined,
     });
     const j = await r.json().catch(() => ({}));
@@ -186,7 +207,7 @@ export async function slackRecent(opts = {}) {
   if (!base.tokenCandidates.length) return { configured: false, error: 'Set SLACK_USER_TOKEN, SLACK_BOT_TOKEN, or SLACK_TOKEN.' };
   const failures = [];
   for (const candidate of base.tokenCandidates) {
-    const o = { ...base, token: candidate.token, tokenKey: candidate.key };
+    const o = { ...base, token: candidate.token, tokenKey: candidate.key, cookie: candidate.cookie || '' };
     let channels = [];
     try { channels = await resolveChannels(o); }
     catch (e) {
@@ -231,7 +252,7 @@ export async function slackSearch({ query, count = 8, ...opts } = {}) {
   if (!String(query || '').trim()) return { configured: true, error: 'query required' };
   const failures = [];
   for (const candidate of base.tokenCandidates) {
-    const o = { ...base, token: candidate.token, tokenKey: candidate.key };
+    const o = { ...base, token: candidate.token, tokenKey: candidate.key, cookie: candidate.cookie || '' };
     try {
       const j = await slackApi('search.messages', {
         query,
