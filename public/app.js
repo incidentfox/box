@@ -279,6 +279,7 @@ const ICONS = {
   sun: SVG('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>', { w: 2 }),
   clipboard: SVG('<rect x="9" y="2" width="6" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>', { w: 2 }),
   copy: SVG('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', { w: 2 }),
+  branch: SVG('<path d="M6 3v7a4 4 0 0 0 4 4h8"/><path d="M18 9l4 5-4 5"/><circle cx="6" cy="3" r="2"/><circle cx="6" cy="21" r="2"/><path d="M6 10v9"/>', { w: 1.9 }),
   trash: SVG('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h2a2 2 0 0 1 2 2v2"/>', { w: 1.9 }),
   archive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>', { w: 1.9 }),
   unarchive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M12 17v-6M8.5 14.5L12 11l3.5 3.5"/>', { w: 1.9 }),
@@ -2175,6 +2176,9 @@ function addHistoryLoader() {
   $('messages').appendChild(loader);
   return loader;
 }
+function annotateHistoryMessages(messages, start = 0) {
+  return (messages || []).map((m, i) => ({ ...m, _idx: start + i }));
+}
 async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
@@ -2210,7 +2214,7 @@ async function openChat(s) {
       cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
       cur.context = h.context || cur.context; renderContextMeter();
       cur.histCursor = h.cursor || 0; cur.remoteHasMoreHistory = !!h.hasMore;
-      const messages = h.messages || [];
+      const messages = annotateHistoryMessages(h.messages || []);
       cur.localEarlier = messages.length > INITIAL_HISTORY_RENDER_LIMIT ? messages.slice(0, -INITIAL_HISTORY_RENDER_LIMIT) : [];
       cur.hasMoreHistory = cur.remoteHasMoreHistory || cur.localEarlier.length > 0;
       await renderHistoryBatch(messages.slice(-INITIAL_HISTORY_RENDER_LIMIT), renderSeq);
@@ -2223,7 +2227,7 @@ async function openChat(s) {
     // Agent switch: render the prior transcript inline so it reads as ONE continuous
     // conversation, capped to the last 40 messages for snappiness (the agent still gets
     // the fuller context via the seed prompt).
-    await renderHistoryBatch(s.carry.slice(-40), renderSeq);
+    await renderHistoryBatch(annotateHistoryMessages(s.carry.slice(-40)), renderSeq);
     if (renderSeq !== chatRenderSeq) return;
     addSwitchDivider(s.carryFrom || 'previous agent', cur.agent === 'codex' ? 'Codex' : 'Claude');
     scrollBottom();
@@ -2297,6 +2301,7 @@ function fmtTs(ts) {
 }
 function buildHistElement(m) {
   const wrap = document.createElement('div'); wrap.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+  if (m._idx != null) wrap.dataset.idx = String(m._idx);
   const body = document.createElement('div'); body.className = 'body';
   let rawText = '';
   for (const p of m.parts) {
@@ -2330,6 +2335,11 @@ function buildHistElement(m) {
     const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
     cpBtn.onclick = () => writeClipboardText(rawText, 'Copied!');
     if (m.ts) { const ts = document.createElement('span'); ts.className = 'msgTs'; ts.textContent = fmtTs(m.ts); acts.appendChild(ts); }
+    if (cur.id && m._idx != null) {
+      const forkBtn = document.createElement('button'); forkBtn.className = 'iconbtn ghost msgCopy'; forkBtn.title = 'fork from here'; forkBtn.innerHTML = ICONS.branch;
+      forkBtn.onclick = (e) => { e.stopPropagation(); forkCurrent({ throughIndex: Number(m._idx) }); };
+      acts.appendChild(forkBtn);
+    }
     acts.appendChild(cpBtn); wrap.appendChild(acts);
   }
   return wrap;
@@ -2930,6 +2940,11 @@ function submit() {
     refreshButton(); scrollBottom();
     return;
   }
+  const btw = text.match(/^\/btw(?:\s+([\s\S]*))?$/i);
+  if (btw) {
+    $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); refreshButton();
+    return runBtw(btw[1] || '');
+  }
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
   $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); images = []; renderAttach();
@@ -3231,6 +3246,8 @@ const BUILTIN_CMDS = {
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'review', desc: 'Review the current diff', action: 'review' },
   ],
   codex: [
@@ -3243,6 +3260,7 @@ const BUILTIN_CMDS = {
     { name: 'approvals', desc: 'Change approval & sandbox mode', action: 'approvals' },
     { name: 'status', desc: 'Show current Box/Codex thread state', action: 'status' },
     { name: 'compact', desc: 'Summarize & compact the thread', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
     { name: 'fork', desc: 'Branch this thread into a child with parent context', action: 'fork' },
     { name: 'new', desc: 'Start a fresh Codex thread', action: 'new' },
     { name: 'diff', desc: 'Show the working-tree diff', send: true },
@@ -3257,6 +3275,8 @@ const BUILTIN_CMDS = {
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'review', desc: 'Review the current diff', send: true },
     { name: 'new', desc: 'Start a fresh Gemini thread', action: 'new' },
   ],
@@ -3269,6 +3289,8 @@ const BUILTIN_CMDS = {
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'review', desc: 'Review the current diff', send: true },
     { name: 'new', desc: 'Start a fresh Antigravity thread', action: 'new' },
   ],
@@ -3277,6 +3299,8 @@ const BUILTIN_CMDS = {
     { name: 'model', desc: 'Switch the Computer Use model / effort', action: 'model' },
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'new', desc: 'Start a fresh Computer Use chat', action: 'new' },
   ],
 };
@@ -3367,6 +3391,31 @@ function buildForkPrompt(parent, messages) {
     transcript: transcript || '(No parent transcript was available.)',
   });
 }
+async function loadConversationSnapshot(throughIndex = null) {
+  if (!cur.id) return { messages: [], cwd: cur.cwd || defaultCwd, settings: cur.settings, agent: cur.agent, title: cur.title, mutable: false };
+  const qs = throughIndex != null ? `?through=${encodeURIComponent(throughIndex)}` : '';
+  const r = await api(`/api/sessions/${cur.id}/snapshot${qs}`);
+  if (!r.ok) throw new Error('snapshot failed');
+  const h = await r.json();
+  h.messages = annotateHistoryMessages(h.messages || []);
+  return h;
+}
+function buildBtwPrompt(parent, messages, question) {
+  const transcript = compactTranscript(messages, 40000, 80);
+  return `This is a one-off /btw side question from the Box app.
+
+Parent thread: ${parent.title}
+Parent id: ${parent.id || '(unsent)'}
+Workspace: ${parent.cwd}
+
+Use the parent transcript below as context. Answer only this side question; do not assume you are continuing the parent thread, and do not edit files unless the question explicitly asks for that.
+
+Side question:
+${question}
+
+Parent transcript:
+${transcript || '(No parent transcript was available.)'}`;
+}
 function buildSwitchPrompt(source, targetAgent, messages) {
   // Carry the prior conversation at high fidelity (last ~60 turns, ~40k chars) so the
   // hand-off feels like the SAME session continuing — not a fresh chat with a summary.
@@ -3409,20 +3458,41 @@ async function continueWithAgent(targetAgent) {
   enqueueText(prompt, { parentId: source.id, parentTitle: source.title, title, displayText: `↪ Continued in ${AGENT_LABEL[targetAgent]} — full prior context carried over` });
   toast(`Continuing in ${AGENT_LABEL[targetAgent]}`);
 }
-async function forkCurrent() {
-  if (cur.agent !== 'codex') return toast('/fork is Codex-only in Box right now');
-  if (running) return toast('Wait for the current turn to finish before forking');
+async function forkCurrent(opts = {}) {
   if (!cur.id) return toast('Send at least one message before forking');
   let h;
-  try { h = await (await api(`/api/sessions/${cur.id}/history`)).json(); }
+  try { h = await loadConversationSnapshot(opts.throughIndex); }
   catch { return toast('Could not load parent history'); }
-  const parent = { id: cur.id, title: cur.title || 'Parent chat', cwd: h.cwd || cur.cwd || defaultCwd, settings: normalizeSettings(h.settings || cur.settings) };
+  const agent = agentType(cur.agent);
+  const parent = { id: cur.id, title: cur.title || 'Parent chat', cwd: h.cwd || cur.cwd || defaultCwd, settings: normalizeSettings(h.settings || cur.settings), agent };
   const childTitle = (`Fork: ${parent.title}`).slice(0, 80);
   const prompt = buildForkPrompt(parent, h.messages || []);
-  await openChat({ id: null, title: childTitle, cwd: parent.cwd, agent: 'codex', settings: parent.settings, parentId: parent.id, parentTitle: parent.title });
+  await openChat({ id: null, title: childTitle, cwd: parent.cwd, agent, settings: parent.settings, parentId: parent.id, parentTitle: parent.title });
   cur.firstUser = `Forked from ${parent.title}`;
   enqueueText(prompt, { parentId: parent.id, parentTitle: parent.title, title: childTitle, displayText: `Forked from ${parent.title}` });
-  toast('Fork created');
+  toast(opts.throughIndex != null ? 'Forked from that point' : 'Fork created');
+}
+async function runBtw(question) {
+  question = String(question || '').trim();
+  if (!question) return toast('Type a question after /btw');
+  let h = null;
+  if (cur.id) {
+    try { h = await loadConversationSnapshot(); }
+    catch { h = null; }
+  }
+  const parent = {
+    id: cur.id || '',
+    title: cur.title || 'Current chat',
+    cwd: (h && h.cwd) || cur.cwd || defaultCwd,
+    settings: normalizeSettings((h && h.settings) || cur.settings),
+    agent: agentType(cur.agent),
+  };
+  const title = (`BTW: ${question}`).replace(/\s+/g, ' ').slice(0, 80);
+  const prompt = buildBtwPrompt(parent, (h && h.messages) || [], question);
+  await openChat({ id: null, title, cwd: parent.cwd, agent: parent.agent, settings: parent.settings, parentId: parent.id || null, parentTitle: parent.title });
+  cur.firstUser = `/btw ${question}`;
+  enqueueText(prompt, { parentId: parent.id || null, parentTitle: parent.title, title, displayText: `/btw ${question}` });
+  toast('BTW side thread started');
 }
 function openChatWorkspaceSheet() {
   openPathSheet('Chat workspace', cur.cwd || defaultCwd, '~/development', async (path) => {
@@ -3492,6 +3562,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
   if (cmd.action === 'fork') return forkCurrent();
+  if (cmd.action === 'btw') { $('input').value = '/btw '; autoGrow(); refreshButton(); focusComposerSoon(); return; }
   if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
   if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
   if (cmd.action === 'review') return reviewCurrent();
@@ -3627,6 +3698,7 @@ function openChatTitleSheet() {
   const title = cur.title || 'New chat';
   openSheet(title, [
     { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
+    { ic: '', label: 'Fork chat', desc: 'Start a child conversation with this transcript', fn: () => forkCurrent() },
     { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
     { ic: '', label: 'My messages', desc: 'Browse and copy just your prompts', fn: openMyMessages },
     cur.favorite
