@@ -18,7 +18,8 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "bash ~/.claude/hooks/surface-attention.sh" }
+          { "type": "command", "command": "bash ~/.claude/hooks/surface-attention.sh" },
+          { "type": "command", "command": "bash ~/.claude/hooks/surface-slack.sh" }
         ]
       }
     ]

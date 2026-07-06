@@ -164,6 +164,8 @@ respawns it):
 | `LINEAR_API_KEY` + `LINEAR_TEAM_ID` | Drive a REAL Linear workspace instead of the local clone (optional). `LINEAR_LOCAL=off` disables the Board entirely. |
 | `OPENAI_API_KEY` + `OPENAI_ENDPOINT` | Enable cheap per-session attention/status summaries (optional). |
 | `BRAIN_DIR` | Surface recent meetings, emails/signals, and durable notes from a local brain folder (optional). |
+| `SLACK_USER_TOKEN` / `SLACK_BOT_TOKEN` / `SLACK_TOKEN` | Enable read-only Slack context for agents and the voice assistant. `SLACK_USER_TOKEN` is needed for Slack search; bot tokens can read channels/DMs they can access. |
+| `SLACK_CHANNELS` | Optional comma-separated Slack channel names/ids to scope recent-message context, e.g. `#ops,C1234567890`. |
 | `DREAM_LOG` | Surface decisions from an external scheduled-agent / issue-filing loop (optional). |
 
 When an integration isn't configured, its UI hides itself — Box stays a clean chat app.
@@ -204,6 +206,11 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
   you@example.com "done" "..."` to ping you when it finishes.
 - **A "brain"** — point `BRAIN_DIR` at a notes/markdown folder; agents read it for context,
   append durable facts, and let Box surface recent meetings / email signals beside the chats.
+- **Slack context** — set `SLACK_USER_TOKEN` (best: supports `search.messages`) or
+  `SLACK_BOT_TOKEN`, optionally scope it with `SLACK_CHANNELS`, then verify with
+  `node harness/slack.mjs recent 5`. New agent sessions get bounded recent Slack context,
+  the voice assistant gets `slack_recent` / `slack_search`, and `node harness/slack.mjs
+  emit-recent` can feed Slack messages into the Activity stream from cron.
 - **An activity feed** — scheduled jobs can write events, lock state, and issue-filing
   decisions into local files; Box surfaces them so parallel agents and the human can stay
   oriented without reading every transcript.
@@ -226,7 +233,7 @@ that holds the box's controls.
   open decisions), and it executes every tool call the model makes.
 - **It can actually do things**: list/check/steer sessions, start new Claude/Codex
   agents, delegate a Linear ticket to a fresh agent, create/update issues, quick web
-  search and multi-minute **deep research** (Parallel API), search your brain,
+  search and multi-minute **deep research** (Parallel API), search your brain and Slack,
   take notes, email you, read your calendar. Long tasks run in the background and the
   assistant **announces them when they finish** — mid-conversation.
 - **Built for bad cellular**: sessions auto-rotate before OpenAI's 60-minute cap and

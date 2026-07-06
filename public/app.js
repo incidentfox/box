@@ -2018,7 +2018,7 @@ async function createIssue() {
 
 // Harness activity feed: the event stream (meetings/emails/Linear/locks/session-outcomes)
 // + active resource locks — what's happening across the agent fleet, where the user looks.
-const ACT_ICON = { meeting: '📋', email: '✉️', signal: '✉️', linear: '🔷', linear_comment: '💬', lock: '🔒', 'session-outcome': '✳️', project: '🧠', learning: '🧠', deal: '🤝', person: '👤', company: '🏢', note: '•' };
+const ACT_ICON = { meeting: '📋', email: '✉️', signal: '✉️', slack: '💬', linear: '🔷', linear_comment: '💬', lock: '🔒', 'session-outcome': '✳️', project: '🧠', learning: '🧠', deal: '🤝', person: '👤', company: '🏢', note: '•' };
 function activityCard(a) {
   const card = document.createElement('div'); card.className = 'pipeCard';
   const locks = a.locks || [], events = a.events || [];
