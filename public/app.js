@@ -422,7 +422,7 @@ function queuePathResolve(raw) {
     const cwd = (cur && cur.cwd) || '';
     const refs = [...pathResolveQueue.values()];
     pathResolveQueue = new Map();
-    resolvePathRefs(refs, cwd).then((changed) => { if (changed) rerenderResolvedMarkdown(); }).catch(() => {});
+    resolvePathRefs(refs, cwd).then((changed) => { if (changed) rerenderResolvedMarkdown(Array.isArray(changed) ? changed : null); }).catch(() => {});
   }, 80);
 }
 async function resolvePathRefs(refs, cwd = (cur && cur.cwd) || '') {
@@ -437,7 +437,7 @@ async function resolvePathRefs(refs, cwd = (cur && cur.cwd) || '') {
   }
   const results = data && data.results || {};
   for (const p of missing) cacheResolvedPath(p, results[p], cwd);
-  return true;
+  return missing;   // truthy (non-empty) — callers pass it to rerenderResolvedMarkdown to scope the re-render
 }
 function collectLocalPathRefs(text) {
   const refs = [];
@@ -467,11 +467,17 @@ function messagePathRefs(m) {
   if (!m || m.role === 'user') return [];
   return (m.parts || []).filter((p) => p && p.t === 'text').flatMap((p) => collectLocalPathRefs(p.text || ''));
 }
-function rerenderResolvedMarkdown() {
+// Re-render only the blocks that actually mention a newly-resolved path. Re-rendering
+// every .mdBlock nuked and rebuilt the whole chat's DOM (aborting in-flight <img> loads,
+// then re-downloading them) each time one path resolved.
+function rerenderResolvedMarkdown(paths) {
+  const names = (paths || []).map((p) => String(p).split('/').filter(Boolean).pop() || String(p));
+  const touches = (txt) => !paths || paths.some((p, i) => txt.includes(p) || (names[i] && txt.includes(names[i])));
   for (const el of document.querySelectorAll('.mdBlock')) {
-    if (el._rawMdText != null) el.innerHTML = md(el._rawMdText);
+    if (el._rawMdText != null && el._rawMdText && touches(el._rawMdText)) el.innerHTML = md(el._rawMdText);
   }
-  if (live && live.textEl && live.raw) {
+  if (live && live.textEl && live.raw && touches(live.raw)) {
+    liveMdCache = { cut: -1, html: '' };   // cached prefix may now render differently
     live.textEl.innerHTML = md(live.raw);
     maybeScroll();
   }
@@ -485,7 +491,7 @@ function filePreviewChip(absPath, label) {
   const name = shown.split('/').filter(Boolean).pop() || shown;
   if (PREVIEW_IMG_EXT_RE.test(expanded)) {
     return `<span class="pathPreview pathPreviewImg" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
-      `<img src="${esc(rawFileUrl(expanded))}" alt="${esc(name)}" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
+      `<img src="${esc(rawFileUrl(expanded))}" alt="${esc(name)}" loading="lazy" decoding="async" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
       `<span class="pathPreviewText">${esc(shown)}</span></span>`;
   }
   if (PDF_EXT_RE.test(expanded)) {
@@ -543,7 +549,7 @@ function md(src) {
       if (!hit) return alt ? esc(alt) : esc(src);
       const url = isHttp ? src : rawFileUrl(hit);
       // onerror: a missing/stale file should vanish, not leave a broken-image placeholder box.
-      return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" onerror="this.style.display='none'">`;
+      return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.style.display='none'">`;
     });
     t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
       const local = localPathLinkHtml(label, href);
@@ -625,6 +631,7 @@ const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-aut
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
 
 async function openSessions(filter = 'all') { navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter); }
+let lastSessionRenderSig = '';
 async function fetchSessions(filter) {
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + curFilter)).json();
@@ -633,6 +640,12 @@ async function fetchSessions(filter) {
   allSessions = d.sessions || [];
   for (const id of [...bulkSelected]) if (!allSessions.some((s) => s.id === id)) bulkSelected.delete(id);
   sessionCounts = d.counts || { all: allSessions.length };
+  // The feed re-fetches on every turn_start/idle of the open chat plus a heartbeat; most
+  // of those return byte-identical data. Skip the full DOM rebuild (cards + listeners +
+  // layout) when nothing changed — just keep the relative times fresh.
+  const sig = curFilter + '\x1f' + JSON.stringify(d.sessions) + '\x1f' + JSON.stringify(d.counts);
+  if (sig === lastSessionRenderSig && $('sessionList').childElementCount) { refreshSessionListTimes(); return; }
+  lastSessionRenderSig = sig;
   renderTabs(); renderBulkBar(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
 }
 function refreshSessionsSoon(delay = 350) {
@@ -2348,7 +2361,7 @@ function scheduleHistoryPathResolve(messages, seq) {
   setTimeout(() => {
     if (seq != null && seq !== chatRenderSeq) return;
     resolvePathRefs(refs, cwd).then((changed) => {
-      if (changed && (seq == null || seq === chatRenderSeq)) rerenderResolvedMarkdown();
+      if (changed && (seq == null || seq === chatRenderSeq)) rerenderResolvedMarkdown(Array.isArray(changed) ? changed : null);
     }).catch(() => {});
   }, 0);
 }
@@ -2647,6 +2660,7 @@ function startAssistant() {
   const loading = document.createElement('div'); loading.className = 'loading'; loading.innerHTML = '<span></span><span></span><span></span>'; body.appendChild(loading);
   const textEl = document.createElement('div'); textEl.className = 'cursor mdBlock'; textEl._rawMdText = ''; body.appendChild(textEl);
   live = { body, raw: '', copyText: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
+  liveMdCache = { cut: -1, html: '' };   // never reuse a previous turn's cached prefix
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
 // remove orphaned streaming indicators (blinking cursor / loading dots) left by a previous
@@ -2794,8 +2808,37 @@ function onSync(o) {
   } else running = false;
   renderQueue(o.queue); refreshButton(); scrollBottom();
 }
-let raf = 0;
-function queueRender() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (live) { live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); maybeScroll(); } }); }
+let raf = 0, lastLiveRenderAt = 0;
+// While a reply streams we used to re-run md() over the ENTIRE accumulated text on every
+// animation frame — O(n²) over the turn, ~30ms/frame once a reply passes ~100KB, i.e. a
+// visibly janky phone for the whole turn. Two fixes: (1) cache the rendered HTML of the
+// "stable prefix" (everything up to the last blank line outside a code fence) and re-parse
+// only the tail each frame; (2) cap live renders at one per LIVE_RENDER_MIN_MS — the eye
+// can't follow faster than ~10Hz text updates anyway. finishTurn still does a final full
+// md() pass, so any prefix/tail seam (e.g. a list split across the cut) self-heals at end.
+const LIVE_RENDER_MIN_MS = 100;
+let liveMdCache = { cut: -1, html: '' };
+function liveMdHtml(raw) {
+  if (raw.length < 2000) return md(raw);
+  const i = raw.lastIndexOf('\n\n');
+  // never cut inside a fenced code block (odd number of ``` fences before the cut)
+  const cut = (i > 0 && ((raw.slice(0, i).match(/^```/gm) || []).length % 2 === 0)) ? i + 2 : 0;
+  if (!cut) return md(raw);
+  if (liveMdCache.cut !== cut) liveMdCache = { cut, html: md(raw.slice(0, cut)) };
+  return liveMdCache.html + md(raw.slice(cut));
+}
+function renderLiveNow() {
+  if (!live) return;
+  lastLiveRenderAt = performance.now();
+  live.textEl._rawMdText = live.raw;
+  live.textEl.innerHTML = liveMdHtml(live.raw);
+  maybeScroll();
+}
+function queueRender() {
+  if (raf) return;
+  const wait = Math.max(0, LIVE_RENDER_MIN_MS - (performance.now() - lastLiveRenderAt));
+  raf = setTimeout(() => { requestAnimationFrame(() => { raf = 0; renderLiveNow(); }); }, wait);
+}
 function finishTurn(o) {
   if (live) {
     clearLoading(); live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
