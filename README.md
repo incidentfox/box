@@ -214,7 +214,8 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
   cookie; this is a fallback and expires with the browser session. New agent
   sessions get bounded recent Slack context, the voice assistant gets
   `slack_recent` / `slack_search`, and `node harness/slack.mjs emit-recent` can
-  feed Slack messages into the Activity stream from cron.
+  feed Slack messages into the Activity stream from cron or the
+  [`box-slack-events` systemd timer](docs/slack-events.md).
 - **An activity feed** — scheduled jobs can write events, lock state, and issue-filing
   decisions into local files; Box surfaces them so parallel agents and the human can stay
   oriented without reading every transcript.
