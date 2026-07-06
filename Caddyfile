@@ -2,5 +2,7 @@
 # instead of the built-in Cloudflare tunnel. Set TUNNEL_MODE=none in .env, point this at
 # your domain, and run `caddy run`. (Most people should just use the tunnel — ignore this.)
 box.example.com {
+	# compress API/asset responses — the app ships 100s-of-KB JSON payloads to phones
+	encode zstd gzip
 	reverse_proxy localhost:7321
 }

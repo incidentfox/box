@@ -16,6 +16,7 @@ import { join, resolve, dirname, basename, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import multer from 'multer';
 import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd } from './rc-engine.mjs';
 import * as accounts from './accounts.mjs';
@@ -612,6 +613,27 @@ function metaSubject(t) {
 }
 
 // Pull a human title from a session's jsonl: first real user text message.
+// mtime+size-keyed caches for the per-file reads listSessions does on every rebuild.
+// The feed scan tail-reads 130 files and head/tail-reads ~40 more; almost none change
+// between rebuilds (the 5s list cache is invalidated constantly by RUNNING/archive/
+// favorite churn), so without these every rebuild re-read ~7MB and blocked the event
+// loop 150-250ms — stalling every request AND every open chat's WebSocket stream.
+const FILE_READ_CACHES = [];
+function cachedFileRead(cache, file, compute) {
+  let st;
+  try { st = statSync(file); } catch { return compute(); }
+  const hit = cache.get(file);
+  if (hit && hit.m === st.mtimeMs && hit.s === st.size) return hit.v;
+  const v = compute();
+  if (cache.size > 8000) cache.clear();
+  cache.set(file, { m: st.mtimeMs, s: st.size, v });
+  return v;
+}
+function makeFileReadCache(fn) {
+  const cache = new Map();
+  FILE_READ_CACHES.push(cache);
+  return (file, ...rest) => cachedFileRead(cache, file, () => fn(file, ...rest));
+}
 function sessionTitle(file) {
   try {
     const lines = readFileSync(file, 'utf8').split('\n');
@@ -640,7 +662,8 @@ function sessionTitle(file) {
 // tail; we also scan the head (ai-title is written at line 1, and to catch an early
 // rename that wasn't re-appended). Reading/writing this keeps Box, pickup, the picker
 // and the mobile app all showing ONE name. See writeCustomTitle()/the rename route.
-function titleMeta(file) {
+const titleMeta = makeFileReadCache(titleMetaRead);
+function titleMetaRead(file) {
   let custom = '', ai = '';
   const scan = (buf) => {
     for (const line of buf.split('\n')) {
@@ -709,7 +732,8 @@ function stampTitleWhenReady(sessionId, title, tries = 24) {
 }
 
 // last meaningful message in a session (read only the tail for speed)
-function sessionPreview(file) {
+const sessionPreview = makeFileReadCache(sessionPreviewRead);
+function sessionPreviewRead(file) {
   try {
     const st = statSync(file); const len = Math.min(st.size, 48 * 1024); const start = st.size - len;
     const fd = openSync(file, 'r'); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, start); closeSync(fd);
@@ -738,7 +762,8 @@ function sessionPreview(file) {
 // the feed by file mtime therefore floats days-old sessions to the top with a near-now
 // time — exactly the "archived chats suddenly reappear as just-now" bug. lastTs reads
 // the real conversation clock instead, so an idle heartbeat can't fake recency.
-function tailInfo(file) {
+const tailInfo = makeFileReadCache(tailInfoRead);
+function tailInfoRead(file) {
   try {
     const st = statSync(file); const len = Math.min(st.size, 48 * 1024); const start = st.size - len;
     const fd = openSync(file, 'r'); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, start); closeSync(fd);
@@ -936,6 +961,44 @@ function rememberJsonCache(file, value) {
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => loadJsonCached(CODEX_FILE, () => ({ sessions: {} }));
 const saveCodex = (state) => { writeJsonAtomic(CODEX_FILE, state); rememberJsonCache(CODEX_FILE, state); invalidateSessionLists(); };
+// Codex transcripts live in per-session sidecar files, NOT inline in codex-sessions.json.
+// Inline transcripts grew that file to ~90MB, and saveCodex() re-stringified + rewrote ALL
+// of it on EVERY message append / streaming flush — ~1s of event-loop blockage that froze
+// every request and every open chat's WebSocket stream. The sidecar makes a codex message
+// write O(one session) instead of O(all sessions ever).
+const CODEX_MSG_DIR = join(STATE_DIR, 'codex-messages');
+const CODEX_MSG_LIMIT = 160;
+const codexMsgFile = (id) => join(CODEX_MSG_DIR, String(id).replace(/[^\w.-]/g, '_') + '.json');
+// `session` lets a legacy inline `messages` array (written by an old build) win until
+// the next save migrates it out.
+function loadCodexMessages(id, session = null) {
+  if (session && Array.isArray(session.messages) && session.messages.length) return session.messages;
+  if (!id) return [];
+  const v = loadJsonCached(codexMsgFile(id), () => []);
+  return Array.isArray(v) ? v : [];
+}
+function saveCodexMessages(id, msgs) {
+  if (!id) return;
+  try { mkdirSync(CODEX_MSG_DIR, { recursive: true }); } catch {}
+  const f = codexMsgFile(id);
+  const v = (msgs || []).slice(-CODEX_MSG_LIMIT);
+  writeJsonAtomic(f, v);
+  rememberJsonCache(f, v);
+}
+// One-time boot migration: split any inline transcripts out to sidecars and shrink the
+// main state file to metadata only. Runs before the server accepts connections.
+(function splitInlineCodexMessages() {
+  try {
+    const state = loadCodex();
+    const sessions = state.sessions || {};
+    const inline = Object.keys(sessions).filter((k) => Array.isArray(sessions[k] && sessions[k].messages) && sessions[k].messages.length);
+    if (!inline.length) return;
+    for (const k of inline) saveCodexMessages(k, sessions[k].messages);
+    for (const k of Object.keys(sessions)) { if (sessions[k]) delete sessions[k].messages; }
+    saveCodex(state);
+    console.log(`[codex] split ${inline.length} inline transcripts into ${CODEX_MSG_DIR}`);
+  } catch (e) { console.error('[codex] transcript split failed:', e); }
+})();
 const GEMINI_FILE = join(STATE_DIR, 'gemini-sessions.json');
 const loadGemini = () => loadJsonCached(GEMINI_FILE, () => ({ sessions: {} }));
 const saveGemini = (state) => { writeJsonAtomic(GEMINI_FILE, state); rememberJsonCache(GEMINI_FILE, state); invalidateSessionLists(); };
@@ -972,7 +1035,7 @@ function codexMessageTs(m) {
 }
 function codexUserMessagesFromSession(session) {
   const messages = [];
-  for (const m of ((session && session.messages) || [])) {
+  for (const m of loadCodexMessages(session && session.id, session)) {
     if (!m || m.role !== 'user') continue;
     const text = codexMessageText(m);
     if (!text) continue;
@@ -994,7 +1057,7 @@ function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
 }
 function codexSessionMentionCount(session, issueId) {
   let n = 0;
-  for (const m of ((session && session.messages) || [])) {
+  for (const m of loadCodexMessages(session && session.id, session)) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
     const txt = codexMessageText(m);
     if (!txt) continue;
@@ -1158,7 +1221,6 @@ function ensureCodexSession(id, attrs = {}) {
     created: prev.created || attrs.created || now,
     lastUsed: attrs.lastUsed || now,
     preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
-    messages: attrs.messages || prev.messages || [],
     settings: normalizeSettings(attrs.settings || prev.settings || {}),
     parentId: attrs.parentId || prev.parentId || null,
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
@@ -1170,7 +1232,7 @@ function ensureCodexSession(id, attrs = {}) {
 function updateCodexContext(id, info, precomputed = null) {
   if (!id || (!info && !precomputed)) return null;
   const state = loadCodex();
-  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, messages: [] };
+  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD };
   // Prefer the rollout-derived live context (precomputed) over the streamed turn.completed
   // usage, which is cumulative and would inflate the meter (the "999%" bug).
   prev.context = precomputed || contextFromCodexInfo(info, prev.context || {});
@@ -1183,9 +1245,10 @@ function appendCodexMessage(id, role, text, extra = {}) {
   if (!id || (!text && !extra.parts)) return;
   const state = loadCodex();
   const now = Date.now();
-  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, created: now };
   const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
-  prev.messages = [...(prev.messages || []), { role, parts, ts: extra.ts || now }].slice(-160);
+  saveCodexMessages(id, [...loadCodexMessages(id, prev), { role, parts, ts: extra.ts || now }]);
+  delete prev.messages;
   const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
   if (role === 'user' && (!prev.title || prev.title === 'Codex chat')) prev.title = plain.slice(0, 80) || 'Codex chat';
   if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
@@ -1312,14 +1375,19 @@ function migrateCodexSession(fromId, toId) {
   const prev = state.sessions[fromId];
   if (!prev) return null;
   const dest = state.sessions[toId] || {};
+  // transcripts live in sidecar files: carry the provisional entry's messages onto the
+  // real thread id unless the destination already has its own
+  const destMsgs = loadCodexMessages(toId, dest);
+  if (!destMsgs.length) saveCodexMessages(toId, loadCodexMessages(fromId, prev));
+  try { unlinkSync(codexMsgFile(fromId)); } catch {}
   state.sessions[toId] = {
     ...prev, ...dest,
     id: toId,
     title: (dest.title && dest.title !== 'Codex chat') ? dest.title : (prev.title || dest.title || 'Codex chat'),
-    messages: (dest.messages && dest.messages.length) ? dest.messages : (prev.messages || []),
     preview: dest.preview || prev.preview || '',
     created: prev.created || dest.created || Date.now(),
   };
+  delete state.sessions[toId].messages;
   delete state.sessions[fromId];
   saveCodex(state);
   try {
@@ -1356,13 +1424,14 @@ function flushCodexAssistant(s, { finalize = false } = {}) {
   const state = loadCodex();
   const prev = state.sessions[s.sessionId];
   if (!prev) return;
-  const msgs = prev.messages ? [...prev.messages] : [];
+  const msgs = [...loadCodexMessages(s.sessionId, prev)];
   const last = msgs[msgs.length - 1];
   const row = { role: 'assistant', parts, turnId: s.cxTurnId, ts: (last && last.live && last.turnId === s.cxTurnId && last.ts) || Date.now() };
   if (!finalize) row.live = true;
   if (last && last.role === 'assistant' && last.live && last.turnId === s.cxTurnId) msgs[msgs.length - 1] = row;
   else msgs.push(row);
-  prev.messages = msgs.slice(-160);
+  saveCodexMessages(s.sessionId, msgs);
+  delete prev.messages;
   const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
   if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
   prev.lastUsed = Date.now();
@@ -1910,7 +1979,7 @@ function claudeSessionHistory(id, file, before = null) {
 }
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
-  if (codex) return { messages: enrichCodexHistory(id, (codex.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+  if (codex) return { messages: enrichCodexHistory(id, loadCodexMessages(id, codex).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
   const gemini = (loadGemini().sessions || {})[id];
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const agy = (loadAgy().sessions || {})[id];
@@ -1990,6 +2059,27 @@ function scanCodexCommands() {
 // ---- app ------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+// gzip JSON API responses. The phone pulls 100s-of-KB feed/history payloads over
+// cellular and neither Caddy (bare reverse_proxy) nor Express compresses by default;
+// JSON shrinks 5-10x. Only bodies >2KB, only when the client advertises gzip.
+app.use('/api', (req, res, next) => {
+  const orig = res.json.bind(res);
+  res.json = (body) => {
+    let str;
+    try { str = JSON.stringify(body); } catch { return orig(body); }
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (str && str.length > 2048 && /\bgzip\b/i.test(String(req.headers['accept-encoding'] || ''))) {
+      try {
+        const buf = gzipSync(Buffer.from(str), { level: 5 });
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Vary', 'Accept-Encoding');
+        return res.send(buf);
+      } catch {}
+    }
+    return res.send(str);
+  };
+  next();
+});
 const authOk = (req) => {
   const h = req.headers.authorization || '';
   const bearer = h.startsWith('Bearer ') ? h.slice(7) : null;
@@ -2125,7 +2215,7 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
   const codex = (loadCodex().sessions || {})[req.params.id];
   if (codex) {
     const title = codex.title || 'Codex chat';
-    const messages = enrichCodexHistory(req.params.id, codex.messages || [], { attachments: true, toolResults: true });
+    const messages = enrichCodexHistory(req.params.id, loadCodexMessages(req.params.id, codex), { attachments: true, toolResults: true });
     const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
@@ -3165,7 +3255,9 @@ app.post('/api/upload', requireAuth, upload.array('images', 6), (req, res) =>
 app.get('/api/img', requireAuth, (req, res) => {
   const p = resolve(req.query.path || '');
   if (!p.startsWith(UPLOAD_DIR + '/')) return res.status(403).end();
-  res.sendFile(p, (e) => { if (e && !res.headersSent) res.status(404).end(); });
+  // uploads get a random-prefixed filename at write time → content-addressed enough to
+  // cache hard; without this every chat re-open re-downloaded every attachment in full
+  res.sendFile(p, { maxAge: 7 * 24 * 3600 * 1000, immutable: true }, (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
 // serve any file on the box (token-gated, personal use) — for the media viewer
@@ -3173,7 +3265,9 @@ app.get('/api/raw', requireAuth, (req, res) => {
   const p = resolve(req.query.path || '');
   try { if (!statSync(p).isFile()) return res.status(404).end(); } catch { return res.status(404).end(); }
   if (req.query.dl) res.setHeader('Content-Disposition', `attachment; filename="${basename(p)}"`);
-  res.sendFile(p, (e) => { if (e && !res.headersSent) res.status(404).end(); });
+  // short freshness window + ETag revalidation after: chat re-renders re-request the same
+  // inline previews many times; without any Cache-Control each one was a full re-download
+  res.sendFile(p, { maxAge: 5 * 60 * 1000 }, (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
 // ---- voice transcription (bilingual EN+中文) -------------------------------

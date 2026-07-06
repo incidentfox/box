@@ -360,6 +360,10 @@ body.bulkMode .sCardFront { cursor: pointer; }
 /* messages */
 .messages { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 14px; }
 .msg { max-width: 100%; min-width: 0; overflow: hidden; flex: 0 0 auto; }
+/* Skip layout/paint for off-screen messages. Long chats reach 50k+ DOM nodes; without
+   this every style/layout pass walks all of them, which is most of the scroll jank on
+   phones. contain-intrinsic-size keeps the scrollbar/scroll-anchoring stable. */
+.msg { content-visibility: auto; contain-intrinsic-size: auto 120px; }
 .msg .body { overflow-wrap: anywhere; }
 .toolchip { max-width: 100%; box-sizing: border-box; }
 .toolchip .tverb, .toolchip .tgo { flex: none; }
