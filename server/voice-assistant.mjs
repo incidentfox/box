@@ -20,7 +20,7 @@
 // instructions so a reconnect mid-drive feels seamless.
 
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync,
   readdirSync, statSync, unlinkSync, writeFileSync,
@@ -216,6 +216,57 @@ export function registerVoiceAssistant(app, ctx) {
       }
     }, 8000);
     iv.unref && iv.unref();
+  }
+
+  // ---- the deep thinker behind think_hard ------------------------------------
+  // Primary: Claude via the local CLI on the box's Max login (`claude -p`), so heavy
+  // strategy questions get the strongest model at flat rate. All think turns share ONE
+  // persistent session (rotated every ~25 uses) whose cwd contains "voice-think" — add
+  // that substring to AUTO_DIRS so the chat files under the Automated tab, not the feed.
+  // Fallback: OpenAI (VOICE_THINKER_FALLBACK_MODEL, default gpt-5.5) when the CLI is
+  // missing, errors, or the subscription is out of credits.
+  const THINK_DIR = join(VOICE_DIR, 'voice-think');
+  const THINK_SESSION_FILE = join(VOICE_DIR, 'think-session.json');
+  const THINKER_FRAMING = 'You are the deep-reasoning engine behind a realtime voice copilot for the founder of MindBill — a California workers\'-comp medical-legal billing SaaS (anchor customer Spectrum: ~200 doctors, ~3,000 bills/month at $3/bill; competitor: daisyBill; goal: $1M then $10M ARR). Be decisive, quantitative, and concrete. Structure every answer: (1) bottom line in one sentence, (2) the 2–4 arguments that matter, with numbers, (3) the sharpest counterargument, (4) what to do next. Max ~350 words. Answer directly — no preamble, no tools, no questions back unless the question is unanswerable without one missing fact.';
+
+  async function thinkViaClaude(prompt) {
+    try { mkdirSync(THINK_DIR, { recursive: true }); } catch {}
+    const model = cfg('VOICE_THINKER_CLAUDE_MODEL', 'fable');
+    let state = { sessionId: null, uses: 0 };
+    try { state = { uses: 0, ...JSON.parse(readFileSync(THINK_SESSION_FILE, 'utf8')) }; } catch {}
+    if (state.uses >= 25) state = { sessionId: null, uses: 0 }; // keep the shared session's context small
+    const baseArgs = ['-p', '--model', model, '--append-system-prompt', THINKER_FRAMING,
+      '--disallowedTools', 'Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'];
+    const attempt = (args) => run('claude', [...baseArgs, ...args, prompt], { timeoutMs: 110000, cwd: THINK_DIR });
+    let r = null, sid = state.sessionId;
+    if (sid) {
+      r = await attempt(['--resume', sid]);
+      if (r.code !== 0 && /no conversation|not found|unable to resume/i.test(r.out || '')) { sid = null; r = null; }
+    }
+    if (!r) {
+      sid = randomUUID();
+      state = { sessionId: sid, uses: 0 };
+      r = await attempt(['--session-id', sid]);
+    }
+    const text = (r.out || '').trim();
+    const looksBroken = r.code !== 0 || text.length < 40
+      || /usage limit|out of credits|rate.?limit|overloaded|run \/login|log in|unauthorized|invalid api key/i.test(text.slice(0, 500));
+    if (looksBroken) throw new Error(text ? short(text, 180) : `claude exited ${r.code}`);
+    try { writeFileSync(THINK_SESSION_FILE, JSON.stringify({ sessionId: sid, uses: state.uses + 1 })); } catch {}
+    return { analysis: text, engine: `claude (${model})` };
+  }
+
+  async function thinkViaOpenAI(prompt) {
+    const model = cfg('VOICE_THINKER_FALLBACK_MODEL', 'gpt-5.5');
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'system', content: THINKER_FRAMING }, { role: 'user', content: prompt }], max_completion_tokens: 1500 }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(short(JSON.stringify(j.error || j), 200));
+    const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    if (!text) throw new Error('empty completion');
+    return { analysis: text, engine: model };
   }
 
   async function emailJimmy(subject, bodyText) {
@@ -597,19 +648,19 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'think_hard',
-      description: 'Deep reasoning on a hard question — strategy, pricing, prioritization, tradeoffs, planning — via a heavyweight text model (takes 5–20 seconds). Preamble: "Give me a moment to think that through properly." Then DISCUSS the analysis conversationally in your own words, a few sentences at a time — never read it verbatim.',
+      description: 'Deep reasoning on a hard question — strategy, pricing, prioritization, tradeoffs, planning — via Claude (the heavyweight thinker; takes 15–60 seconds, worth it). Preamble: "Give me a moment to really think that through." Then DISCUSS the analysis conversationally in your own words, a few sentences at a time — never read it verbatim.',
       parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question, sharply stated' }, context: { type: 'string', description: 'Relevant facts/numbers from this conversation worth passing along' } }, required: ['question'] },
       handler: async ({ question, context = '' }) => {
-        const model = cfg('VOICE_THINKER_MODEL', 'gpt-5.1');
-        const sys = 'You are the deep-reasoning engine behind a realtime voice copilot for the founder of MindBill — a California workers\'-comp medical-legal billing SaaS (anchor customer Spectrum: ~200 doctors, ~3,000 bills/month at $3/bill; competitor: daisyBill; goal: $1M then $10M ARR). Be decisive, quantitative, and concrete. Structure: (1) bottom line in one sentence, (2) the 2–4 arguments that matter with numbers, (3) sharpest counterargument, (4) what to do next. Max ~350 words.';
-        const r = await fetch(`https://api.openai.com/v1/chat/completions`, {
-          method: 'POST', headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, messages: [{ role: 'system', content: sys }, { role: 'user', content: context ? `${question}\n\nConversation context:\n${context}` : question }], max_completion_tokens: 1500 }),
-        });
-        const j = await r.json();
-        if (!r.ok) return { error: short(JSON.stringify(j.error || j), 250) };
-        const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-        return text ? { analysis: text } : { error: 'thinker returned nothing' };
+        const prompt = context ? `${question}\n\nConversation context:\n${context}` : question;
+        try { return await thinkViaClaude(prompt); }
+        catch (e1) {
+          try {
+            const fb = await thinkViaOpenAI(prompt);
+            return { ...fb, note: `Claude thinker unavailable (${short(String(e1.message || e1), 90)}) — answered by ${fb.engine} instead` };
+          } catch (e2) {
+            return { error: `both thinkers failed — claude: ${short(String(e1.message || e1), 120)}; fallback: ${short(String(e2.message || e2), 120)}` };
+          }
+        }
       },
     },
     {
