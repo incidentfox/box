@@ -34,6 +34,35 @@ import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from '.
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+// Like short() but preserves newlines/formatting — for artifacts we email verbatim.
+const clip = (s, n) => { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n) + '\n\n…[truncated]' : s; };
+
+// Standard agent-request template. Delegation friction (INC-1082) came from ad-hoc,
+// under-specified voice asks that forced handoffs — the agent stalls to ask a question, or
+// returns something unusable that has to be re-driven. This wraps ONE spoken sentence into a
+// self-contained brief: what to do, how to work it autonomously (file needs-jimmy instead of
+// blocking), when it's done, and the deliverable to report back in full (so it can be emailed
+// verbatim). Kept module-level + exported so evals/tests can assert its shape.
+export function buildAgentTask(task, { owner = 'Jimmy', deliverable = '', doneWhen = '' } = {}) {
+  const body = String(task || '').trim();
+  const lines = [
+    `# Task (delegated by ${owner} via voice, hands-free while driving)`,
+    body || '(no task text given)',
+    '',
+    '# How to work it',
+    '- Work it end-to-end and autonomously. Do NOT wait for clarification — make the reasonable call, note any assumptions, and keep going.',
+    '- Follow the repo conventions (your own git worktree + a PR for code changes).',
+    "- If you hit a decision only Jimmy the human can make, file it to needs-jimmy (node ~/development/software-factory/harness/needs-jimmy.mjs) and continue with everything else — don't stall the whole task on one open question.",
+  ];
+  if (doneWhen && String(doneWhen).trim()) lines.push('', '# Done when', `- ${String(doneWhen).trim()}`);
+  lines.push(
+    '',
+    '# Deliverable — put this in your FINAL message',
+    `- ${String(deliverable).trim() || 'A short summary of what you did, plus any links (PR URL, file paths).'}`,
+    '- Make the final message self-contained: it may be emailed to Jimmy verbatim, so no "see above" — include the actual result/links.',
+  );
+  return lines.join('\n');
+}
 const ago = (ms) => {
   if (!ms) return 'unknown';
   const m = Math.round((Date.now() - ms) / 60000);
@@ -358,7 +387,9 @@ export function registerVoiceAssistant(app, ctx) {
     if (EVENTS.length > 200) EVENTS.splice(0, EVENTS.length - 200);
   }
   function saveTasks() {
-    try { writeFileSync(TASKS_FILE, JSON.stringify([...TASKS.values()].slice(-100), null, 1)); } catch {}
+    // Persist task metadata but drop the (potentially large) fullOutput blob — it's kept
+    // in memory for request_full_artifact; after a restart we re-read the live session.
+    try { writeFileSync(TASKS_FILE, JSON.stringify([...TASKS.values()].slice(-100).map(({ fullOutput, ...t }) => t), null, 1)); } catch {}
   }
   function newTask(kind, title, extra = {}) {
     const id = kind.slice(0, 3) + '-' + randomBytes(3).toString('hex');
@@ -393,6 +424,7 @@ export function registerVoiceAssistant(app, ctx) {
           const md = `# ${t.title}\n\n_${t.kind} · Parallel run ${t.runId} · finished ${nowIso()}_\n\n${content}\n`;
           try { writeFileSync(fname, md); } catch {}
           t.file = fname;
+          t.fullOutput = clip(md, 40000); // let request_full_artifact re-send it on demand
           // Full report goes to Jimmy's inbox so it's waiting after the drive.
           emailJimmy(`Research: ${short(t.title, 70)}`, md).catch(() => {});
           finishTask(t, 'done', content, `Deep research finished on: ${t.title}. I emailed you the full report. Highlights: ${short(content, 1500)}`);
@@ -420,19 +452,38 @@ export function registerVoiceAssistant(app, ctx) {
   // Watch a launched/steered agent until its turn settles, announce the outcome, and
   // track it in TASKS so check_tasks/get_overview list running agents (visibility that
   // was missing on the 2026-07-06 drive).
+  const PROGRESS_MS = Math.max(2, Number(cfg('VOICE_PROGRESS_MINUTES', '6')) || 6) * 60000;
+  const PROGRESS_UPDATES = voiceBool(cfg('VOICE_PROGRESS_UPDATES'), true);
+  const PROGRESS_MAX = 4; // don't nag the whole drive
+
   function watchSession(key, label) {
     const started = Date.now();
     let sawRunning = false;
+    let nextProgress = PROGRESS_MS, progressCount = 0;
     const task = newTask('agent', label, { key });
     const iv = setInterval(() => {
       let s; try { s = rt(key); } catch { clearInterval(iv); finishTask(task, 'failed', 'session state lost', ''); return; }
       const busy = s.running || (s.queue && s.queue.length) || (s.sessionId && RUNNING.has(s.sessionId));
-      if (busy) sawRunning = true;
+      if (busy) { sawRunning = true; task.sessionId = s.sessionId; task.agent = s.agent; }
+      // Proactive background status: a gentle heads-up while long work is still running, with
+      // the agent's latest line if we can read it. Gated + capped so it informs, not nags.
+      if (busy && PROGRESS_UPDATES && progressCount < PROGRESS_MAX && Date.now() - started >= nextProgress) {
+        progressCount++; nextProgress += PROGRESS_MS;
+        const peek = lastAgentText(s.sessionId, s.agent, 220);
+        if (peek) task.lastActivity = peek;
+        const mins = Math.round((Date.now() - started) / 60000);
+        pushEvent('task_progress', label,
+          `Quick status: the ${s.agent && s.agent !== 'claude' ? s.agent + ' ' : ''}agent on "${label}" is still working, about ${mins} minutes in.${peek ? ' Latest: ' + peek : ''}`);
+      }
       if (sawRunning && !busy) {
         clearInterval(iv);
-        const tail = lastAgentText(s.sessionId, s.agent, 700);
-        finishTask(task, 'done', tail || '(no text output captured)',
-          `The ${s.agent && s.agent !== 'claude' ? s.agent + ' ' : ''}agent on "${label}" just finished its pass.${tail ? ' It reported: ' + tail : ' I could not read its output — ask me to check the session for details.'} Want me to send it a follow-up?`);
+        const full = lastAgentText(s.sessionId, s.agent, 100000);
+        const tail = short(full, 700);
+        const truncated = full.length > 720;
+        task.sessionId = s.sessionId; task.agent = s.agent;
+        if (truncated) task.fullOutput = clip(full, 40000);
+        finishTask(task, truncated ? 'done_truncated' : 'done', full || '(no text output captured)',
+          `The ${s.agent && s.agent !== 'claude' ? s.agent + ' ' : ''}agent on "${label}" just finished its pass.${tail ? ' It reported: ' + tail : ' I could not read its output — ask me to check the session for details.'}${truncated ? ' That is the short version — say "send me the full write-up" and I will email you the whole thing.' : ''} Want me to send it a follow-up?`);
         return;
       }
       if (Date.now() - started > 50 * 60 * 1000) {
@@ -585,7 +636,7 @@ export function registerVoiceAssistant(app, ctx) {
           recent_sessions: sessions.slice(0, 8).map(sessBrief),
           board_counts: cols,
           needs_jimmy: ((needs && needs.items) || []).slice(0, 6).map((i) => `${i.status} ${i.title}`),
-          background_tasks: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind}: ${t.title} (${ago(t.startedAt)})`),
+          background_tasks: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind}: ${t.title} (${ago(t.startedAt)})${t.lastActivity ? ' — ' + short(t.lastActivity, 80) : ''}`),
         };
       },
     },
@@ -616,7 +667,7 @@ export function registerVoiceAssistant(app, ctx) {
         return {
           match: sessBrief(s),
           latest_reply: short(full, 800) || short(s.preview, 200) || '(no output yet)',
-          ...(truncated ? { output_truncated: true, full_chars: full.length, more: 'Call read_session_output for the complete output — mode:summary for the count + top items, mode:full to page through it.' } : {}),
+          ...(truncated ? { output_truncated: true, full_chars: full.length, more: 'Reply truncated for voice. To work with the whole thing here (full list / count + top items / pagination) call read_session_output; to email Jimmy the complete artifact call request_full_artifact.' } : {}),
           ...(others.length ? { other_candidates: others } : {}),
         };
       },
@@ -759,26 +810,31 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'start_agent',
-      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness), codex (good for mechanical coding), or mac (Computer Use on the paired laptop/browser). Runs in the background; you are told when the first turn completes. Give a descriptive short title.',
+      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness), codex (good for mechanical coding), or mac (Computer Use on the paired laptop/browser). The task is auto-wrapped in a standard brief (autonomy, deliverable) so it runs to completion without needing a handoff back — just describe the work plainly. Runs in the background; you are told when the first turn completes. Give a descriptive short title.',
       parameters: {
         type: 'object',
         properties: {
-          task: { type: 'string', description: 'Full instruction for the agent — context, what to do, what done looks like' },
+          task: { type: 'string', description: 'The work to do, in plain words — context and what to do. It is auto-wrapped into a full brief; you do not need to spell out worktree/PR mechanics.' },
           project: { type: 'string', description: 'Repo/dir name, e.g. mindbill, software-factory, forta. Omit for the default workspace.' },
           agent: { type: 'string', enum: ['claude', 'codex', 'mac'] },
           title: { type: 'string', description: 'Short human title, e.g. "Fix invoice rounding"' },
+          deliverable: { type: 'string', description: 'Optional: the concrete artifact to produce, e.g. "a PR", "a CSV of prospects", "a written comparison". Shapes what it reports back.' },
+          done_when: { type: 'string', description: 'Optional: the acceptance criteria in one line, e.g. "tests pass and the PR is open".' },
         },
         required: ['task'],
       },
-      handler: async ({ task, project, agent = 'claude', title }) => {
+      handler: async ({ task, project, agent = 'claude', title, deliverable = '', done_when = '' }) => {
         if (agent === 'mac' && macAvailable && !macAvailable()) return { error: 'Mac Computer Use bridge is not reachable right now' };
         const key = 'new-' + randomBytes(4).toString('hex');
         const cwd = resolveProjectDir(project);
         const t = title || short(task, 48);
-        if (DRYRUN) return { started: true, dry_run: true, title: t, agent, project_dir: cwd };
-        enqueue(key, { text: task, mode: 'normal', agent, cwd, title: t });
+        // mac/Computer-Use runs a browser, not a repo — the code-worktree/PR brief would
+        // just confuse it, so hand it the raw ask. claude/codex get the standard template.
+        const briefed = agent === 'mac' ? task : buildAgentTask(task, { owner: ownerName, deliverable, doneWhen: done_when });
+        if (DRYRUN) return { started: true, dry_run: true, title: t, agent, project_dir: cwd, templated: agent !== 'mac' };
+        enqueue(key, { text: briefed, mode: 'normal', agent, cwd, title: t });
         watchSession(key, t);
-        return { started: true, title: t, agent, project_dir: cwd, note: 'running in background; completion will be announced' };
+        return { started: true, title: t, agent, project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; completion will be announced' };
       },
     },
     {
@@ -792,7 +848,7 @@ export function registerVoiceAssistant(app, ctx) {
         if (!detail) return { error: `ticket ${id} not found` };
         const title = `${id}: ${short(detail.title, 60)}`;
         if (DRYRUN) return { delegated: id, dry_run: true, issue_title: detail.title, agent };
-        const task = `Work the Linear issue ${id}: "${detail.title}".\n\nClaim it (move to In Progress), read the full ticket + comments via the Linear API (LINEAR_API_KEY in the env), do the work following the repo's conventions (isolated git worktree, PR, post the PR link as a comment on ${id}), then set it to In Review.${extra ? `\n\nExtra guidance from ${ownerName} (dictated while driving): ${extra}` : ''}`;
+        const task = `Work the Linear issue ${id}: "${detail.title}".\n\nClaim it (move to In Progress), read the full ticket + comments via the Linear API (LINEAR_API_KEY in the env), do the work following the repo's conventions (isolated git worktree, PR, post the PR link as a comment on ${id}), then set it to In Review.\n\nWork autonomously end-to-end — don't stall waiting for clarification; if a decision genuinely needs Jimmy the human, file it to needs-jimmy and keep going on the rest. When done, make your final comment on ${id} self-contained (what changed + the PR URL) so it can be read back or emailed verbatim.${extra ? `\n\nExtra guidance from ${ownerName} (dictated while driving): ${extra}` : ''}`;
         const key = 'new-' + randomBytes(4).toString('hex');
         enqueue(key, { text: task, mode: 'normal', agent, cwd: defaultCwd(), title });
         watchSession(key, title);
@@ -929,12 +985,53 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'check_tasks',
-      description: 'Status of background tasks (deep research, delegated agents).',
+      description: 'Status of background tasks (deep research, delegated agents), with elapsed time, the latest activity for running work, and whether a finished task has a full artifact you can email.',
       parameters: { type: 'object', properties: {} },
       handler: async () => ({
-        running: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind} "${t.title}" started ${ago(t.startedAt)}`),
-        recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.title} — ${short(t.summary, 120)}`),
+        running: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind} "${t.title}" — started ${ago(t.startedAt)}${t.lastActivity ? '; latest: ' + short(t.lastActivity, 90) : ''}`),
+        recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.title} — ${short(t.summary, 120)}${(t.status === 'done_truncated' || t.fullOutput || t.file) ? ' (full output available — say "email me the full one")' : ''}`),
       }),
+    },
+    {
+      name: 'request_full_artifact',
+      description: 'Get the COMPLETE, untruncated output of a background task or agent session and email it to Jimmy — voice can only speak a short summary, so this is how he gets the whole thing (a full report, a long write-up, a PR link + details). Use when he says "send me the full report / the whole thing / the full artifact", or right after you told him an output was truncated. Identify it by task id (like "agent-1a2b3c"), a Linear ticket, or words from the session/topic. Preamble: "Sending you the full version."',
+      parameters: { type: 'object', properties: { ref: { type: 'string', description: 'Task id, Linear ticket id, or words identifying the session/task/topic' } }, required: ['ref'] },
+      handler: async ({ ref }) => {
+        const raw = String(ref || '').trim();
+        if (!raw) return { error: 'tell me which task or session you want the full output of' };
+        const prOf = (text) => (String(text).match(/https?:\/\/github\.com\/\S+?\/pull\/\d+/) || [])[0] || '';
+        let title = '', body = '';
+        // 1) a background task, by exact id or by title words (most recent wins)
+        let task = TASKS.get(raw) || TASKS.get(raw.toLowerCase());
+        if (!task) {
+          const words = raw.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean);
+          const cand = [...TASKS.values()].filter((t) => words.some((w) => String(t.title || '').toLowerCase().includes(w)));
+          task = cand.sort((a, b) => (b.doneAt || b.startedAt) - (a.doneAt || a.startedAt))[0];
+        }
+        if (task) {
+          title = task.title;
+          if (task.file && existsSync(task.file)) { try { body = readFileSync(task.file, 'utf8'); } catch {} }
+          if (!body) body = task.fullOutput || task.summary || '';
+          if (!body && task.sessionId) body = lastAgentText(task.sessionId, task.agent, 100000);
+          if (!body && task.key) { try { const s = rt(task.key); body = lastAgentText(s.sessionId, s.agent, 100000); } catch {} }
+          if (!body) return { error: `"${short(title, 50)}" has no output captured yet — it may still be starting up` };
+        } else {
+          // 2) a live agent session, by fuzzy match
+          const { hits } = matchSession(raw);
+          if (!hits.length) return { error: `no task or session matches "${raw}"` };
+          const s = hits[0];
+          title = s.title;
+          body = lastAgentText(s.id, s.agent, 100000);
+          if (!body) return { error: `found "${short(title, 50)}" but it has no readable output yet` };
+        }
+        const prUrl = prOf(body);
+        if (DRYRUN) return { emailed: true, dry_run: true, subject: `Full output: ${short(title, 60)}`, chars: body.length, ...(prUrl ? { pr_url: prUrl } : {}) };
+        const subject = `Full output: ${short(title, 70)}`;
+        const md = `# ${title}\n\n${prUrl ? `PR: ${prUrl}\n\n` : ''}${clip(body, 60000)}\n`;
+        const r = await emailJimmy(subject, md);
+        if (r.code !== 0) return { error: short(r.out, 200) };
+        return { emailed: true, subject, chars: body.length, ...(prUrl ? { pr_url: prUrl } : {}) };
+      },
     },
     {
       name: 'brain_search',
@@ -1104,10 +1201,11 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
 - Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
-- Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, take_note, voice_memory): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
+- Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
-- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. When a [TASK UPDATE] system message arrives, weave it in naturally: what finished, the one-line result, offer detail. To check on running work yourself: check_tasks lists every agent and research task you started; check_session gives a quick preview of any agent's latest output (including codex).
-- Full lists & long outputs: check_session only PREVIEWS a reply (and flags output_truncated when it's cut off). When Jimmy wants the WHOLE thing an agent produced — a full ranked list, every target, the complete report — call read_session_output: mode:summary for the item count + the top items (say the count, name the top few, offer the rest), mode:full with page 2, 3… (using next_page) to go through it all. For anything longer than a few items, offer to email it (email_jimmy) rather than reading it aloud. Never claim you have the full list off a truncated preview.
+- Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
+- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session gives a quick preview of any agent's latest output (including codex).
+- Full lists & long outputs — check_session only PREVIEWS a reply (it flags output_truncated when it's cut off); never claim you have the full list off a preview, and never read a long artifact aloud. To DISCUSS the whole thing in voice — a full ranked list, every target — call read_session_output: mode:summary for the item count + the top items (say the count, name the top few, offer the rest), mode:full with page 2, 3… (via next_page) to go through it all. To put the WHOLE thing in Jimmy's inbox — a full report, a long write-up, or anything too long to talk through — call request_full_artifact (it emails him the complete artifact with the PR link).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
 - If a tool errors, say so plainly and move on. NEVER invent tool results, and never claim live state you haven't checked this session.
