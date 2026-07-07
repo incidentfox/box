@@ -32,6 +32,7 @@ import { readCodexSessionHistory } from './codex-context.mjs';
 import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 import { createLocalFileResolver } from './local-file-resolver.mjs';
+import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -623,6 +624,8 @@ export function registerVoiceAssistant(app, ctx) {
   }
   const BRIEFING_FILE = join(VOICE_DIR, 'briefing.md');
   const TASKS_FILE = join(VOICE_DIR, 'tasks.json');
+  const WATCHERS_FILE = join(VOICE_DIR, 'session-watchers.json');
+  const WATCHER_AUDIT_FILE = join(VOICE_DIR, 'session-watcher-events.jsonl');
   const SESSION_HISTORY_AUDIT_FILE = join(VOICE_DIR, 'session-history-audit.jsonl');
   const FILE_ACCESS_AUDIT_FILE = join(VOICE_DIR, 'file-access-audit.jsonl');
   const SESSION_ARCHIVE_AUDIT_FILE = join(VOICE_DIR, 'session-archive-audit.jsonl');
@@ -774,6 +777,206 @@ export function registerVoiceAssistant(app, ctx) {
     t.status = status; t.doneAt = Date.now(); t.summary = short(summary, 4000); saveTasks();
     pushEvent('task_' + status, t.title, speak);
   }
+
+  // ---- session watcher ------------------------------------------------------
+  // Watches are the general-purpose version of the older voice-started task poller:
+  // any Box surface can register a session/task, the server polls existing status
+  // readers, and key transitions are emitted into the same /api/voice/updates queue.
+  const WATCHER_POLL_MS = Math.max(5000, Number(cfg('VOICE_SESSION_WATCHER_POLL_MS', '12000')) || 12000);
+  const WATCHER_COOLDOWN_MS = Math.max(15000, Number(cfg('VOICE_SESSION_WATCHER_COOLDOWN_MS', '120000')) || 120000);
+  const WATCHER_MAX_AGE_MS = Math.max(10 * 60 * 1000, Number(cfg('VOICE_SESSION_WATCHER_MAX_AGE_MS', String(8 * 60 * 60 * 1000))) || 8 * 60 * 60 * 1000);
+  const WATCHERS = new Map();
+
+  function watchAudit(event, row = {}) {
+    try { appendFileSync(WATCHER_AUDIT_FILE, JSON.stringify({ ts: Date.now(), event, ...row }) + '\n'); } catch {}
+  }
+
+  function saveWatchers() {
+    const rows = [...WATCHERS.values()]
+      .filter((w) => w.status === 'active')
+      .slice(-100)
+      .map((w) => ({
+        id: w.id, targetType: w.targetType, targetId: w.targetId, label: w.label,
+        triggers: w.triggers, status: w.status, createdAt: w.createdAt,
+        lastCheckedAt: w.lastCheckedAt || 0, lastSnapshot: w.lastSnapshot || null,
+        emitted: w.emitted || {}, lastEventByType: w.lastEventByType || {},
+      }));
+    try { writeFileSync(WATCHERS_FILE, JSON.stringify({ watchers: rows }, null, 1)); } catch {}
+  }
+
+  function watchView(w) {
+    return {
+      id: w.id,
+      target_type: w.targetType,
+      target_id: w.targetId,
+      label: w.label,
+      triggers: w.triggers,
+      status: w.status,
+      created_at: w.createdAt,
+      last_checked_at: w.lastCheckedAt || 0,
+      last_status: w.lastSnapshot && w.lastSnapshot.status,
+      event_count: Object.keys(w.emitted || {}).length,
+    };
+  }
+
+  function sessionSnapshot(id) {
+    const all = (() => { try { return listSessions({ limit: 220, filter: 'all' }).sessions || []; } catch { return []; } })();
+    const s = all.find((x) => x.id === id);
+    if (!s) return null;
+    const full = lastAgentFull(s.id, s.agent);
+    return {
+      kind: 'session',
+      id: s.id,
+      title: s.title || s.id,
+      agent: s.agent || 'claude',
+      status: s.status || 'idle',
+      latestReply: short(full || s.preview || '', 4000),
+      mtime: s.mtime || 0,
+    };
+  }
+
+  function taskSnapshot(id) {
+    const t = TASKS.get(id);
+    if (!t) return null;
+    const running = t.status === 'running';
+    const failed = t.status === 'failed' || t.status === 'error';
+    return {
+      kind: 'task',
+      id: t.id,
+      title: t.title || t.id,
+      status: running ? 'running' : failed ? 'failed' : 'done',
+      summary: short(t.summary || t.lastActivity || '', 4000),
+      agent: t.agent || '',
+    };
+  }
+
+  function watchSnapshot(w) {
+    return w.targetType === 'task' ? taskSnapshot(w.targetId) : sessionSnapshot(w.targetId);
+  }
+
+  function resolveWatchTarget({ query = '', session_id = '', task_id = '', label = '' } = {}) {
+    const taskId = String(task_id || '').trim();
+    if (taskId) {
+      const t = TASKS.get(taskId);
+      if (!t) return { error: `no background task matches ${taskId}` };
+      return { targetType: 'task', targetId: t.id, label: label || t.title || t.id };
+    }
+    const sessionId = String(session_id || '').trim();
+    if (sessionId) {
+      const snap = sessionSnapshot(sessionId);
+      if (!snap) return { error: `no session matches ${sessionId}` };
+      return { targetType: 'session', targetId: snap.id, label: label || snap.title || snap.id };
+    }
+    const raw = String(query || '').trim();
+    if (!raw) return { error: 'provide query, session_id, or task_id' };
+    const { hits, all } = matchSession(raw);
+    if (!hits.length) {
+      const sug = sessionSuggestions(raw, all);
+      return { error: `no session matches "${raw}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
+    }
+    if (hits.length > 1 && hits[0].title !== hits[1].title) return { need_disambiguation: hits.slice(0, 4).map(sessBrief) };
+    return { targetType: 'session', targetId: hits[0].id, label: label || hits[0].title || hits[0].id };
+  }
+
+  function emitWatchEvent(w, ev, snapshot) {
+    const speak = short(ev.summary || `${ev.type}: ${w.label}`, 1600);
+    pushEvent(`watch_${ev.type}`, w.label, speak);
+    watchAudit('notify', { watcherId: w.id, type: ev.type, key: ev.key, targetType: w.targetType, targetId: w.targetId, status: snapshot && snapshot.status });
+  }
+
+  function shouldEmitWatchEvent(w, ev) {
+    const now = Date.now();
+    w.emitted = w.emitted || {};
+    w.lastEventByType = w.lastEventByType || {};
+    if (w.emitted[ev.key]) return false;
+    if (w.lastEventByType[ev.type] && now - w.lastEventByType[ev.type] < WATCHER_COOLDOWN_MS) return false;
+    if (Object.keys(w.emitted).length >= 20) return false;
+    w.emitted[ev.key] = now;
+    w.lastEventByType[ev.type] = now;
+    return true;
+  }
+
+  function pollWatcher(w, { force = false } = {}) {
+    if (!w || w.status !== 'active') return;
+    const now = Date.now();
+    if (!force && w.createdAt && now - w.createdAt > WATCHER_MAX_AGE_MS) {
+      w.status = 'expired'; watchAudit('expired', { watcherId: w.id, targetType: w.targetType, targetId: w.targetId }); saveWatchers(); return;
+    }
+    const snap = watchSnapshot(w);
+    w.lastCheckedAt = now;
+    if (!snap) {
+      const prev = w.lastSnapshot;
+      w.lastSnapshot = { id: w.targetId, title: w.label, status: 'missing', latestReply: 'watch target disappeared' };
+      if (prev) {
+        const ev = { type: 'error', key: 'error:missing', summary: `I lost the watched ${w.targetType} "${w.label}". It may have been deleted or moved.` };
+        if (w.triggers.includes('error') && shouldEmitWatchEvent(w, ev)) emitWatchEvent(w, ev, w.lastSnapshot);
+      }
+      saveWatchers();
+      return;
+    }
+    const events = classifyWatchTransition(w.lastSnapshot, snap, w.triggers);
+    w.lastSnapshot = snap;
+    for (const ev of events) if (shouldEmitWatchEvent(w, ev)) emitWatchEvent(w, ev, snap);
+    if (events.length) saveWatchers();
+  }
+
+  function registerWatch(input = {}) {
+    const target = resolveWatchTarget(input);
+    if (target.error || target.need_disambiguation) return target;
+    const triggers = normalizeWatchTriggers(input.triggers);
+    const id = `${target.targetType}:${target.targetId}`;
+    const existing = WATCHERS.get(id);
+    const w = existing || {
+      id,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      createdAt: Date.now(),
+      emitted: {},
+      lastEventByType: {},
+    };
+    w.label = target.label;
+    w.triggers = [...new Set([...(w.triggers || []), ...triggers])].filter((t) => WATCH_TRIGGERS.includes(t));
+    w.status = 'active';
+    if (!w.lastSnapshot) w.lastSnapshot = watchSnapshot(w);
+    WATCHERS.set(id, w);
+    watchAudit(existing ? 'updated' : 'registered', { watcherId: w.id, targetType: w.targetType, targetId: w.targetId, label: w.label, triggers: w.triggers });
+    saveWatchers();
+    pollWatcher(w, { force: true });
+    return { watching: true, watcher: watchView(w), baseline: w.lastSnapshot };
+  }
+
+  function armSessionWatcherPoller() {
+    const iv = setInterval(() => {
+      for (const w of WATCHERS.values()) {
+        try { pollWatcher(w); } catch (e) { watchAudit('poll_error', { watcherId: w.id, error: short(String((e && e.message) || e), 240) }); }
+      }
+      for (const [id, w] of WATCHERS) if (w.status !== 'active') WATCHERS.delete(id);
+      if (WATCHERS.size) saveWatchers();
+    }, WATCHER_POLL_MS);
+    iv.unref && iv.unref();
+  }
+
+  try {
+    const data = JSON.parse(readFileSync(WATCHERS_FILE, 'utf8'));
+    for (const raw of data.watchers || []) {
+      if (!raw || !raw.id || !raw.targetType || !raw.targetId) continue;
+      WATCHERS.set(raw.id, {
+        id: raw.id,
+        targetType: raw.targetType,
+        targetId: raw.targetId,
+        label: raw.label || raw.targetId,
+        triggers: normalizeWatchTriggers(raw.triggers),
+        status: 'active',
+        createdAt: raw.createdAt || Date.now(),
+        lastCheckedAt: raw.lastCheckedAt || 0,
+        lastSnapshot: raw.lastSnapshot || null,
+        emitted: raw.emitted || {},
+        lastEventByType: raw.lastEventByType || {},
+      });
+    }
+    if (WATCHERS.size) watchAudit('rearmed', { count: WATCHERS.size });
+  } catch {}
+  armSessionWatcherPoller();
 
   // Deep research runs REMOTELY on Parallel; we poll its run id, so an app restart
   // mid-run can pick the poller back up from tasks.json.
@@ -1482,12 +1685,28 @@ export function registerVoiceAssistant(app, ctx) {
       },
     },
     {
+      name: 'watch_session',
+      description: 'Register a session or background task for proactive status updates. The server polls Box session/task status and announces deduped changes: finished, error, blocked, needs_input, pr_ready, pr_merged. Use when Jimmy says "tell me when that finishes / when the PR is ready / when it needs me".',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Words from the session title/project/topic. Omit if passing session_id or task_id.' },
+          session_id: { type: 'string', description: 'Exact Box session id, if known.' },
+          task_id: { type: 'string', description: 'Background task id from start_agent/deep_research/check_tasks, if known.' },
+          label: { type: 'string', description: 'Short spoken label for updates.' },
+          triggers: { type: 'array', items: { type: 'string', enum: WATCH_TRIGGERS }, description: 'Default: all key triggers.' },
+        },
+      },
+      handler: async (args = {}) => registerWatch(args),
+    },
+    {
       name: 'check_tasks',
-      description: 'Status of background tasks (deep research, delegated agents), with elapsed time, the latest activity for running work, and whether a finished task has a full artifact you can email.',
+      description: 'Status of background tasks (deep research, delegated agents), active session/task watchers, elapsed time, latest activity, and whether a finished task has a full artifact you can email.',
       parameters: { type: 'object', properties: {} },
       handler: async () => ({
         running: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind} "${t.what || t.title}" — started ${ago(t.startedAt)}${t.lastActivity ? '; latest: ' + short(t.lastActivity, 90) : ''}`),
         recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.what || t.title} — ${short(t.summary, 120)}${(t.status === 'done_truncated' || t.fullOutput || t.file) ? ' (full output available — say "email me the full one")' : ''}`),
+        watchers: [...WATCHERS.values()].filter((w) => w.status === 'active').map(watchView),
       }),
     },
     {
@@ -1706,6 +1925,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
 - Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. A [TASK UPDATE] is a SYSTEM event, never something Jimmy said — never answer it as if it were his words, and never let it cut him off mid-sentence; it only ever reaches you at a pause, so just fold it in and ask if he wants you to act on it. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session gives a quick preview of any agent's latest output (including codex).
+- Watchers — when Jimmy says "tell me when that finishes / when the PR is ready / if it needs me", call watch_session. It registers a server-side watcher; status changes arrive later as [TASK UPDATE] system messages through the normal notification queue.
 - Full lists & long outputs — check_session only PREVIEWS a reply (it flags output_truncated when it's cut off); never claim you have the full list off a preview, and never read a long artifact aloud. To DISCUSS the whole thing in voice — a full ranked list, every target — call read_session_output: mode:summary for the item count + the top items (say the count, name the top few, offer the rest), mode:full with page 2, 3… (via next_page) to go through it all. To put the WHOLE thing in Jimmy's inbox — a full report, a long write-up, or anything too long to talk through — call request_full_artifact (it emails him the complete artifact with the PR link).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
@@ -1903,6 +2123,21 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     const cursor = Number(req.query.cursor || 0);
     const events = EVENTS.filter((e) => e.seq > cursor);
     res.json({ cursor: seq - 1, events });
+  });
+
+  app.get('/api/voice/watchers', requireAuth, (req, res) => {
+    res.json({
+      poll_ms: WATCHER_POLL_MS,
+      cooldown_ms: WATCHER_COOLDOWN_MS,
+      max_age_ms: WATCHER_MAX_AGE_MS,
+      watchers: [...WATCHERS.values()].filter((w) => w.status === 'active').map(watchView),
+    });
+  });
+
+  app.post('/api/voice/watchers', requireAuth, (req, res) => {
+    const r = registerWatch(req.body || {});
+    if (r.error || r.need_disambiguation) return res.status(400).json(r);
+    res.json(r);
   });
 
   app.post('/api/voice/event', requireAuth, (req, res) => {
