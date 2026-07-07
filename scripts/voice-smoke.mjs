@@ -75,6 +75,9 @@ console.log(`\n— voice smoke against ${BASE} —\n`);
   ok('read_notes', typeof rn.notes === 'string' && rn.notes.includes('smoke-test note'));
   const ct = await tool('check_tasks');
   ok('check_tasks', Array.isArray(ct.running));
+  // request_full_artifact with a ref that matches nothing → clean error, no email sent (read-safe)
+  const rfa = await tool('request_full_artifact', { ref: 'zzz-no-such-task-smoke' });
+  ok('request_full_artifact (no match)', !!rfa.error && !rfa.emailed, rfa.error || 'unexpectedly emailed');
   const gb = await tool('get_briefing');
   ok('get_briefing responds', Array.isArray(gb.sections) || /no briefing/.test(gb.error || ''), gb.sections ? gb.sections.join('|').slice(0, 60) : 'not prepared yet');
   const cal = await tool('calendar');
