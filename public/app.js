@@ -137,7 +137,7 @@ function toast(m, ms = 2200, action) {
   }
   t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms);
 }
-const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const isPlaceholderChatTitle = (s) => /^New (Claude |Codex )?chat$/i.test(String(s || '').trim());
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
@@ -2299,15 +2299,31 @@ function fmtTs(ts) {
   if (diff < 86400000) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
+function historyParts(m) {
+  if (!m || typeof m !== 'object') return [];
+  if (Array.isArray(m.parts)) return m.parts.filter((p) => p && typeof p === 'object');
+  if (typeof m.text === 'string') return [{ t: 'text', text: m.text }];
+  if (typeof m.content === 'string') return [{ t: 'text', text: m.content }];
+  if (Array.isArray(m.content)) {
+    return m.content.flatMap((p) => {
+      if (!p || typeof p !== 'object') return [];
+      if ((p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') && p.text) return [{ t: 'text', text: p.text }];
+      return [];
+    });
+  }
+  return [];
+}
 function buildHistElement(m) {
-  const wrap = document.createElement('div'); wrap.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+  m = (m && typeof m === 'object') ? m : { role: 'assistant', parts: [{ t: 'text', text: String(m || '') }] };
+  const role = m.role === 'user' ? 'user' : 'assistant';
+  const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
   if (m._idx != null) wrap.dataset.idx = String(m._idx);
   const body = document.createElement('div'); body.className = 'body';
   let rawText = '';
-  for (const p of m.parts) {
+  for (const p of historyParts(m)) {
     if (p.t === 'text') {
-      let text = p.text;
-      if (m.role === 'user') {
+      let text = String(p.text == null ? '' : p.text);
+      if (role === 'user') {
         const paths = [...text.matchAll(/\[Image attached at (.+?) —/g)].map((x) => x[1]);
         text = text.replace(/^\[Image attached at .+?\]\n?/gm, '').trim();
         if (paths.length) body.appendChild(userAttachmentGrid(paths));
@@ -2315,11 +2331,11 @@ function buildHistElement(m) {
       rawText += (rawText ? '\n' : '') + text;
       if (text) {
         const d = document.createElement('div');
-        if (m.role === 'user') d.innerHTML = esc(text);
+        if (role === 'user') d.innerHTML = esc(text);
         else { d.className = 'mdBlock'; d._rawMdText = text; d.innerHTML = md(text); }
         body.appendChild(d);
       }
-    } else if (m.role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
+    } else if (role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
       body.appendChild(userAttachmentGrid([p.path]));
     } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.detail || p.input, result: p.result }));
   }
