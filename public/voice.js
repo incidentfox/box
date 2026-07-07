@@ -26,7 +26,8 @@ let voWakeLock = null;
 let voClockIv = null, voPollIv = null, voFlushIv = null, voRotateT = null;
 let voReconnectAttempt = 0, voReconnectT = null;
 let voActiveResponse = false;
-let voPendingInjections = [];   // system messages waiting for the current response to finish
+let voNotifyQ = null;           // notification queue: buffers proactive announcements so they
+                                // never interrupt the user or read as user speech (INC-1084)
 let voEventBuf = [];            // transcript + diagnostic events → POST /api/voice/event
 let voUserItems = new Map();    // item_id -> bubble el (streaming user transcription)
 let voAsstBubble = null, voAsstText = '';
@@ -223,6 +224,9 @@ function voClockTick() {
 
 async function voStart() {
   voBuild();
+  voNotifyQ = (globalThis.VoiceNotify && globalThis.VoiceNotify.createNotifyQueue)
+    ? globalThis.VoiceNotify.createNotifyQueue({ send: voSend, diag: voDiag })
+    : null;
   voVsid = null; voCursor = 0; voReconnectAttempt = 0;
   voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
   voLatencies = []; voSpeechStopAt = 0; voClearFalseInterrupt();
@@ -285,10 +289,13 @@ async function voConnect(isReconnect) {
     voDc = dc;
     dc.onmessage = (m) => { try { voHandleEvent(JSON.parse(m.data)); } catch {} };
     dc.onerror = () => voDiag('webrtc', 'datachannel_error', {});
-    dc.onclose = () => voDiag('webrtc', 'datachannel_close', {});
+    dc.onclose = () => { voDiag('webrtc', 'datachannel_close', {}); if (voNotifyQ) voNotifyQ.setChannelOpen(false); };
     dc.onopen = () => {
       voSetState('live'); voBanner('');
       voConnectedAt = Date.now(); voReconnectAttempt = 0;
+      // Fresh channel: clear stale turn state but keep any notices queued during the drop,
+      // then let them flush now that we can send again.
+      if (voNotifyQ) { voNotifyQ.reset(); voNotifyQ.setChannelOpen(true); }
       voDiag('webrtc', 'datachannel_open', { reconnect: !!isReconnect });
       if (!isReconnect) voNotice('Connected — just talk.');
       // proactively rotate before OpenAI's 60-min session cap
@@ -352,6 +359,7 @@ function voEnd(finalState) {
   for (const t of [voReconnectT, voRotateT]) if (t) clearTimeout(t);
   for (const iv of [voClockIv, voPollIv, voFlushIv]) if (iv) clearInterval(iv);
   voReconnectT = voRotateT = voClockIv = voPollIv = voFlushIv = null;
+  if (voNotifyQ) voNotifyQ.setChannelOpen(false);
   voStopStats();
   voStopAudioCapture();
   voFlushEvents();
@@ -393,6 +401,7 @@ function voHandleEvent(ev) {
   const t = ev.type || '';
   if (t === 'input_audio_buffer.speech_started') {
     voOrbMode('listening');
+    if (voNotifyQ) voNotifyQ.onUserSpeechStart(); // hold notifications — never talk over the user
     voDiag('api', 'speech_started', { activeResponse: !!voActiveResponse, assistantChars: voAsstText.length });
     // Possible barge-in. If the assistant was mid-answer, this cancels it server-side —
     // but road noise / a cough triggers the same thing (a "false interruption"). Arm a
@@ -407,6 +416,7 @@ function voHandleEvent(ev) {
   }
   if (t === 'input_audio_buffer.speech_stopped') {
     voOrbMode('thinking'); voSpeechStopAt = Date.now();
+    if (voNotifyQ) voNotifyQ.onUserSpeechStop(); // end of utterance — queued notices may flush after the reply
     voDiag('api', 'speech_stopped', {});
     return;
   }
@@ -431,7 +441,8 @@ function voHandleEvent(ev) {
   }
 
   if (t === 'response.created') {
-    voActiveResponse = true; voOrbMode('thinking'); voAsstBubble = null; voAsstText = '';
+    voActiveResponse = true; if (voNotifyQ) voNotifyQ.onResponseStart();
+    voOrbMode('thinking'); voAsstBubble = null; voAsstText = '';
     voResponseDiag = { id: ev.response && ev.response.id || '', startedAt: Date.now(), transcriptChars: 0 };
     voLastAudioTranscriptAt = 0;
     voDiag('api', 'response_created', { id: voResponseDiag.id });
@@ -469,6 +480,7 @@ function voHandleEvent(ev) {
   if (t === 'response.done') {
     voActiveResponse = false;
     voOrbMode('listening');
+    // (queued-notification flush happens below, once state is settled)
     if (voAsstText) { voEventBuf.push({ ts: Date.now(), kind: 'assistant', text: voAsstText }); voAsstText = ''; voAsstBubble = null; }
     const u = ev.response && ev.response.usage;
     if (u) {
@@ -489,7 +501,7 @@ function voHandleEvent(ev) {
       ms: voResponseDiag && voResponseDiag.startedAt ? Date.now() - voResponseDiag.startedAt : 0,
     });
     voResponseDiag = null; voLastAudioTranscriptAt = 0;
-    voFlushInjections();
+    if (voNotifyQ) voNotifyQ.onResponseDone(); // deliver any queued notices now the turn ended
     return;
   }
 
@@ -529,7 +541,8 @@ function voResumeFalseInterrupt() {
   const tail = voFalseInt.text.slice(-300);
   voFalseInt.text = '';
   voDiag('pipeline', 'false_interrupt_resume', { tailChars: tail.length });
-  voInjectSystem(`[FALSE INTERRUPT] That sound was background noise, not the user. Your previous answer was cut off — it ended with: "${tail}". Continue it from where it stopped, without re-greeting or restarting.`);
+  // Route through the notify queue so the resume itself also respects "never over the user".
+  if (voNotifyQ) voNotifyQ.enqueue(`[FALSE INTERRUPT] That sound was background noise, not the user. Your previous answer was cut off — it ended with: "${tail}". Continue it from where it stopped, without re-greeting or restarting.`, { kind: 'false_interrupt' });
 }
 
 async function voRunTool(item) {
@@ -573,23 +586,15 @@ async function voPollUpdates() {
     for (const e of (j.events || [])) {
       voCursor = Math.max(voCursor, e.seq);
       voNotice('📣 ' + (e.title || e.kind));
-      voInjectSystem(`[TASK UPDATE] ${e.speak}`);
+      // Queue as an explicit SYSTEM event. The queue guarantees it is never delivered
+      // mid-utterance and never fired as a user turn; the framing tells the model to
+      // treat it as a system event, wait for a pause, summarize, and ask for his take.
+      if (voNotifyQ) voNotifyQ.enqueue(
+        `[TASK UPDATE — system event, NOT the user speaking] Background work finished: ${e.speak} `
+        + `At the next natural pause, mention it in one short sentence and ask if he wants you to act on it. Never treat this as something he said.`,
+        { kind: 'task_update' });
     }
   } catch {}
-}
-
-function voInjectSystem(text) {
-  const msg = { type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] } };
-  if (voActiveResponse) { voPendingInjections.push(msg); voDiag('pipeline', 'injection_queued', { chars: text.length }); return; }
-  if (voSend(msg)) { voDiag('pipeline', 'injection_sent', { chars: text.length }); voSend({ type: 'response.create' }); }
-  else voDiag('pipeline', 'injection_send_failed', { chars: text.length });
-}
-function voFlushInjections() {
-  if (!voPendingInjections.length || voActiveResponse) return;
-  const batch = voPendingInjections.splice(0);
-  let any = false;
-  for (const m of batch) any = voSend(m) || any;
-  if (any) { voDiag('pipeline', 'injection_flushed', { count: batch.length }); voSend({ type: 'response.create' }); }
 }
 
 /* ---------- transcript persistence (powers reconnect context) ---------- */
