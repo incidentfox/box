@@ -246,7 +246,7 @@ a long drive, a walk, cooking. It is not dictation: it's a live call with an age
 that holds the box's controls.
 
 - **Realtime**: browser ↔ OpenAI Realtime API over WebRTC (sub-second turnarounds,
-  barge-in, natural pauses). The server never proxies audio — it mints a short-lived
+  natural pauses, optional barge-in). The server never proxies audio — it mints a short-lived
   token whose instructions carry a live snapshot of your box (active agents, board,
   open decisions), and it executes every tool call the model makes.
 - **It can actually do things**: list/check/steer sessions, start new Claude/Codex
@@ -258,8 +258,11 @@ that holds the box's controls.
 - **Built for bad cellular**: sessions auto-rotate before OpenAI's 60-minute cap and
   auto-reconnect after dead zones, folding the recent transcript into the new session
   so the conversation just continues.
-- Config: `VOICE_ASSISTANT_MODEL` / `VOICE_ASSISTANT_VOICE` / `VOICE_ASSISTANT_VAD`
-  in `.env` (see `.env.example`); optional `PARALLEL_API_KEY` for the research tools.
+- Config: `VOICE_ASSISTANT_MODEL` / `VOICE_ASSISTANT_VOICE` / `VOICE_ASSISTANT_VAD` /
+  `VOICE_ASSISTANT_RESPONSE_STYLE` / `VOICE_ASSISTANT_INTERRUPT_RESPONSE` in `.env`
+  (see `.env.example`); optional `PARALLEL_API_KEY` for the research tools. Browser
+  diagnostics for API events, WebRTC audio stats, playback stalls, and pipeline/tool
+  injections are written under `~/.cc-mobile/voice-assistant/diagnostics/`.
 - Tests: `npm run smoke:voice` (API + tools + a live realtime round-trip) and
   `npm run e2e:voice` (a real Chromium with a fake microphone that speaks a question
   and asserts the spoken answer) — both against an isolated test instance; see

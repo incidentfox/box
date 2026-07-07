@@ -42,6 +42,87 @@ const ago = (ms) => {
   return `${Math.round(h / 24)}d ago`;
 };
 
+export function voiceBool(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
+}
+
+export function voiceResponseStyle(style = 'brief') {
+  const key = String(style || 'brief').toLowerCase();
+  if (key === 'normal') {
+    return [
+      '# Response Style',
+      '- Default to 1-3 concise spoken sentences.',
+      '- Never read more than three items aloud; give the count, name the two or three that matter most, and offer the rest.',
+    ].join('\n');
+  }
+  if (key === 'expanded') {
+    return [
+      '# Response Style',
+      '- Use up to 3-5 spoken sentences when the user explicitly asks for strategy or detail.',
+      '- Still avoid lists unless asked; summarize first, then offer to go deeper.',
+    ].join('\n');
+  }
+  return [
+    '# Response Style',
+    '- Default to ONE short spoken sentence, usually under twelve words.',
+    '- Use two sentences only for a tool result plus the next action. Three sentences is the hard cap.',
+    '- For lists, say the count and the top one or two items; offer the rest instead of reading them.',
+    '- After tool calls, answer the user directly. Do not recap every tool step.',
+  ].join('\n');
+}
+
+export function voiceTurnDetectionConfig({ mode = 'semantic', eagerness = 'low', interruptResponse = false } = {}) {
+  if (String(mode || '').toLowerCase() === 'server') {
+    return {
+      type: 'server_vad',
+      threshold: 0.65,
+      silence_duration_ms: 800,
+      create_response: true,
+      interrupt_response: !!interruptResponse,
+    };
+  }
+  return {
+    type: 'semantic_vad',
+    eagerness: eagerness || 'low',
+    create_response: true,
+    interrupt_response: !!interruptResponse,
+  };
+}
+
+function safeDiagData(data) {
+  const out = {};
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return out;
+  for (const [k, v] of Object.entries(data)) {
+    const key = String(k).replace(/[^\w.-]/g, '').slice(0, 48);
+    if (!key) continue;
+    if (typeof v === 'number') out[key] = Number.isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
+    else if (typeof v === 'boolean') out[key] = v;
+    else if (typeof v === 'string') out[key] = short(v, 240);
+  }
+  return out;
+}
+
+export function sanitizeVoiceEvent(e, now = Date.now()) {
+  const kind = String((e && e.kind) || 'meta').replace(/[^\w.-]/g, '').slice(0, 12) || 'meta';
+  const base = { ts: Number((e && e.ts) || now) || now, kind };
+  if (kind === 'diag') {
+    return {
+      ...base,
+      source: short((e && e.source) || 'unknown', 24),
+      event: short((e && e.event) || 'event', 64),
+      data: safeDiagData(e && e.data),
+    };
+  }
+  return {
+    ...base,
+    text: short(e && e.text, 2000),
+    name: e && e.name ? short(e.name, 40) : undefined,
+  };
+}
+
 export function registerVoiceAssistant(app, ctx) {
   const {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
@@ -52,8 +133,10 @@ export function registerVoiceAssistant(app, ctx) {
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
   const MODEL = cfg('VOICE_ASSISTANT_MODEL', 'gpt-realtime-2');
   const VOICE = cfg('VOICE_ASSISTANT_VOICE', 'marin');
+  const RESPONSE_STYLE = cfg('VOICE_ASSISTANT_RESPONSE_STYLE', 'brief');
+  const INTERRUPT_RESPONSE = voiceBool(cfg('VOICE_ASSISTANT_INTERRUPT_RESPONSE'), false);
   const VOICE_DIR = join(STATE_DIR, 'voice-assistant');
-  for (const d of [VOICE_DIR, join(VOICE_DIR, 'transcripts'), join(VOICE_DIR, 'research'), join(VOICE_DIR, 'notes')]) {
+  for (const d of [VOICE_DIR, join(VOICE_DIR, 'transcripts'), join(VOICE_DIR, 'diagnostics'), join(VOICE_DIR, 'research'), join(VOICE_DIR, 'notes')]) {
     try { mkdirSync(d, { recursive: true }); } catch {}
   }
   const BRIEFING_FILE = join(VOICE_DIR, 'briefing.md');
@@ -810,11 +893,12 @@ Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: M
 
 # Personality & Tone
 - A sharp, warm, direct colleague. Opinionated: push back with reasons and numbers — he explicitly wants a thought partner, not a yes-man.
-- Length: 1–3 sentences per turn. NEVER read more than three items aloud — give the count, name the two or three that matter most, and offer the rest ("Six agents are running; the two you care about are X and Y — want the list?").
 - Vary your responses — do not repeat the same sentence or opener twice; it sounds robotic.
 - Spoken English only. No markdown, no bullet lists, no sound effects, no reading URLs aloud (say "I'll email the link").
 - Round numbers when speaking: "about three thousand bills a month", not "3,012". Ticket ids as letters then digits: "INC nine fifty".
 - Ask only one question at a time.
+
+${voiceResponseStyle(RESPONSE_STYLE)}
 
 # Reference pronunciations
 daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · Jopari = "joh-PAR-ee" · Carisk = "CARE-isk" · Spravato = "sprah-VAH-toh".
@@ -884,6 +968,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
   }
 
   function transcriptPath(vsid) { return join(VOICE_DIR, 'transcripts', `${String(vsid).replace(/[^\w.-]/g, '_')}.jsonl`); }
+  function diagnosticPath(vsid) { return join(VOICE_DIR, 'diagnostics', `${String(vsid).replace(/[^\w.-]/g, '_')}.jsonl`); }
   function recentTranscript(vsid, maxLines = 36) {
     try {
       const lines = readFileSync(transcriptPath(vsid), 'utf8').trim().split('\n').slice(-maxLines);
@@ -921,9 +1006,11 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
         audio: {
           input: {
             transcription: { model: 'gpt-realtime-whisper', language: 'en' },
-            turn_detection: cfg('VOICE_ASSISTANT_VAD', 'semantic') === 'server'
-              ? { type: 'server_vad', threshold: 0.6, silence_duration_ms: 700, create_response: true, interrupt_response: true }
-              : { type: 'semantic_vad', eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'auto'), create_response: true, interrupt_response: true },
+            turn_detection: voiceTurnDetectionConfig({
+              mode: cfg('VOICE_ASSISTANT_VAD', 'semantic'),
+              eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'low'),
+              interruptResponse: INTERRUPT_RESPONSE,
+            }),
           },
           output: { voice: VOICE, speed: 1.0 },
         },
@@ -975,8 +1062,15 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     const { vsid, events } = req.body || {};
     if (vsid && Array.isArray(events)) {
       try {
-        const lines = events.slice(0, 50).map((e) => JSON.stringify({ ts: e.ts || Date.now(), kind: String(e.kind || 'meta').slice(0, 12), text: short(e.text, 2000), name: e.name ? String(e.name).slice(0, 40) : undefined }));
-        if (lines.length) appendFileSync(transcriptPath(vsid), lines.join('\n') + '\n');
+        const transcriptLines = [];
+        const diagnosticLines = [];
+        for (const e of events.slice(0, 100)) {
+          const clean = sanitizeVoiceEvent(e);
+          if (clean.kind === 'diag') diagnosticLines.push(JSON.stringify(clean));
+          else transcriptLines.push(JSON.stringify(clean));
+        }
+        if (transcriptLines.length) appendFileSync(transcriptPath(vsid), transcriptLines.join('\n') + '\n');
+        if (diagnosticLines.length) appendFileSync(diagnosticPath(vsid), diagnosticLines.join('\n') + '\n');
       } catch {}
     }
     res.json({ ok: true });
@@ -985,6 +1079,10 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
   app.get('/api/voice/status', requireAuth, (req, res) => {
     res.json({
       enabled: enabled(), model: MODEL, voice: VOICE,
+      responseStyle: RESPONSE_STYLE,
+      interruptResponse: INTERRUPT_RESPONSE,
+      vad: cfg('VOICE_ASSISTANT_VAD', 'semantic'),
+      eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'low'),
       briefing: existsSync(BRIEFING_FILE),
       slack: slackConfigured(cfg),
       tasks: [...TASKS.values()].slice(-20),

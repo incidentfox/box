@@ -26,12 +26,14 @@ let voClockIv = null, voPollIv = null, voFlushIv = null, voRotateT = null;
 let voReconnectAttempt = 0, voReconnectT = null;
 let voActiveResponse = false;
 let voPendingInjections = [];   // system messages waiting for the current response to finish
-let voEventBuf = [];            // transcript events → POST /api/voice/event
+let voEventBuf = [];            // transcript + diagnostic events → POST /api/voice/event
 let voUserItems = new Map();    // item_id -> bubble el (streaming user transcription)
 let voAsstBubble = null, voAsstText = '';
 let voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
 let voAnalyser = null, voOrbRaf = 0;
 let voSpeechStopAt = 0, voLatencies = [];   // end-of-user-speech → first spoken output, ms
+let voStatsIv = null, voLastInboundStats = null, voLastStatsLogAt = 0;
+let voResponseDiag = null, voLastAudioTranscriptAt = 0;
 
 const VO_PRICES = { atIn: 32, atInCached: 0.4, txIn: 4, txInCached: 0.4, atOut: 64, txOut: 24 }; // $/1M tok (gpt-realtime-2)
 
@@ -66,6 +68,17 @@ function voBuild() {
   voAudioEl = new Audio();
   voAudioEl.autoplay = true;
   voAudioEl.setAttribute('playsinline', '');
+  for (const name of ['playing', 'waiting', 'stalled', 'suspend', 'pause', 'ended', 'error']) {
+    voAudioEl.addEventListener(name, () => {
+      const err = voAudioEl.error ? `${voAudioEl.error.code}:${voAudioEl.error.message || ''}` : '';
+      voDiag('playback', name, {
+        readyState: voAudioEl.readyState,
+        networkState: voAudioEl.networkState,
+        paused: voAudioEl.paused,
+        error: err,
+      });
+    });
+  }
 }
 
 function openVoice() {
@@ -115,6 +128,80 @@ function voChip(label) {
 }
 function voNotice(text) { voBubble('notice', text); }
 
+function voDiag(source, event, data) {
+  if (!voVsid) return;
+  voEventBuf.push({ ts: Date.now(), kind: 'diag', source, event, data: data || {} });
+  if (voEventBuf.length >= 40) voFlushEvents();
+}
+
+function voTrackSettings(track) {
+  try {
+    const s = track && track.getSettings ? track.getSettings() : {};
+    return {
+      sampleRate: s.sampleRate || 0,
+      sampleSize: s.sampleSize || 0,
+      channelCount: s.channelCount || 0,
+      echoCancellation: !!s.echoCancellation,
+      noiseSuppression: !!s.noiseSuppression,
+      autoGainControl: !!s.autoGainControl,
+    };
+  } catch { return {}; }
+}
+
+function voStopStats() {
+  if (voStatsIv) clearInterval(voStatsIv);
+  voStatsIv = null; voLastInboundStats = null; voLastStatsLogAt = 0;
+}
+
+function voStartStats(pc) {
+  voStopStats();
+  const sample = async () => {
+    if (pc !== voPc || !pc.getStats) return voStopStats();
+    try {
+      const stats = await pc.getStats();
+      let inbound = null, pair = null;
+      stats.forEach((r) => {
+        if (r.type === 'inbound-rtp' && (r.kind === 'audio' || r.mediaType === 'audio') && !r.isRemote) inbound = r;
+        if (r.type === 'candidate-pair' && r.selected) pair = r;
+        if (!pair && r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId);
+      });
+      if (!inbound) return;
+      const last = voLastInboundStats || {};
+      const lostDelta = Math.max(0, (inbound.packetsLost || 0) - (last.packetsLost || 0));
+      const concealedDelta = Math.max(0, (inbound.concealedSamples || 0) - (last.concealedSamples || 0));
+      const concealEventsDelta = Math.max(0, (inbound.concealmentEvents || 0) - (last.concealmentEvents || 0));
+      const now = Date.now();
+      if (!voLastInboundStats || lostDelta || concealedDelta || concealEventsDelta || now - voLastStatsLogAt > 15000) {
+        voLastStatsLogAt = now;
+        voDiag('webrtc', 'inbound_audio_stats', {
+          packetsReceived: inbound.packetsReceived || 0,
+          packetsLost: inbound.packetsLost || 0,
+          packetsLostDelta: lostDelta,
+          jitterMs: (inbound.jitter || 0) * 1000,
+          concealedSamples: inbound.concealedSamples || 0,
+          concealedSamplesDelta: concealedDelta,
+          concealmentEvents: inbound.concealmentEvents || 0,
+          concealmentEventsDelta: concealEventsDelta,
+          audioLevel: inbound.audioLevel || 0,
+          jitterBufferMs: inbound.jitterBufferDelay && inbound.jitterBufferEmittedCount
+            ? (inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000 : 0,
+          rttMs: pair && pair.currentRoundTripTime ? pair.currentRoundTripTime * 1000 : 0,
+          availableOutgoingBitrate: pair && pair.availableOutgoingBitrate || 0,
+        });
+      }
+      voLastInboundStats = {
+        packetsLost: inbound.packetsLost || 0,
+        concealedSamples: inbound.concealedSamples || 0,
+        concealmentEvents: inbound.concealmentEvents || 0,
+      };
+    } catch (e) {
+      voDiag('webrtc', 'stats_error', { message: String((e && e.message) || e).slice(0, 160) });
+    }
+  };
+  sample();
+  voStatsIv = setInterval(sample, 5000);
+}
+
 function voClockTick() {
   if (!voStartedAt) return;
   const s = Math.floor((Date.now() - voStartedAt) / 1000);
@@ -138,6 +225,7 @@ async function voStart() {
   voVsid = null; voCursor = 0; voReconnectAttempt = 0;
   voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
   voLatencies = []; voSpeechStopAt = 0; voClearFalseInterrupt();
+  voStopStats(); voResponseDiag = null; voLastAudioTranscriptAt = 0;
   voStartedAt = Date.now();
   voFeedEl().innerHTML = '';
   await voConnect(false);
@@ -159,12 +247,15 @@ async function voConnect(isReconnect) {
     if (!tr.ok) throw new Error(tok.error || 'token mint failed');
     voVsid = tok.vsid;
     if (!isReconnect) voCursor = tok.cursor || 0;
+    voDiag('pipeline', 'token_minted', { reconnect: !!isReconnect, model: tok.model || '', voice: tok.voice || '' });
 
     // 2. mic (reused across reconnects)
     if (!voMicStream || !voMicStream.getAudioTracks().some((t) => t.readyState === 'live')) {
       voMicStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      const track = voMicStream.getAudioTracks()[0];
+      voDiag('playback', 'mic_track', voTrackSettings(track));
     }
     voMicStream.getAudioTracks().forEach((t) => { t.enabled = !voMuted; });
 
@@ -173,13 +264,29 @@ async function voConnect(isReconnect) {
     const oldPc = voPc, oldDc = voDc;
     voPc = pc;
     pc.addTrack(voMicStream.getAudioTracks()[0], voMicStream);
-    pc.ontrack = (e) => { voAudioEl.srcObject = e.streams[0]; voAudioEl.play().catch(() => {}); voAttachAnalyser(e.streams[0]); };
+    pc.ontrack = (e) => {
+      const track = e.track || (e.streams[0] && e.streams[0].getAudioTracks()[0]);
+      voDiag('webrtc', 'remote_track', { kind: track && track.kind || '', muted: !!(track && track.muted), readyState: track && track.readyState || '' });
+      if (track) {
+        track.onmute = () => voDiag('webrtc', 'remote_track_mute', { readyState: track.readyState || '' });
+        track.onunmute = () => voDiag('webrtc', 'remote_track_unmute', { readyState: track.readyState || '' });
+        track.onended = () => voDiag('webrtc', 'remote_track_ended', { readyState: track.readyState || '' });
+      }
+      voAudioEl.srcObject = e.streams[0];
+      voAudioEl.play()
+        .then(() => voDiag('playback', 'play_ok', { readyState: voAudioEl.readyState }))
+        .catch((err) => voDiag('playback', 'play_blocked', { message: String((err && err.message) || err).slice(0, 160) }));
+      voAttachAnalyser(e.streams[0]);
+    };
     const dc = pc.createDataChannel('oai-events');
     voDc = dc;
     dc.onmessage = (m) => { try { voHandleEvent(JSON.parse(m.data)); } catch {} };
+    dc.onerror = () => voDiag('webrtc', 'datachannel_error', {});
+    dc.onclose = () => voDiag('webrtc', 'datachannel_close', {});
     dc.onopen = () => {
       voSetState('live'); voBanner('');
       voConnectedAt = Date.now(); voReconnectAttempt = 0;
+      voDiag('webrtc', 'datachannel_open', { reconnect: !!isReconnect });
       if (!isReconnect) voNotice('Connected — just talk.');
       // proactively rotate before OpenAI's 60-min session cap
       if (voRotateT) clearTimeout(voRotateT);
@@ -187,21 +294,30 @@ async function voConnect(isReconnect) {
     };
     pc.onconnectionstatechange = () => {
       if (pc !== voPc) return; // superseded by a newer connection
+      voDiag('webrtc', 'connection_state', { state: pc.connectionState });
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
         if (voState === 'live' || voState === 'connecting' || voState === 'reconnecting') voScheduleReconnect();
       }
     };
+    pc.oniceconnectionstatechange = () => { if (pc === voPc) voDiag('webrtc', 'ice_state', { state: pc.iceConnectionState }); };
+    pc.onsignalingstatechange = () => { if (pc === voPc) voDiag('webrtc', 'signaling_state', { state: pc.signalingState }); };
 
     // 4. SDP exchange with OpenAI
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    voDiag('api', 'sdp_offer', { sdpChars: offer.sdp ? offer.sdp.length : 0 });
     const sdpR = await fetch('https://api.openai.com/v1/realtime/calls', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + tok.clientSecret, 'Content-Type': 'application/sdp' },
       body: offer.sdp,
     });
-    if (!sdpR.ok) throw new Error('OpenAI SDP exchange failed: HTTP ' + sdpR.status);
+    if (!sdpR.ok) {
+      voDiag('api', 'sdp_error', { status: sdpR.status });
+      throw new Error('OpenAI SDP exchange failed: HTTP ' + sdpR.status);
+    }
     await pc.setRemoteDescription({ type: 'answer', sdp: await sdpR.text() });
+    voDiag('api', 'sdp_answer', {});
+    voStartStats(pc);
 
     // swap complete — drop the old connection (graceful rotation)
     if (oldDc) { try { oldDc.close(); } catch {} }
@@ -209,6 +325,7 @@ async function voConnect(isReconnect) {
     voActiveResponse = false;
   } catch (e) {
     console.warn('[voice] connect failed', e);
+    voDiag('pipeline', 'connect_failed', { message: String((e && e.message) || e).slice(0, 180) });
     if (String(e && e.message).includes('getUserMedia') || (e && e.name === 'NotAllowedError')) {
       voSetState('off'); voBanner(''); toast('Microphone permission needed');
       return;
@@ -232,6 +349,7 @@ function voEnd(finalState) {
   for (const t of [voReconnectT, voRotateT]) if (t) clearTimeout(t);
   for (const iv of [voClockIv, voPollIv, voFlushIv]) if (iv) clearInterval(iv);
   voReconnectT = voRotateT = voClockIv = voPollIv = voFlushIv = null;
+  voStopStats();
   voFlushEvents();
   if (voDc) { try { voDc.close(); } catch {} voDc = null; }
   if (voPc) { try { voPc.close(); } catch {} voPc = null; }
@@ -268,6 +386,7 @@ function voHandleEvent(ev) {
   const t = ev.type || '';
   if (t === 'input_audio_buffer.speech_started') {
     voOrbMode('listening');
+    voDiag('api', 'speech_started', { activeResponse: !!voActiveResponse, assistantChars: voAsstText.length });
     // Possible barge-in. If the assistant was mid-answer, this cancels it server-side —
     // but road noise / a cough triggers the same thing (a "false interruption"). Arm a
     // recovery: if no user words get transcribed within 2.8s, resume the answer.
@@ -275,10 +394,15 @@ function voHandleEvent(ev) {
       voFalseInt.text = voAsstText;
       if (voFalseInt.timer) clearTimeout(voFalseInt.timer);
       voFalseInt.timer = setTimeout(voResumeFalseInterrupt, 2800);
+      voDiag('pipeline', 'false_interrupt_armed', { assistantChars: voAsstText.length });
     }
     return;
   }
-  if (t === 'input_audio_buffer.speech_stopped') { voOrbMode('thinking'); voSpeechStopAt = Date.now(); return; }
+  if (t === 'input_audio_buffer.speech_stopped') {
+    voOrbMode('thinking'); voSpeechStopAt = Date.now();
+    voDiag('api', 'speech_stopped', {});
+    return;
+  }
 
   // user speech transcription (streams in after each utterance)
   if (t === 'conversation.item.input_audio_transcription.delta') {
@@ -299,10 +423,22 @@ function voHandleEvent(ev) {
     return;
   }
 
-  if (t === 'response.created') { voActiveResponse = true; voOrbMode('thinking'); voAsstBubble = null; voAsstText = ''; return; }
+  if (t === 'response.created') {
+    voActiveResponse = true; voOrbMode('thinking'); voAsstBubble = null; voAsstText = '';
+    voResponseDiag = { id: ev.response && ev.response.id || '', startedAt: Date.now(), transcriptChars: 0 };
+    voLastAudioTranscriptAt = 0;
+    voDiag('api', 'response_created', { id: voResponseDiag.id });
+    return;
+  }
 
   // assistant speech transcript (both GA and legacy event names)
   if (t === 'response.output_audio_transcript.delta' || t === 'response.audio_transcript.delta') {
+    const now = Date.now();
+    if (voLastAudioTranscriptAt && now - voLastAudioTranscriptAt > 1500) {
+      voDiag('api', 'audio_transcript_gap', { gapMs: now - voLastAudioTranscriptAt, activeResponse: !!voActiveResponse });
+    }
+    voLastAudioTranscriptAt = now;
+    if (voResponseDiag) voResponseDiag.transcriptChars += (ev.delta || '').length;
     if (!voAsstBubble) {
       voAsstBubble = voBubble('asst', '');
       // turn latency: end of user speech → first spoken output (includes tool time — honest UX number)
@@ -338,6 +474,14 @@ function voHandleEvent(ev) {
       voUsage.atOut += outd.audio_tokens || 0;
       voUsage.txOut += outd.text_tokens || 0;
     }
+    voDiag('api', 'response_done', {
+      id: ev.response && ev.response.id || voResponseDiag && voResponseDiag.id || '',
+      status: ev.response && ev.response.status || '',
+      statusDetails: ev.response && ev.response.status_details ? JSON.stringify(ev.response.status_details).slice(0, 200) : '',
+      transcriptChars: voResponseDiag && voResponseDiag.transcriptChars || 0,
+      ms: voResponseDiag && voResponseDiag.startedAt ? Date.now() - voResponseDiag.startedAt : 0,
+    });
+    voResponseDiag = null; voLastAudioTranscriptAt = 0;
     voFlushInjections();
     return;
   }
@@ -345,6 +489,7 @@ function voHandleEvent(ev) {
   if (t === 'error') {
     const msg = (ev.error && ev.error.message) || '';
     console.warn('[voice] api error', ev);
+    voDiag('api', 'error', { message: msg, code: ev.error && ev.error.code || '', type: ev.error && ev.error.type || '' });
     // benign: racing response.create while one is active
     if (/already has an active response/i.test(msg)) return;
     if (/session.*(expired|maximum duration)/i.test(msg)) { voBanner('Session refresh…'); voConnect(true); return; }
@@ -375,6 +520,7 @@ function voResumeFalseInterrupt() {
   if (!voFalseInt.text || voActiveResponse || !voDc || voDc.readyState !== 'open') { voFalseInt.text = ''; return; }
   const tail = voFalseInt.text.slice(-300);
   voFalseInt.text = '';
+  voDiag('pipeline', 'false_interrupt_resume', { tailChars: tail.length });
   voInjectSystem(`[FALSE INTERRUPT] That sound was background noise, not the user. Your previous answer was cut off — it ended with: "${tail}". Continue it from where it stopped, without re-greeting or restarting.`);
 }
 
@@ -382,12 +528,15 @@ async function voRunTool(item) {
   // wait_for_user = the model deciding NOT to answer noise/side-speech. No chip, and
   // crucially no response.create — forcing a response would defeat the whole point.
   if (item.name === 'wait_for_user') {
+    voDiag('pipeline', 'tool_wait_for_user', {});
     voSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: item.call_id, output: '{"ok":true}' } });
     voOrbMode('listening');
     return;
   }
   const chip = voChip(VO_TOOL_LABELS[item.name] || item.name);
   let output = '';
+  const t0 = Date.now();
+  voDiag('pipeline', 'tool_start', { name: item.name });
   try {
     const r = await api('/api/voice/tool', {
       method: 'POST',
@@ -399,6 +548,7 @@ async function voRunTool(item) {
     output = JSON.stringify({ error: 'box unreachable: ' + String((e && e.message) || e).slice(0, 120) });
   }
   const failed = /"error"/.test(output.slice(0, 60));
+  voDiag('pipeline', 'tool_done', { name: item.name, failed, ms: Date.now() - t0, outputChars: output.length });
   chip.classList.add(failed ? 'fail' : 'ok');
   chip.querySelector('.voSpin').remove();
   voSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: item.call_id, output } });
@@ -422,15 +572,16 @@ async function voPollUpdates() {
 
 function voInjectSystem(text) {
   const msg = { type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] } };
-  if (voActiveResponse) { voPendingInjections.push(msg); return; }
-  if (voSend(msg)) voSend({ type: 'response.create' });
+  if (voActiveResponse) { voPendingInjections.push(msg); voDiag('pipeline', 'injection_queued', { chars: text.length }); return; }
+  if (voSend(msg)) { voDiag('pipeline', 'injection_sent', { chars: text.length }); voSend({ type: 'response.create' }); }
+  else voDiag('pipeline', 'injection_send_failed', { chars: text.length });
 }
 function voFlushInjections() {
   if (!voPendingInjections.length || voActiveResponse) return;
   const batch = voPendingInjections.splice(0);
   let any = false;
   for (const m of batch) any = voSend(m) || any;
-  if (any) voSend({ type: 'response.create' });
+  if (any) { voDiag('pipeline', 'injection_flushed', { count: batch.length }); voSend({ type: 'response.create' }); }
 }
 
 /* ---------- transcript persistence (powers reconnect context) ---------- */
