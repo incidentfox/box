@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   agentFinishedLine,
   agentProgressLine,
+  archiveSessionPolicy,
   detectListItems,
   paginateText,
   plainLanguageLabel,
@@ -87,6 +88,18 @@ assert.equal(voiceBool('off'), false);
   assert.equal(ev.kind, 'assistant');
   assert.ok(ev.text.length <= 2000);
   assert.ok(ev.name.length <= 40);
+}
+
+// ---- guarded session archive policy (INC-1085) ------------------------------
+
+{
+  assert.deepEqual(archiveSessionPolicy(null), { ok: false, code: 'not_found', error: 'session not found' });
+  assert.equal(archiveSessionPolicy({ id: 's1', title: 'Done', status: 'idle', live: false }).ok, true);
+  assert.equal(archiveSessionPolicy({ id: 's1', title: 'Old', archived: true }).already_archived, true);
+  assert.equal(archiveSessionPolicy({ id: 's1', title: 'Running', status: 'working' }).code, 'session_not_idle');
+  assert.equal(archiveSessionPolicy({ id: 's1', title: 'Question', status: 'needs_input' }).code, 'session_not_idle');
+  assert.equal(archiveSessionPolicy({ id: 's1', title: 'Live', live: true }).code, 'session_not_idle');
+  assert.equal(archiveSessionPolicy({ id: 's1', title: 'Restore', status: 'live' }, { archived: false }).ok, true);
 }
 
 // ---- session artifact retrieval (INC-1080) ----------------------------------

@@ -446,6 +446,22 @@ export function spokenWorkLabel(ref = {}, opts = {}) {
   return 'that work';
 }
 
+export function archiveSessionPolicy(session, { archived = true } = {}) {
+  if (!session || !session.id) return { ok: false, code: 'not_found', error: 'session not found' };
+  const on = archived !== false;
+  if (!on) return { ok: true };
+  if (session.archived) return { ok: true, already_archived: true };
+  const status = String(session.status || '').toLowerCase();
+  if (session.live || status === 'working' || status === 'needs_input' || status === 'live') {
+    return {
+      ok: false,
+      code: 'session_not_idle',
+      error: `refusing to archive "${session.title || session.id}" because it is ${status || 'live'}`,
+    };
+  }
+  return { ok: true };
+}
+
 // Pre-built spoken lines for background-agent updates. Pure + exported so the narration
 // path is unit-tested: each must LEAD with the plain-language descriptor (`speakAs`) and
 // never reference the work by bare ticket code.
@@ -480,6 +496,7 @@ export function registerVoiceAssistant(app, ctx) {
   const TASKS_FILE = join(VOICE_DIR, 'tasks.json');
   const SESSION_HISTORY_AUDIT_FILE = join(VOICE_DIR, 'session-history-audit.jsonl');
   const FILE_ACCESS_AUDIT_FILE = join(VOICE_DIR, 'file-access-audit.jsonl');
+  const SESSION_ARCHIVE_AUDIT_FILE = join(VOICE_DIR, 'session-archive-audit.jsonl');
 
   // Cross-session voice memory: consent-gated recall + audio store + retention/audit.
   const TRANSCRIPTS_DIR = join(VOICE_DIR, 'transcripts');
@@ -789,12 +806,19 @@ export function registerVoiceAssistant(app, ctx) {
 
   // ---- fuzzy session resolution ---------------------------------------------
 
-  function sessionsSnapshot(limit = 60) {
-    try { return listSessions({ limit, filter: 'all' }).sessions || []; } catch { return []; }
+  function sessionsSnapshot(limit = 60, { includeArchived = false } = {}) {
+    try {
+      const active = listSessions({ limit, filter: 'all' }).sessions || [];
+      if (!includeArchived) return active;
+      const archived = listSessions({ limit, filter: 'archived' }).sessions || [];
+      const byId = new Map();
+      for (const s of [...active, ...archived]) if (s && s.id && !byId.has(s.id)) byId.set(s.id, s);
+      return [...byId.values()];
+    } catch { return []; }
   }
-  function matchSession(query) {
+  function matchSession(query, opts = {}) {
     const q = String(query || '').toLowerCase().trim();
-    const all = sessionsSnapshot(80);
+    const all = sessionsSnapshot(80, opts);
     if (!q) return { all, hits: [] };
     if (/^[0-9a-f-]{36}$/.test(q)) return { all, hits: all.filter((s) => s.id === q) };
     const words = q.split(/\s+/).filter(Boolean);
@@ -832,6 +856,10 @@ export function registerVoiceAssistant(app, ctx) {
 
   function writeFileAccessAudit(row) {
     try { appendFileSync(FILE_ACCESS_AUDIT_FILE, JSON.stringify({ ts: Date.now(), ...row }) + '\n'); } catch {}
+  }
+
+  function writeSessionArchiveAudit(row) {
+    try { appendFileSync(SESSION_ARCHIVE_AUDIT_FILE, JSON.stringify({ ts: Date.now(), ...row }) + '\n'); } catch {}
   }
 
   function resolveProjectDir(project) {
@@ -889,7 +917,7 @@ export function registerVoiceAssistant(app, ctx) {
       description: 'Find one session by name/topic and report what it is doing right now, including a PREVIEW of its latest reply. Use before sending a message to it. If output_truncated is true, the reply was cut off — call read_session_output for the complete artifact (full list / pagination / summary).',
       parameters: { type: 'object', properties: { query: { type: 'string', description: 'Words from the session title, project, or topic' } }, required: ['query'] },
       handler: async ({ query }) => {
-        const { hits, all } = matchSession(query);
+        const { hits, all } = matchSession(query, { includeArchived: true });
         if (!hits.length) {
           const sug = sessionSuggestions(query, all);
           return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
@@ -922,7 +950,7 @@ export function registerVoiceAssistant(app, ctx) {
         required: ['query'],
       },
       handler: async ({ query, mode = 'summary', page = 1, page_size = 1800, max_items = 5 } = {}) => {
-        const { hits, all } = matchSession(query);
+        const { hits, all } = matchSession(query, { includeArchived: true });
         if (!hits.length) {
           const sug = sessionSuggestions(query, all);
           return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
@@ -1024,10 +1052,10 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'send_to_session',
-      description: 'Send a message/instruction into an existing agent session (it resumes and works in the background; you will be told when it finishes its turn). Identify the session by query words.',
-      parameters: { type: 'object', properties: { query: { type: 'string' }, message: { type: 'string' } }, required: ['query', 'message'] },
-      handler: async ({ query, message }) => {
-        const { hits, all } = matchSession(query);
+      description: 'Send a message/instruction into an existing non-archived agent session (it resumes and works in the background; you will be told when it finishes its turn). Identify the session by query words. Archived sessions are protected unless resume_archived is explicitly true.',
+      parameters: { type: 'object', properties: { query: { type: 'string' }, message: { type: 'string' }, resume_archived: { type: 'boolean', description: 'Only true when the user explicitly asked to resume an archived chat.' } }, required: ['query', 'message'] },
+      handler: async ({ query, message, resume_archived = false }) => {
+        const { hits, all } = matchSession(query, { includeArchived: true });
         if (!hits.length) {
           const sug = sessionSuggestions(query, all);
           return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
@@ -1037,10 +1065,59 @@ export function registerVoiceAssistant(app, ctx) {
           return { need_disambiguation: hits.slice(0, 3).map(sessBrief) };
         }
         const s = hits[0];
+        if (s.archived && !resume_archived) {
+          return {
+            error: `"${s.title || s.id}" is archived; say explicitly to resume the archived chat before I send anything to it`,
+            match: sessBrief(s),
+          };
+        }
         if (DRYRUN) return { sent: true, dry_run: true, to: sessBrief(s) };
         enqueue(s.id, { text: message, mode: 'normal', agent: s.agent || 'claude', cwd: s.cwd });
         watchSession(s.id, s.title);
         return { sent: true, to: sessBrief(s) };
+      },
+    },
+    {
+      name: 'archive_session',
+      description: 'Archive or unarchive an agent session by title/topic/id. Use when the user asks to archive, clean up, hide, or restore a session. Refuses active/live/working/needs-input sessions so voice cleanup cannot interrupt work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Words from the session title/topic, or the full session id' },
+          archived: { type: 'boolean', description: 'true to archive (default), false to unarchive' },
+        },
+        required: ['query'],
+      },
+      handler: async ({ query, archived = true }) => {
+        const { hits, all } = matchSession(query, { includeArchived: true });
+        if (!hits.length) {
+          const sug = sessionSuggestions(query, all);
+          return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
+        }
+        const ambiguous = hits.length > 1 && hits[0].title !== hits[1].title;
+        if (ambiguous && hits[0].status === hits[1].status) {
+          return { need_disambiguation: hits.slice(0, 4).map(sessBrief) };
+        }
+        const s = hits[0];
+        const decision = archiveSessionPolicy(s, { archived });
+        if (!decision.ok) {
+          writeSessionArchiveAudit({ query, session: sessBrief(s), archived: archived !== false, ok: false, code: decision.code });
+          return { ...decision, match: sessBrief(s), audit: { log: SESSION_ARCHIVE_AUDIT_FILE } };
+        }
+        if (decision.already_archived && archived !== false) {
+          writeSessionArchiveAudit({ query, session: sessBrief(s), archived: true, ok: true, already_archived: true });
+          return { archived: true, already_archived: true, match: sessBrief(s), audit: { log: SESSION_ARCHIVE_AUDIT_FILE } };
+        }
+        if (DRYRUN) return { archived: archived !== false, dry_run: true, match: sessBrief(s), audit: { log: SESSION_ARCHIVE_AUDIT_FILE } };
+        const out = await selfFetch(`/api/sessions/${encodeURIComponent(s.id)}/archive`, { method: 'POST', body: { archived: archived !== false } });
+        writeSessionArchiveAudit({ query, session: sessBrief(s), archived: out.archived, ok: true, killed: out.killed || 0 });
+        return {
+          archived: !!out.archived,
+          match: sessBrief({ ...s, archived: !!out.archived }),
+          killed: out.killed || 0,
+          restored: out.restored || null,
+          audit: { log: SESSION_ARCHIVE_AUDIT_FILE },
+        };
       },
     },
     {
@@ -1494,7 +1571,8 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
 - Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
-- Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
+- Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
+- Session cleanup: when Jimmy asks to archive/clean up/hide a finished session, call archive_session. Do not use send_to_session on an archived session unless he explicitly asks to resume that archived chat.
 - Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
