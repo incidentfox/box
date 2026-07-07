@@ -513,7 +513,7 @@ const VO_TOOL_LABELS = {
   check_tasks: 'Checking tasks…', brain_search: 'Searching the brain…', brain_read: 'Reading the brain…',
   get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
   email_jimmy: 'Sending email…', calendar: 'Checking calendar…', think_hard: 'Thinking hard…',
-  voice_memory: 'Updating memory…',
+  voice_memory: 'Updating memory…', file_access: 'Checking file access…',
 };
 
 /* ---------- false-interruption recovery (road noise cancels a reply → resume it) ---------- */
