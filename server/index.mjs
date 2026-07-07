@@ -30,7 +30,7 @@ import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-eng
 import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
-import { cleanPathToken, createLocalFileResolver } from './local-file-resolver.mjs';
+import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
