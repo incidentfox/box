@@ -106,6 +106,17 @@ export function voiceResponseStyle(style = 'brief') {
   ].join('\n');
 }
 
+// Coerce a config value to a number, treating "unset" as the default. Crucially, an
+// absent env var comes through cfg() as an EMPTY STRING, not undefined — and Number('')
+// is 0 (finite), which would otherwise be read as a real 0 and clamp every knob to its
+// floor. So null/undefined/'' all fall back to the default; only a genuinely numeric
+// value overrides it. (INC-1088 follow-up: this bug shipped tailMs=0 etc. to prod.)
+export function voiceNumOr(value, dflt) {
+  if (value == null || value === '') return dflt;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : dflt;
+}
+
 export function voiceTurnDetectionConfig({
   mode = 'semantic', eagerness = 'low', interruptResponse = false,
   threshold, silenceMs,
@@ -114,8 +125,8 @@ export function voiceTurnDetectionConfig({
     // Raising the threshold makes the detector less likely to fire on the quiet
     // residual echo of our own TTS that survives acoustic echo cancellation — the
     // root cause of self-interruption. Configurable so a noisy car can be tuned.
-    const th = Number.isFinite(Number(threshold)) ? Math.min(1, Math.max(0, Number(threshold))) : 0.65;
-    const sil = Number.isFinite(Number(silenceMs)) ? Math.max(0, Math.round(Number(silenceMs))) : 800;
+    const th = Math.min(1, Math.max(0, voiceNumOr(threshold, 0.65)));
+    const sil = Math.max(0, Math.round(voiceNumOr(silenceMs, 800)));
     return {
       type: 'server_vad',
       threshold: th,
@@ -142,20 +153,21 @@ export function voiceTurnDetectionConfig({
 export function voiceAudioPolicy({
   halfDuplex, interruptResponse = false, tailMs, maxHoldMs, echoGuard, echoThreshold, echoMinTokens,
 } = {}) {
-  const hd = halfDuplex == null ? !interruptResponse : voiceBool(halfDuplex, !interruptResponse);
+  // halfDuplex/echoGuard: voiceBool already treats '' as "unset" → fallback.
+  const hd = (halfDuplex == null || halfDuplex === '') ? !interruptResponse : voiceBool(halfDuplex, !interruptResponse);
   return {
     halfDuplex: hd,
     // Keep the mic gated this long after `response.done` so the tail of TTS still
     // draining out of the jitter buffer / <audio> element isn't heard as speech.
-    tailMs: Number.isFinite(Number(tailMs)) ? Math.max(0, Math.round(Number(tailMs))) : 600,
+    tailMs: Math.max(0, Math.round(voiceNumOr(tailMs, 600))),
     // Hard safety: never leave the mic gated longer than this (a dropped response.done
     // must never wedge the mic shut for the rest of a drive).
-    maxHoldMs: Number.isFinite(Number(maxHoldMs)) ? Math.max(1000, Math.round(Number(maxHoldMs))) : 20000,
-    echoGuard: echoGuard == null ? true : voiceBool(echoGuard, true),
-    echoThreshold: Number.isFinite(Number(echoThreshold)) ? Math.min(1, Math.max(0.5, Number(echoThreshold))) : 0.8,
+    maxHoldMs: Math.max(1000, Math.round(voiceNumOr(maxHoldMs, 20000))),
+    echoGuard: (echoGuard == null || echoGuard === '') ? true : voiceBool(echoGuard, true),
+    echoThreshold: Math.min(1, Math.max(0.5, voiceNumOr(echoThreshold, 0.8))),
     // Below this many tokens a "user" utterance is too short to safely call an echo
     // (real commands like "yes", "stop", "next" must always get through).
-    echoMinTokens: Number.isFinite(Number(echoMinTokens)) ? Math.max(2, Math.round(Number(echoMinTokens))) : 4,
+    echoMinTokens: Math.max(2, Math.round(voiceNumOr(echoMinTokens, 4))),
   };
 }
 

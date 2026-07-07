@@ -17,6 +17,7 @@ import {
   voiceResponseStyle,
   voiceTurnDetectionConfig,
   voiceAudioPolicy,
+  voiceNumOr,
   voiceNormalizeTokens,
   selfEchoMatch,
   summarizeSelfEchoDiagnostics,
@@ -347,6 +348,34 @@ assert.equal(voiceBool('off'), false);
   assert.equal(voiceAudioPolicy({ echoThreshold: 0.1 }).echoThreshold, 0.5); // floor
   assert.equal(voiceAudioPolicy({ echoMinTokens: 1 }).echoMinTokens, 2);     // floor
   assert.equal(voiceAudioPolicy({ tailMs: 'x' }).tailMs, 600);               // garbage → default
+  // REGRESSION (INC-1088): an absent env var arrives from cfg() as '', not undefined.
+  // Number('') is 0 (finite), which must NOT be read as an explicit 0 that clamps to the
+  // floor — '' means "unset" → the intended default, exactly like the fully-empty call.
+  const empty = voiceAudioPolicy({ tailMs: '', maxHoldMs: '', echoThreshold: '', echoMinTokens: '', halfDuplex: '', echoGuard: '' });
+  assert.equal(empty.tailMs, 600);
+  assert.equal(empty.maxHoldMs, 20000);
+  assert.equal(empty.echoThreshold, 0.8);
+  assert.equal(empty.echoMinTokens, 4);
+  assert.equal(empty.halfDuplex, true);
+  assert.equal(empty.echoGuard, true);
+  // An explicit 0 is still honoured where valid (tailMs floor is 0).
+  assert.equal(voiceAudioPolicy({ tailMs: 0 }).tailMs, 0);
+  assert.equal(voiceAudioPolicy({ tailMs: '0' }).tailMs, 0);
+  // Server VAD knobs: '' → defaults, not 0.
+  assert.equal(voiceTurnDetectionConfig({ mode: 'server', threshold: '', silenceMs: '' }).threshold, 0.65);
+  assert.equal(voiceTurnDetectionConfig({ mode: 'server', threshold: '', silenceMs: '' }).silence_duration_ms, 800);
+}
+
+{
+  // voiceNumOr: '' / null / undefined / NaN-ish → default; real numbers (incl. 0) pass.
+  assert.equal(voiceNumOr('', 600), 600);
+  assert.equal(voiceNumOr(null, 600), 600);
+  assert.equal(voiceNumOr(undefined, 600), 600);
+  assert.equal(voiceNumOr('abc', 600), 600);
+  assert.equal(voiceNumOr('0', 600), 0);
+  assert.equal(voiceNumOr(0, 600), 0);
+  assert.equal(voiceNumOr('900', 600), 900);
+  assert.equal(voiceNumOr(1.5, 600), 1.5);
 }
 
 {
