@@ -23,14 +23,15 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync,
-  readdirSync, statSync, unlinkSync, writeFileSync,
+  realpathSync, readdirSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import multer from 'multer';
 import { readCodexSessionHistory } from './codex-context.mjs';
 import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
+import { createLocalFileResolver } from './local-file-resolver.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -120,6 +121,151 @@ export function voiceTurnDetectionConfig({ mode = 'semantic', eagerness = 'low',
     eagerness: eagerness || 'low',
     create_response: true,
     interrupt_response: !!interruptResponse,
+  };
+}
+
+const VOICE_SPREADSHEET_EXTS = new Set(['.csv', '.tsv', '.xls', '.xlsx', '.xlsm', '.ods', '.numbers']);
+const VOICE_FILE_DENY_SEGMENT_RE = /(?:^|\/)(?:\.ssh|\.aws|\.gnupg|\.kube|\.config)(?:\/|$)/i;
+const VOICE_FILE_DENY_FILE_RE = /(?:^|\/)(?:\.env(?:$|\.)|credentials(?:$|\.)|secrets?(?:$|\.)|id_(?:rsa|ed25519|ecdsa|dsa)$|[^/]+\.(?:pem|p12|pfx|key))$/i;
+
+function expandVoiceRoot(raw, { HOME = homedir(), cwd = HOME } = {}) {
+  let s = String(raw || '').trim().replace(/^['"`]+|['"`]+$/g, '');
+  while (/[.,;:!?]$/.test(s)) s = s.slice(0, -1);
+  if (!s) return '';
+  if (s === '~') return HOME;
+  if (s.startsWith('~/')) return resolve(join(HOME, s.slice(2)));
+  return resolve(isAbsolute(s) ? s : join(cwd || HOME, s));
+}
+
+export function voiceFileAccessRoots(raw, { HOME = homedir(), STATE_DIR = join(homedir(), '.cc-mobile') } = {}) {
+  const defaults = [join(HOME, 'development'), join(HOME, 'Downloads'), join(STATE_DIR, 'uploads'), '/tmp'];
+  const parts = raw
+    ? String(raw).split(delimiter).flatMap((p) => p.split(',')).map((p) => p.trim()).filter(Boolean)
+    : defaults;
+  const roots = [];
+  for (const p of parts) {
+    const expanded = expandVoiceRoot(p, { HOME, cwd: HOME });
+    if (!expanded) continue;
+    try {
+      const st = statSync(expanded);
+      if (!st.isDirectory()) continue;
+      const real = realpathSync(expanded);
+      if (!roots.includes(real)) roots.push(real);
+    } catch {}
+  }
+  return roots;
+}
+
+function pathInsideRoot(path, root) {
+  const rel = relative(root, path);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+export function voiceFileAccessPolicy({ path, purpose = '', user_confirmed = false } = {}, opts = {}) {
+  const HOME = opts.HOME || homedir();
+  const STATE_DIR = opts.STATE_DIR || join(HOME, '.cc-mobile');
+  const UPLOAD_DIR = opts.UPLOAD_DIR || join(STATE_DIR, 'uploads');
+  const maxBytes = Math.max(1, Number(opts.maxBytes || 25 * 1024 * 1024));
+  const roots = opts.roots || voiceFileAccessRoots(opts.rootsRaw, { HOME, STATE_DIR });
+  const requested = String(path || '').trim();
+  if (!requested) {
+    return {
+      ok: false,
+      code: 'path_required',
+      direct_access: false,
+      message: 'Voice cannot see arbitrary local files. Ask for a box path or have the user upload the file to Box, then offer to send a scoped agent to ingest it.',
+      allowed_roots: roots,
+    };
+  }
+  const resolver = opts.resolver || createLocalFileResolver({
+    HOME,
+    STATE_DIR,
+    UPLOAD_DIR,
+    defaultCwd: opts.cwd || HOME,
+    searchRoots: roots,
+  });
+  const hit = resolver.resolveLocalFileReference(requested, opts.cwd || HOME);
+  const expanded = hit.found ? hit.path : resolver.expandLocalPathToken(requested, opts.cwd || HOME);
+  let real = '', st = null;
+  try {
+    real = realpathSync(expanded);
+    st = statSync(real);
+  } catch {
+    return {
+      ok: false,
+      code: 'not_found',
+      path: expanded || requested,
+      direct_access: false,
+      message: 'That file is not reachable from the box voice server. Ask the user to upload it in Box or give a path that exists on this server, then delegate an agent.',
+      allowed_roots: roots,
+    };
+  }
+  const inScope = roots.some((root) => pathInsideRoot(real, root));
+  if (!inScope) {
+    return {
+      ok: false,
+      code: 'outside_scope',
+      path: real,
+      direct_access: false,
+      message: 'That path is outside the voice file-access scope. Voice can only mediate files inside the configured safe roots.',
+      allowed_roots: roots,
+    };
+  }
+  const relPath = real.replace(/\\/g, '/');
+  if (VOICE_FILE_DENY_SEGMENT_RE.test(relPath) || VOICE_FILE_DENY_FILE_RE.test(relPath)) {
+    return {
+      ok: false,
+      code: 'sensitive_path',
+      path: real,
+      direct_access: false,
+      message: 'That looks like a secret or credential path, so voice will not mediate it.',
+      allowed_roots: roots,
+    };
+  }
+  if (!st.isFile()) {
+    return {
+      ok: false,
+      code: 'not_a_file',
+      path: real,
+      direct_access: false,
+      message: 'That path is not a regular file. Provide the specific spreadsheet or document path.',
+      allowed_roots: roots,
+    };
+  }
+  if (st.size > maxBytes) {
+    return {
+      ok: false,
+      code: 'too_large',
+      path: real,
+      size: st.size,
+      max_bytes: maxBytes,
+      direct_access: false,
+      message: 'That file is larger than the voice mediation limit. Use a smaller export or start a normal agent with explicit instructions.',
+      allowed_roots: roots,
+    };
+  }
+  const ext = extname(real).toLowerCase();
+  const kind = VOICE_SPREADSHEET_EXTS.has(ext) ? 'spreadsheet' : (ext ? ext.slice(1) : 'file');
+  const canIngest = kind === 'spreadsheet';
+  return {
+    ok: true,
+    code: 'in_scope',
+    path: real,
+    filename: basename(real),
+    extension: ext,
+    kind,
+    size: st.size,
+    modified_at: st.mtime.toISOString(),
+    direct_access: false,
+    can_delegate_ingest: canIngest,
+    needs_permission: canIngest && !user_confirmed,
+    permission_prompt: canIngest && !user_confirmed
+      ? `I can’t read ${basename(real)} directly in voice. I can start a scoped agent that reads only that spreadsheet and reports back. Should I do that?`
+      : '',
+    message: canIngest
+      ? (user_confirmed ? 'Spreadsheet is in scope for delegated ingest.' : 'Spreadsheet is in scope; ask permission before starting the ingest agent.')
+      : `File is in scope, but voice only delegates spreadsheet ingest right now. Use a normal agent for ${purpose ? short(purpose, 80) : 'this file'}.`,
+    allowed_roots: roots,
   };
 }
 
@@ -253,6 +399,7 @@ export function registerVoiceAssistant(app, ctx) {
   const BRIEFING_FILE = join(VOICE_DIR, 'briefing.md');
   const TASKS_FILE = join(VOICE_DIR, 'tasks.json');
   const SESSION_HISTORY_AUDIT_FILE = join(VOICE_DIR, 'session-history-audit.jsonl');
+  const FILE_ACCESS_AUDIT_FILE = join(VOICE_DIR, 'file-access-audit.jsonl');
 
   // Cross-session voice memory: consent-gated recall + audio store + retention/audit.
   const TRANSCRIPTS_DIR = join(VOICE_DIR, 'transcripts');
@@ -599,6 +746,10 @@ export function registerVoiceAssistant(app, ctx) {
     try { appendFileSync(SESSION_HISTORY_AUDIT_FILE, JSON.stringify({ ts: Date.now(), ...row }) + '\n'); } catch {}
   }
 
+  function writeFileAccessAudit(row) {
+    try { appendFileSync(FILE_ACCESS_AUDIT_FILE, JSON.stringify({ ts: Date.now(), ...row }) + '\n'); } catch {}
+  }
+
   function resolveProjectDir(project) {
     if (!project) return defaultCwd();
     const p = String(project).trim().replace(/^~\//, '');
@@ -835,6 +986,60 @@ export function registerVoiceAssistant(app, ctx) {
         enqueue(key, { text: briefed, mode: 'normal', agent, cwd, title: t });
         watchSession(key, t);
         return { started: true, title: t, agent, project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; completion will be announced' };
+      },
+    },
+    {
+      name: 'file_access',
+      description: 'Mediated local-file workflow for voice. Use when the user asks you to read, open, parse, ingest, or summarize a local file, especially Excel/CSV attendee sheets. Voice never reads arbitrary file contents directly: describe checks scope; delegate_ingest starts a scoped agent only after user_confirmed=true.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['describe', 'delegate_ingest'], description: 'describe checks reachability/scope. delegate_ingest starts the scoped spreadsheet agent after spoken confirmation.' },
+          path: { type: 'string', description: 'Exact path on the box, or a Box-uploaded path. Required when known.' },
+          purpose: { type: 'string', description: 'What the user wants extracted, e.g. attendee names and companies.' },
+          user_confirmed: { type: 'boolean', description: 'True only after the user explicitly agreed to delegate this file ingest.' },
+        },
+      },
+      handler: async ({ action = 'describe', path = '', purpose = '', user_confirmed = false } = {}) => {
+        const policy = voiceFileAccessPolicy({ path, purpose, user_confirmed }, {
+          HOME,
+          STATE_DIR,
+          cwd: defaultCwd(),
+          rootsRaw: cfg('VOICE_FILE_ACCESS_ROOTS'),
+          maxBytes: Number(cfg('VOICE_FILE_ACCESS_MAX_BYTES') || 25 * 1024 * 1024),
+        });
+        writeFileAccessAudit({ action, path: policy.path || path || '', code: policy.code, kind: policy.kind || '', user_confirmed: !!user_confirmed });
+        if (action !== 'delegate_ingest') return policy;
+        if (!policy.ok) return policy;
+        if (!policy.can_delegate_ingest) return { ...policy, error: 'delegated ingest is currently limited to spreadsheets' };
+        if (!user_confirmed) return { ...policy, error: 'permission_required' };
+        const title = `Ingest ${basename(policy.path)}`;
+        const task = [
+          'You are handling a mediated file ingest requested by the Box voice assistant.',
+          '',
+          `File path: ${policy.path}`,
+          `User goal: ${purpose || 'Summarize the spreadsheet and identify the useful fields.'}`,
+          '',
+          'Scope and safety:',
+          '- Read only the file above. Do not browse unrelated files.',
+          '- Do not modify files.',
+          '- Do not print secrets or unnecessary PHI. Summarize only what is needed for the user goal.',
+          '- If the file is inaccessible, too large, encrypted, or malformed, report the exact blocker and the safest next step.',
+          '',
+          'Return a concise spoken-friendly summary first, then any useful row/column counts, schema, and recommended follow-up actions.',
+        ].join('\n');
+        if (DRYRUN) return { ...policy, delegated: true, dry_run: true, title };
+        const key = 'new-' + randomBytes(4).toString('hex');
+        enqueue(key, { text: task, mode: 'normal', agent: 'codex', cwd: dirname(policy.path), title });
+        watchSession(key, title);
+        writeFileAccessAudit({ action: 'delegate_started', path: policy.path, title, agent: 'codex', purpose: short(purpose, 240) });
+        return {
+          delegated: true,
+          title,
+          agent: 'codex',
+          path: policy.path,
+          note: 'A scoped ingest agent is running in the background; completion will be announced.',
+        };
       },
     },
     {
@@ -1201,7 +1406,8 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
 - Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
-- Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
+- Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
+- Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
 - Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session gives a quick preview of any agent's latest output (including codex).

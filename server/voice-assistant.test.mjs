@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   detectListItems,
   paginateText,
   sanitizeVoiceEvent,
   summarizeAgentOutput,
+  voiceFileAccessPolicy,
   voiceBool,
   voiceResponseStyle,
   voiceTurnDetectionConfig,
@@ -162,6 +166,55 @@ assert.equal(voiceBool('off'), false);
   assert.equal(sum.item_count, 0);
   assert.ok(sum.total_chars > 0);
   assert.match(sum.headline, /The market is large\. Growth is steady\./);
+}
+
+// ---- mediated local-file access (INC-1079) ----------------------------------
+
+{
+  const root = mkdtempSync(join(tmpdir(), 'box-voice-file-'));
+  try {
+    const sheet = join(root, 'attendees.xlsx');
+    writeFileSync(sheet, 'not really xlsx, policy only checks metadata');
+    const p = voiceFileAccessPolicy({ path: sheet }, { HOME: root, STATE_DIR: root, roots: [root], maxBytes: 1024 });
+    assert.equal(p.ok, true);
+    assert.equal(p.kind, 'spreadsheet');
+    assert.equal(p.direct_access, false);
+    assert.equal(p.can_delegate_ingest, true);
+    assert.equal(p.needs_permission, true);
+    assert.match(p.permission_prompt, /scoped agent/);
+
+    const confirmed = voiceFileAccessPolicy({ path: sheet, user_confirmed: true }, { HOME: root, STATE_DIR: root, roots: [root], maxBytes: 1024 });
+    assert.equal(confirmed.needs_permission, false);
+    assert.match(confirmed.message, /in scope/);
+
+    const byName = voiceFileAccessPolicy({ path: 'attendees.xlsx' }, { HOME: root, STATE_DIR: root, roots: [root], cwd: root, maxBytes: 1024 });
+    assert.equal(byName.ok, true);
+    assert.equal(byName.path, sheet);
+
+    const missing = voiceFileAccessPolicy({ path: join(root, 'missing.csv') }, { HOME: root, STATE_DIR: root, roots: [root] });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.code, 'not_found');
+
+    const outside = mkdtempSync(join(tmpdir(), 'box-voice-outside-'));
+    try {
+      const other = join(outside, 'other.csv');
+      writeFileSync(other, 'a,b\n1,2\n');
+      const blocked = voiceFileAccessPolicy({ path: other }, { HOME: root, STATE_DIR: root, roots: [root] });
+      assert.equal(blocked.ok, false);
+      assert.equal(blocked.code, 'outside_scope');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+
+    mkdirSync(join(root, '.ssh'));
+    const key = join(root, '.ssh', 'id_rsa');
+    writeFileSync(key, 'secret');
+    const secret = voiceFileAccessPolicy({ path: key }, { HOME: root, STATE_DIR: root, roots: [root] });
+    assert.equal(secret.ok, false);
+    assert.equal(secret.code, 'sensitive_path');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 console.log('voice-assistant helpers ok');

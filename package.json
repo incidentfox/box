@@ -15,7 +15,7 @@
     "test:codex-context": "node server/codex-context.test.mjs",
     "test:codex-exec": "node server/codex-exec-engine.test.mjs",
     "test:voice-memory": "node server/voice-memory.test.mjs",
-    "test": "node lib/linear-lite/test.mjs && node server/codex-context.test.mjs && node server/codex-exec-engine.test.mjs && node server/mac-exec-engine.test.mjs && node server/meeting-context.test.mjs && node server/slack-context.test.mjs && node server/voice-assistant.test.mjs && node server/voice-memory.test.mjs",
+    "test": "node lib/linear-lite/test.mjs && node server/local-file-resolver.test.mjs && node server/codex-context.test.mjs && node server/codex-exec-engine.test.mjs && node server/mac-exec-engine.test.mjs && node server/meeting-context.test.mjs && node server/slack-context.test.mjs && node server/voice-assistant.test.mjs && node server/voice-memory.test.mjs",
     "smoke:voice": "node scripts/voice-smoke.mjs",
     "e2e:voice": "node scripts/voice-e2e-browser.mjs",
     "eval:voice": "node scripts/voice-evals.mjs"
