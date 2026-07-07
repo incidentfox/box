@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import {
+  detectListItems,
+  paginateText,
   sanitizeVoiceEvent,
+  summarizeAgentOutput,
   voiceBool,
   voiceResponseStyle,
   voiceTurnDetectionConfig,
@@ -76,6 +79,89 @@ assert.equal(voiceBool('off'), false);
   assert.equal(ev.kind, 'assistant');
   assert.ok(ev.text.length <= 2000);
   assert.ok(ev.name.length <= 40);
+}
+
+// ---- session artifact retrieval (INC-1080) ----------------------------------
+
+{
+  // Numbered ranked list → item bodies without the markers.
+  const list = '1. Acme Corp — $2M ARR\n2. Globex — $1.4M\n3. Initech — $900k\n4. Umbrella — $600k';
+  const items = detectListItems(list);
+  assert.equal(items.length, 4);
+  assert.equal(items[0], 'Acme Corp — $2M ARR');
+  assert.equal(items[3], 'Umbrella — $600k');
+}
+{
+  // Bulleted list with mixed markers also counts.
+  assert.equal(detectListItems('- one\n* two\n• three').length, 3);
+  // Fewer than 3 markers is not treated as a list.
+  assert.deepEqual(detectListItems('just a sentence.\n- lonely dash'), []);
+  // Prose with no markers → empty.
+  assert.deepEqual(detectListItems('This is a paragraph with 1 number in it.'), []);
+}
+
+{
+  // Pagination packs whole lines and never splits an item across pages.
+  const SIZE = 200; // pageSize floor is 200 chars
+  const lines = Array.from({ length: 40 }, (_, i) => `${i + 1}. ranked target number ${i + 1} in the list`).join('\n');
+  const p1 = paginateText(lines, { page: 1, pageSize: SIZE });
+  assert.equal(p1.page, 1);
+  assert.ok(p1.total_pages > 1);
+  assert.equal(p1.has_more, true);
+  assert.equal(p1.next_page, 2);
+  // Every line on the page is a complete item (never cut mid-item).
+  for (const ln of p1.text.split('\n')) assert.match(ln, /^\d+\. ranked target number \d+ in the list$/);
+  // No page exceeds the size (whole short lines always fit).
+  assert.ok(p1.text.length <= SIZE);
+  // Concatenating every page reconstructs the original (single join newline between pages).
+  let joined = '';
+  for (let i = 1; i <= p1.total_pages; i++) {
+    const pg = paginateText(lines, { page: i, pageSize: SIZE });
+    assert.ok(pg.text.length <= SIZE);
+    joined += (joined ? '\n' : '') + pg.text;
+  }
+  assert.equal(joined, lines);
+  // Last page reports no more.
+  const last = paginateText(lines, { page: p1.total_pages, pageSize: SIZE });
+  assert.equal(last.has_more, false);
+  assert.equal(last.next_page, undefined);
+  // Out-of-range page clamps to the last page.
+  assert.equal(paginateText(lines, { page: 999, pageSize: SIZE }).page, p1.total_pages);
+}
+{
+  // An over-long single line is hard-split so no page overflows.
+  const big = 'x'.repeat(5000);
+  const pg = paginateText(big, { page: 1, pageSize: 1000 });
+  assert.equal(pg.total_pages, 5);
+  assert.equal(pg.text.length, 1000);
+  assert.equal(pg.total_chars, 5000);
+}
+{
+  // Empty output is one empty page, not a crash.
+  const pg = paginateText('', {});
+  assert.equal(pg.total_pages, 1);
+  assert.equal(pg.has_more, false);
+  assert.equal(pg.text, '');
+}
+
+{
+  // Summarize a list → count + capped top items.
+  const list = Array.from({ length: 12 }, (_, i) => `${i + 1}. target ${i + 1}`).join('\n');
+  const sum = summarizeAgentOutput(list, { maxItems: 5 });
+  assert.equal(sum.kind, 'list');
+  assert.equal(sum.item_count, 12);
+  assert.equal(sum.top_items.length, 5);
+  assert.equal(sum.has_more_items, true);
+  assert.equal(sum.top_items[0], 'target 1');
+}
+{
+  // Summarize prose → headline + size, no items.
+  const prose = 'The market is large. Growth is steady. There is room to win share from daisyBill over the next year as more billers churn.';
+  const sum = summarizeAgentOutput(prose);
+  assert.equal(sum.kind, 'prose');
+  assert.equal(sum.item_count, 0);
+  assert.ok(sum.total_chars > 0);
+  assert.match(sum.headline, /The market is large\. Growth is steady\./);
 }
 
 console.log('voice-assistant helpers ok');
