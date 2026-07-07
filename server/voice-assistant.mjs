@@ -154,6 +154,86 @@ export function sanitizeVoiceEvent(e, now = Date.now()) {
   };
 }
 
+// ---- session artifact retrieval (INC-1080) ----------------------------------
+// The voice model reads agent outputs through check_session, which only previews
+// the last reply. When an agent produces a big artifact (a full ranked list, a
+// long report) the model couldn't get the WHOLE thing, couldn't page through it,
+// and had no summary control — the exact 2026-07-07 "sales target list needed
+// multiple checks and still only partial output was visible" failure. These pure,
+// unit-tested helpers back the read_session_output tool.
+
+// A line that reads as a list item: "1." / "1)" / "1]" / "- " / "* " / "•" / "#3".
+const LIST_LINE_RE = /^\s*(?:\d{1,3}[.)\]]|[-*•·‣▪▸]|#\s*\d{1,3}[.)]?)\s+(\S.*)$/;
+
+// Pull the item bodies out of an enumerated/bulleted/ranked list. Returns [] unless
+// at least 3 lines look like list items (so a stray dash isn't mistaken for a list).
+export function detectListItems(text) {
+  const lines = String(text == null ? '' : text).replace(/\r\n/g, '\n').split('\n');
+  const items = [];
+  for (const line of lines) {
+    const m = line.match(LIST_LINE_RE);
+    if (m && m[1] && m[1].trim()) items.push(m[1].trim());
+  }
+  return items.length >= 3 ? items : [];
+}
+
+// Split a long output into stable, whole-line pages so a list item is never cut in
+// half. A single line longer than the page size is hard-split so no page overflows.
+// Returns the requested page plus enough metadata for the model to keep going.
+export function paginateText(text, { page = 1, pageSize = 1800 } = {}) {
+  const full = String(text == null ? '' : text).replace(/\r\n/g, '\n');
+  const size = Math.max(200, Math.min(6000, Math.floor(Number(pageSize) || 1800)));
+  const totalChars = full.length;
+  const rawLines = full.length ? full.split('\n') : [''];
+  const units = [];
+  for (const line of rawLines) {
+    if (line.length <= size) { units.push(line); continue; }
+    for (let i = 0; i < line.length; i += size) units.push(line.slice(i, i + size));
+  }
+  const pages = [];
+  let cur = null;
+  for (const u of units) {
+    if (cur === null) { cur = u; continue; }
+    if (cur.length + 1 + u.length > size) { pages.push(cur); cur = u; }
+    else cur += '\n' + u;
+  }
+  if (cur !== null) pages.push(cur);
+  if (!pages.length) pages.push('');
+  const totalPages = pages.length;
+  const p = Math.max(1, Math.min(totalPages, Math.floor(Number(page) || 1)));
+  return {
+    text: pages[p - 1],
+    page: p,
+    total_pages: totalPages,
+    total_chars: totalChars,
+    has_more: p < totalPages,
+    ...(p < totalPages ? { next_page: p + 1 } : {}),
+  };
+}
+
+// Voice-friendly extractive summary of an agent output: for a list, the item count
+// plus the leading items (so the model says "there are 42; the top five are…"); for
+// prose, a short headline plus the size. Deterministic and fast — no extra LLM call.
+export function summarizeAgentOutput(text, { maxItems = 5 } = {}) {
+  const full = String(text == null ? '' : text).trim();
+  const totalChars = full.length;
+  const cap = Math.max(1, Math.min(25, Math.floor(Number(maxItems) || 5)));
+  const items = detectListItems(full);
+  if (items.length) {
+    return {
+      kind: 'list',
+      item_count: items.length,
+      total_chars: totalChars,
+      top_items: items.slice(0, cap).map((s) => short(s, 160)),
+      has_more_items: items.length > cap,
+    };
+  }
+  const oneLine = full.replace(/\s+/g, ' ').trim();
+  const sentences = oneLine.match(/[^.!?]+[.!?]+/g);
+  const headline = short((sentences ? sentences.slice(0, 2).join(' ').trim() : '') || oneLine, 320);
+  return { kind: 'prose', item_count: 0, total_chars: totalChars, headline };
+}
+
 export function registerVoiceAssistant(app, ctx) {
   const {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
@@ -241,12 +321,14 @@ export function registerVoiceAssistant(app, ctx) {
     return null;
   };
 
-  // Last real assistant/user text from a session JSONL tail (bigger sibling of tailInfo).
-  function lastAssistantText(sessionId, chars = 500) {
+  // Full last assistant text from a session JSONL tail — UNtruncated, so read_session_output
+  // can page/summarize a complete artifact (a full ranked list). Reads a 1MB tail (big enough
+  // for a long list) and returns the last assistant text block verbatim.
+  function lastAssistantFull(sessionId) {
     try {
       const file = findSessionFile(sessionId);
       if (!file) return '';
-      const st = statSync(file); const len = Math.min(st.size, 256 * 1024);
+      const st = statSync(file); const len = Math.min(st.size, 1024 * 1024);
       const buf = Buffer.alloc(len);
       const f = openSync(file, 'r'); readSync(f, buf, 0, len, st.size - len); closeSync(f);
       const lines = buf.toString('utf8').split('\n');
@@ -255,11 +337,15 @@ export function registerVoiceAssistant(app, ctx) {
         let o; try { o = JSON.parse(lines[i]); } catch { continue; }
         if (o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
           const t = o.message.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
-          if (t) return short(t, chars);
+          if (t) return t;
         }
       }
     } catch {}
     return '';
+  }
+  // Last real assistant/user text from a session JSONL tail (bigger sibling of tailInfo).
+  function lastAssistantText(sessionId, chars = 500) {
+    return short(lastAssistantFull(sessionId), chars);
   }
 
   // Agent-aware "what did it last say": claude sessions live in JSONLs, but codex/mac/
@@ -267,7 +353,8 @@ export function registerVoiceAssistant(app, ctx) {
   // ctx.loadCodexMessages. Without this, check_session/announcements were BLIND to
   // codex agents (the exact "started codex sessions but couldn't read the results back"
   // failure from the 2026-07-06 drive).
-  function lastAgentText(sessionId, agent, chars = 600) {
+  // Full, UNtruncated last agent output (claude JSONL or codex/mac/gemini sidecar).
+  function lastAgentFull(sessionId, agent) {
     if (!sessionId) return '';
     if (agent && agent !== 'claude') {
       try {
@@ -278,12 +365,15 @@ export function registerVoiceAssistant(app, ctx) {
           const txt = Array.isArray(m.parts)
             ? m.parts.filter((p) => p && p.t === 'text').map((p) => p.text).join(' ')
             : (typeof m.content === 'string' ? m.content : m.text || '');
-          if (txt && txt.trim()) return short(txt, chars);
+          if (txt && txt.trim()) return txt.trim();
         }
       } catch {}
       return '';
     }
-    return lastAssistantText(sessionId, chars);
+    return lastAssistantFull(sessionId);
+  }
+  function lastAgentText(sessionId, agent, chars = 600) {
+    return short(lastAgentFull(sessionId, agent), chars);
   }
 
   // ---- background tasks + proactive updates ---------------------------------
@@ -491,6 +581,19 @@ export function registerVoiceAssistant(app, ctx) {
     id: s.id, title: short(s.title, 60), agent: s.agent, status: s.status,
     project: basename(s.cwd || ''), last_activity: ago(s.mtime), preview: short(s.preview, 90),
   });
+  // When a query matches NOTHING, don't dead-end: offer the closest sessions (partial
+  // word overlap, then most-recent/active) so the model can retry with a better query.
+  function sessionSuggestions(query, all, limit = 4) {
+    const words = String(query || '').toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
+    const ranked = (all || []).map((s) => {
+      const hay = `${s.title} ${basename(s.cwd || '')} ${s.agent}`.toLowerCase();
+      let score = 0;
+      for (const w of words) if (hay.includes(w)) score += 1;
+      if (s.status === 'working' || s.status === 'needs_input') score += 0.3;
+      return { s, score };
+    }).sort((a, b) => (b.score - a.score) || ((b.s.mtime || 0) - (a.s.mtime || 0)));
+    return ranked.slice(0, limit).map((x) => x.s);
+  }
 
   function writeSessionHistoryAudit(row) {
     try { appendFileSync(SESSION_HISTORY_AUDIT_FILE, JSON.stringify({ ts: Date.now(), ...row }) + '\n'); } catch {}
@@ -548,21 +651,74 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'check_session',
-      description: 'Find one session by name/topic and report what it is doing right now, including its latest reply. Use before sending a message to it.',
+      description: 'Find one session by name/topic and report what it is doing right now, including a PREVIEW of its latest reply. Use before sending a message to it. If output_truncated is true, the reply was cut off — call read_session_output for the complete artifact (full list / pagination / summary).',
       parameters: { type: 'object', properties: { query: { type: 'string', description: 'Words from the session title, project, or topic' } }, required: ['query'] },
       handler: async ({ query }) => {
-        const { hits } = matchSession(query);
-        if (!hits.length) return { error: `no session matches "${query}"` };
+        const { hits, all } = matchSession(query);
+        if (!hits.length) {
+          const sug = sessionSuggestions(query, all);
+          return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
+        }
         if (hits.length > 1 && hits[1] && hits[0].title === hits[1].title) hits.length = 1;
         const s = hits[0];
         const others = hits.slice(1, 4).map((x) => short(x.title, 50));
-        const full = lastAgentText(s.id, s.agent, 100000);
-        const truncated = full.length > 820;
+        const full = lastAgentFull(s.id, s.agent);
+        const truncated = full.length > 800;
         return {
           match: sessBrief(s),
           latest_reply: short(full, 800) || short(s.preview, 200) || '(no output yet)',
-          ...(truncated ? { note: 'reply truncated for voice — say "email me the full output" and I will send the whole thing via request_full_artifact' } : {}),
+          ...(truncated ? { output_truncated: true, full_chars: full.length, more: 'Reply truncated for voice. To work with the whole thing here (full list / count + top items / pagination) call read_session_output; to email Jimmy the complete artifact call request_full_artifact.' } : {}),
           ...(others.length ? { other_candidates: others } : {}),
+        };
+      },
+    },
+    {
+      name: 'read_session_output',
+      description: "Fetch an agent session's COMPLETE latest output — the full ranked list / long report that check_session only previews. Works for claude AND codex/mac sessions. mode:'summary' (default) returns the item count plus the top items (say the count, then the top few, offer the rest); mode:'full' returns the whole output one page at a time (pass page:2, 3… using next_page to continue). Use when Jimmy asks for 'the full list / all of them / everything' from an agent, or when a reply was cut off. Never claim you have a full list off a truncated preview. Preamble: \"Pulling the full list.\"",
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Words from the session title/project/topic, or its full id' },
+          mode: { type: 'string', enum: ['summary', 'full'], description: "summary (default) = item count + top items; full = paginated complete text" },
+          page: { type: 'number', description: 'For mode:full — 1-based page to return (default 1). Use next_page from the previous call to continue.' },
+          page_size: { type: 'number', description: 'For mode:full — characters per page (default 1800, max 6000).' },
+          max_items: { type: 'number', description: 'For mode:summary — how many top list items to include (default 5, max 25).' },
+        },
+        required: ['query'],
+      },
+      handler: async ({ query, mode = 'summary', page = 1, page_size = 1800, max_items = 5 } = {}) => {
+        const { hits, all } = matchSession(query);
+        if (!hits.length) {
+          const sug = sessionSuggestions(query, all);
+          return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
+        }
+        // Collapse duplicate-title hits; disambiguate genuinely distinct ones so we never
+        // read the wrong session's artifact back to him.
+        if (hits.length > 1 && hits[0].title !== hits[1].title) {
+          return { need_disambiguation: hits.slice(0, 4).map(sessBrief) };
+        }
+        const s = hits[0];
+        const full = lastAgentFull(s.id, s.agent);
+        if (!full) {
+          const preview = short(s.preview, 200);
+          return { match: sessBrief(s), error: 'no readable text output captured yet for this session', ...(preview ? { preview } : {}) };
+        }
+        const items = detectListItems(full);
+        if (String(mode) === 'full') {
+          const pg = paginateText(full, { page, pageSize: page_size });
+          return {
+            match: sessBrief(s), source: s.agent || 'claude', mode: 'full',
+            ...(items.length ? { item_count: items.length } : {}),
+            ...pg,
+          };
+        }
+        const summary = summarizeAgentOutput(full, { maxItems: max_items });
+        return {
+          match: sessBrief(s), source: s.agent || 'claude', mode: 'summary',
+          ...summary,
+          hint: summary.kind === 'list'
+            ? 'Say item_count, then top_items; for the rest call read_session_output mode:full.'
+            : 'For the complete text call read_session_output mode:full (paginated).',
         };
       },
     },
@@ -578,8 +734,11 @@ export function registerVoiceAssistant(app, ctx) {
         required: ['query'],
       },
       handler: async ({ query, limit = 80 }) => {
-        const { hits } = matchSession(query);
-        if (!hits.length) return { error: `no session matches "${query}"` };
+        const { hits, all } = matchSession(query);
+        if (!hits.length) {
+          const sug = sessionSuggestions(query, all);
+          return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
+        }
         const codexHits = hits.filter((s) => s.agent === 'codex');
         if (!codexHits.length) return {
           error: `matched "${hits[0].title || hits[0].id}", but it is a ${hits[0].agent || 'claude'} session; this read-only helper currently supports Codex sessions`,
@@ -633,8 +792,11 @@ export function registerVoiceAssistant(app, ctx) {
       description: 'Send a message/instruction into an existing agent session (it resumes and works in the background; you will be told when it finishes its turn). Identify the session by query words.',
       parameters: { type: 'object', properties: { query: { type: 'string' }, message: { type: 'string' } }, required: ['query', 'message'] },
       handler: async ({ query, message }) => {
-        const { hits } = matchSession(query);
-        if (!hits.length) return { error: `no session matches "${query}"` };
+        const { hits, all } = matchSession(query);
+        if (!hits.length) {
+          const sug = sessionSuggestions(query, all);
+          return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
+        }
         const ambiguous = hits.length > 1 && hits[0].title !== hits[1].title;
         if (ambiguous && hits[0].status === hits[1].status) {
           return { need_disambiguation: hits.slice(0, 3).map(sessBrief) };
@@ -1038,12 +1200,12 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
-- Read tools (get_overview, list_sessions, check_session, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
+- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
 - Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
-- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session reads any agent's latest output (including codex).
-- request_full_artifact when he wants the WHOLE thing — a full report, a long write-up, the complete agent output — or when you told him something was truncated. It emails him the complete artifact (with the PR link if there is one). Never try to read a long artifact aloud; email it and say you did.
+- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session gives a quick preview of any agent's latest output (including codex).
+- Full lists & long outputs — check_session only PREVIEWS a reply (it flags output_truncated when it's cut off); never claim you have the full list off a preview, and never read a long artifact aloud. To DISCUSS the whole thing in voice — a full ranked list, every target — call read_session_output: mode:summary for the item count + the top items (say the count, name the top few, offer the rest), mode:full with page 2, 3… (via next_page) to go through it all. To put the WHOLE thing in Jimmy's inbox — a full report, a long write-up, or anything too long to talk through — call request_full_artifact (it emails him the complete artifact with the PR link).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
 - If a tool errors, say so plainly and move on. NEVER invent tool results, and never claim live state you haven't checked this session.
