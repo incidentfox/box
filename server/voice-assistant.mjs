@@ -380,6 +380,86 @@ export function summarizeAgentOutput(text, { maxItems = 5 } = {}) {
   return { kind: 'prose', item_count: 0, total_chars: totalChars, headline };
 }
 
+// ---- plain-language work labels (INC-1087) ----------------------------------
+// Driving-safety problem: the voice assistant kept referring to work by bare code
+// ("INC nine fifty finished") which is meaningless at the wheel. These pure helpers
+// turn a ticket/session into a SHORT spoken descriptor of what the work actually is
+// ("clearinghouse rejections", "voice file access") derived from the title, falling
+// back to a fetched summary, then to the title, then to the code as a last resort.
+// The narration path (agentProgressLine/agentFinishedLine + delegate_ticket) speaks
+// the descriptor, never the code alone.
+
+// Leading imperative verbs to drop so the descriptor is a topic, not a command:
+// "Fix clearinghouse rejections" → "clearinghouse rejections".
+const LABEL_LEADING_VERB_RE = /^(?:fix(?:e[sd])?|add(?:s|ed)?|implement(?:s|ed|ing)?|updat(?:e|es|ed|ing)|creat(?:e|es|ed|ing)|build(?:s|ing)?|refactor(?:s|ed|ing)?|remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|investigat(?:e|es|ed|ing)|debug(?:s|ged|ging)?|set ?up|ship(?:s|ped|ping)?|wire(?: up)?|enabl(?:e|es|ed|ing)|support(?:s|ed|ing)?|handl(?:e|es|ed|ing)|improv(?:e|es|ed|ing)|mak(?:e|es|ing)|resolv(?:e|es|ed|ing)|patch(?:es|ed|ing)?|introduc(?:e|es|ed|ing)|bump(?:s|ed|ing)?|clean ?up|rework(?:s|ed|ing)?|revamp(?:s|ed|ing)?|polish(?:es|ed|ing)?|tweak(?:s|ed|ing)?|address(?:es|ed|ing)?|prevent(?:s|ed|ing)?|avoid(?:s|ed|ing)?|stop(?:s|ped|ping)?|reduc(?:e|es|ed|ing)|ensur(?:e|es|ed|ing)|allow(?:s|ed|ing)?|migrat(?:e|es|ed|ing)|summariz(?:e|es|ed|ing)|reconcil(?:e|es|ed|ing))\b[\s:–—-]*/i;
+// Small words that shouldn't count as "content" when scoring clauses, nor dangle at the end.
+const LABEL_STOPWORDS = new Set('a an the of for to in on and or with into from at by as via that this is are be it its our your'.split(' '));
+// Trailing tokens that read as dangling when a phrase is truncated.
+const LABEL_TRAILING_RE = /^(?:a|an|the|of|for|to|in|on|and|or|with|into|from|at|by|as|via|that|this|it|its|our|your|because|when|so|but|if|while|since)$/i;
+
+function labelContentScore(clause) {
+  const words = clause.replace(LABEL_LEADING_VERB_RE, '').split(/\s+/).filter(Boolean);
+  return words.filter((w) => !LABEL_STOPWORDS.has(w.toLowerCase())).length;
+}
+
+function deriveLabelPhrase(raw, maxWords) {
+  let s = String(raw == null ? '' : raw);
+  s = s.replace(/\(#[^)]*\)/g, ' ');                  // parenthetical refs: (#100), (#INC-1082)
+  s = s.replace(/\b[A-Z]{2,5}[-\s]?\d{1,6}\b/g, ' '); // ticket ids: INC-1087, ENG 42
+  s = s.replace(/#\d+\b/g, ' ');                      // bare PR refs: #647
+  s = s.replace(/\(\s*\)/g, ' ');                     // empty parens left behind
+  s = s.replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  // Break into clauses (scope prefixes, sub-clauses) and keep the most descriptive one.
+  const clauses = s.split(/\s*[:;|]\s*|\s+[–—]\s+|\s+-\s+/).map((c) => c.trim()).filter(Boolean);
+  if (!clauses.length) return '';
+  let best = clauses[0], bestScore = -1;
+  for (const c of clauses) { const sc = labelContentScore(c); if (sc > bestScore) { best = c; bestScore = sc; } }
+  let phrase = best.replace(LABEL_LEADING_VERB_RE, '').trim() || best.trim();
+  phrase = phrase.replace(/^(?:the|a|an)\s+/i, '').trim() || phrase; // drop a leading article
+  let tokens = phrase.split(/\s+/).filter(Boolean);
+  const cap = Math.max(1, Math.floor(Number(maxWords) || 6));
+  if (tokens.length > cap) tokens = tokens.slice(0, cap);
+  while (tokens.length > 1 && LABEL_TRAILING_RE.test(tokens[tokens.length - 1].replace(/[^\w]/g, ''))) tokens.pop();
+  // Lowercase for natural speech, but keep short ALL-CAPS acronyms (VOB, EOB, QME) intact
+  // so the model still spells them per the pronunciation rules.
+  const out = tokens.map((w) => (/^[A-Z]{2,6}$/.test(w) ? w : w.toLowerCase())).join(' ');
+  return out.replace(/[\s.,;:!?]+$/, '').trim();
+}
+
+// Mapping layer: derive a brief plain-language descriptor of a ticket/session from its
+// title (heuristics above), falling back to a short summary when the title yields nothing.
+// Returns '' only when neither title nor summary carries any usable words.
+export function plainLanguageLabel(ref = {}, { maxWords = 6 } = {}) {
+  return deriveLabelPhrase(ref && ref.title, maxWords) || deriveLabelPhrase(ref && ref.summary, maxWords) || '';
+}
+
+// Speech-safe wrapper: always returns a non-empty phrase to speak. Prefers the plain-language
+// descriptor; else the raw title; else a humanized code ("ticket INC-950"); else "that work".
+export function spokenWorkLabel(ref = {}, opts = {}) {
+  const phrase = plainLanguageLabel(ref, opts);
+  if (phrase) return phrase;
+  const title = String((ref && ref.title) || '').replace(/\s+/g, ' ').trim();
+  if (title) return title;
+  const id = String((ref && ref.id) || '').replace(/\s+/g, ' ').trim();
+  if (id) return `ticket ${id}`;
+  return 'that work';
+}
+
+// Pre-built spoken lines for background-agent updates. Pure + exported so the narration
+// path is unit-tested: each must LEAD with the plain-language descriptor (`speakAs`) and
+// never reference the work by bare ticket code.
+export function agentProgressLine({ agent = 'claude', speakAs = 'that work', minutes = 0, peek = '' } = {}) {
+  const who = agent && agent !== 'claude' ? `${agent} ` : '';
+  return `Quick status: the ${who}agent on "${speakAs}" is still working, about ${minutes} minutes in.${peek ? ' Latest: ' + peek : ''}`;
+}
+export function agentFinishedLine({ agent = 'claude', speakAs = 'that work', tail = '', truncated = false } = {}) {
+  const who = agent && agent !== 'claude' ? `${agent} ` : '';
+  const reported = tail ? ' It reported: ' + tail : ' I could not read its output — ask me to check the session for details.';
+  const more = truncated ? ' That is the short version — say "send me the full write-up" and I will email you the whole thing.' : '';
+  return `The ${who}agent on "${speakAs}" just finished its pass.${reported}${more} Want me to send it a follow-up?`;
+}
+
 export function registerVoiceAssistant(app, ctx) {
   const {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
@@ -603,11 +683,15 @@ export function registerVoiceAssistant(app, ctx) {
   const PROGRESS_UPDATES = voiceBool(cfg('VOICE_PROGRESS_UPDATES'), true);
   const PROGRESS_MAX = 4; // don't nag the whole drive
 
-  function watchSession(key, label) {
+  function watchSession(key, label, { speakAs } = {}) {
     const started = Date.now();
     let sawRunning = false;
     let nextProgress = PROGRESS_MS, progressCount = 0;
-    const task = newTask('agent', label, { key });
+    // What we SAY when narrating this work: a short plain-language descriptor, not the
+    // bare ticket code (INC-1087). Callers with a richer source (a ticket summary) pass
+    // speakAs; otherwise we derive it from the session/task title.
+    const spoken = speakAs || spokenWorkLabel({ title: label });
+    const task = newTask('agent', label, { key, what: spoken });
     const iv = setInterval(() => {
       let s; try { s = rt(key); } catch { clearInterval(iv); finishTask(task, 'failed', 'session state lost', ''); return; }
       const busy = s.running || (s.queue && s.queue.length) || (s.sessionId && RUNNING.has(s.sessionId));
@@ -620,7 +704,7 @@ export function registerVoiceAssistant(app, ctx) {
         if (peek) task.lastActivity = peek;
         const mins = Math.round((Date.now() - started) / 60000);
         pushEvent('task_progress', label,
-          `Quick status: the ${s.agent && s.agent !== 'claude' ? s.agent + ' ' : ''}agent on "${label}" is still working, about ${mins} minutes in.${peek ? ' Latest: ' + peek : ''}`);
+          agentProgressLine({ agent: s.agent, speakAs: spoken, minutes: mins, peek }));
       }
       if (sawRunning && !busy) {
         clearInterval(iv);
@@ -630,13 +714,13 @@ export function registerVoiceAssistant(app, ctx) {
         task.sessionId = s.sessionId; task.agent = s.agent;
         if (truncated) task.fullOutput = clip(full, 40000);
         finishTask(task, truncated ? 'done_truncated' : 'done', full || '(no text output captured)',
-          `The ${s.agent && s.agent !== 'claude' ? s.agent + ' ' : ''}agent on "${label}" just finished its pass.${tail ? ' It reported: ' + tail : ' I could not read its output — ask me to check the session for details.'}${truncated ? ' That is the short version — say "send me the full write-up" and I will email you the whole thing.' : ''} Want me to send it a follow-up?`);
+          agentFinishedLine({ agent: s.agent, speakAs: spoken, tail, truncated }));
         return;
       }
       if (Date.now() - started > 50 * 60 * 1000) {
         clearInterval(iv);
         finishTask(task, 'done', 'still running after 50m (stopped watching)',
-          `Heads up — the agent on "${label}" has been running for 50 minutes and isn't done yet. Want me to check on it?`);
+          `Heads up — the agent on "${spoken}" has been running for 50 minutes and isn't done yet. Want me to check on it?`);
       }
     }, 8000);
     iv.unref && iv.unref();
@@ -787,7 +871,7 @@ export function registerVoiceAssistant(app, ctx) {
           recent_sessions: sessions.slice(0, 8).map(sessBrief),
           board_counts: cols,
           needs_jimmy: ((needs && needs.items) || []).slice(0, 6).map((i) => `${i.status} ${i.title}`),
-          background_tasks: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind}: ${t.title} (${ago(t.startedAt)})${t.lastActivity ? ' — ' + short(t.lastActivity, 80) : ''}`),
+          background_tasks: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind}: ${t.what || t.title} (${ago(t.startedAt)})${t.lastActivity ? ' — ' + short(t.lastActivity, 80) : ''}`),
         };
       },
     },
@@ -1052,13 +1136,16 @@ export function registerVoiceAssistant(app, ctx) {
         try { detail = await selfFetch(`/api/linear/${id}`); } catch {}
         if (!detail) return { error: `ticket ${id} not found` };
         const title = `${id}: ${short(detail.title, 60)}`;
-        if (DRYRUN) return { delegated: id, dry_run: true, issue_title: detail.title, agent };
+        // Plain-language descriptor for spoken narration (INC-1087): "the clearinghouse-rejections
+        // ticket", not "INC nine fifty". Uses the ticket title, then its body as a fallback.
+        const what = spokenWorkLabel({ id, title: detail.title, summary: detail.description });
+        if (DRYRUN) return { delegated: id, dry_run: true, issue_title: detail.title, what, agent };
         const task = `Work the Linear issue ${id}: "${detail.title}".\n\nClaim it (move to In Progress), read the full ticket + comments via the Linear API (LINEAR_API_KEY in the env), do the work following the repo's conventions (isolated git worktree, PR, post the PR link as a comment on ${id}), then set it to In Review.\n\nWork autonomously end-to-end — don't stall waiting for clarification; if a decision genuinely needs Jimmy the human, file it to needs-jimmy and keep going on the rest. When done, make your final comment on ${id} self-contained (what changed + the PR URL) so it can be read back or emailed verbatim.${extra ? `\n\nExtra guidance from ${ownerName} (dictated while driving): ${extra}` : ''}`;
         const key = 'new-' + randomBytes(4).toString('hex');
         enqueue(key, { text: task, mode: 'normal', agent, cwd: defaultCwd(), title });
-        watchSession(key, title);
+        watchSession(key, title, { speakAs: what });
         selfFetch(`/api/linear/${id}/delegation`, { method: 'POST', body: { sessionTitle: title, agent, kind: 'new' } }).catch(() => {});
-        return { delegated: id, issue_title: detail.title, agent };
+        return { delegated: id, issue_title: detail.title, what, agent };
       },
     },
     {
@@ -1193,8 +1280,8 @@ export function registerVoiceAssistant(app, ctx) {
       description: 'Status of background tasks (deep research, delegated agents), with elapsed time, the latest activity for running work, and whether a finished task has a full artifact you can email.',
       parameters: { type: 'object', properties: {} },
       handler: async () => ({
-        running: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind} "${t.title}" — started ${ago(t.startedAt)}${t.lastActivity ? '; latest: ' + short(t.lastActivity, 90) : ''}`),
-        recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.title} — ${short(t.summary, 120)}${(t.status === 'done_truncated' || t.fullOutput || t.file) ? ' (full output available — say "email me the full one")' : ''}`),
+        running: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind} "${t.what || t.title}" — started ${ago(t.startedAt)}${t.lastActivity ? '; latest: ' + short(t.lastActivity, 90) : ''}`),
+        recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.what || t.title} — ${short(t.summary, 120)}${(t.status === 'done_truncated' || t.fullOutput || t.file) ? ' (full output available — say "email me the full one")' : ''}`),
       }),
     },
     {
@@ -1396,6 +1483,7 @@ Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: M
 - Vary your responses — do not repeat the same sentence or opener twice; it sounds robotic.
 - Spoken English only. No markdown, no bullet lists, no sound effects, no reading URLs aloud (say "I'll email the link").
 - Round numbers when speaking: "about three thousand bills a month", not "3,012". Ticket ids as letters then digits: "INC nine fifty".
+- Name work by WHAT IT IS, not its code. When you mention a ticket or session, lead with a short plain-language descriptor of the work — "the clearinghouse-rejections ticket", "the voice-file-access session" — drawn from its title or the tool's "what" field. Say the code only if he asks for it or needs it to act. One short descriptor is enough; don't also recite the full title.
 - Ask only one question at a time.
 
 ${voiceResponseStyle(RESPONSE_STYLE)}

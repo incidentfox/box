@@ -3,9 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  agentFinishedLine,
+  agentProgressLine,
   detectListItems,
   paginateText,
+  plainLanguageLabel,
   sanitizeVoiceEvent,
+  spokenWorkLabel,
   summarizeAgentOutput,
   voiceFileAccessPolicy,
   voiceBool,
@@ -215,6 +219,76 @@ assert.equal(voiceBool('off'), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+// ---- plain-language work labels (INC-1087) ----------------------------------
+// The voice narration must name work by WHAT IT IS, not a bare ticket code.
+
+{
+  // Titles collapse to a short topical phrase: leading verbs and scope prefixes drop,
+  // the ticket/PR code is stripped, and the most descriptive clause wins.
+  assert.equal(
+    plainLanguageLabel({ title: 'Voice assistant: avoid code-only ticket references; summarize work in plain language' }),
+    'code-only ticket references',
+  );
+  assert.equal(plainLanguageLabel({ title: 'Fix clearinghouse rejections remediation' }), 'clearinghouse rejections remediation');
+  assert.equal(plainLanguageLabel({ title: 'Add mediated voice file access (#100)' }), 'mediated voice file access');
+  assert.equal(plainLanguageLabel({ title: 'INC-1080: voice — reliable full session-artifact retrieval' }), 'reliable full session-artifact retrieval');
+  // A leading article is dropped after the imperative verb.
+  assert.equal(plainLanguageLabel({ title: 'Fix the invoice rounding bug' }), 'invoice rounding bug');
+  // Short ALL-CAPS acronyms survive (so the model still spells them), the rest lowercases.
+  assert.equal(plainLanguageLabel({ title: 'Implement VOB automation for Rise4 psychiatry intake' }), 'VOB automation for rise4 psychiatry intake');
+}
+
+{
+  // Brief: never more than the word cap, and the cap is honoured.
+  const long = plainLanguageLabel({ title: 'Fix clearinghouse rejection routing across every payer and clearinghouse endpoint nationwide' });
+  assert.ok(long.split(' ').length <= 6, `expected <=6 words, got "${long}"`);
+  const capped = plainLanguageLabel({ title: 'Reconcile Carisk EOB portal remittances into the ledger automatically' }, { maxWords: 3 });
+  assert.ok(capped.split(' ').length <= 3, `expected <=3 words, got "${capped}"`);
+}
+
+{
+  // Fall back to a fetched summary when the title carries no words (e.g. a bare code).
+  assert.equal(plainLanguageLabel({ title: 'INC-1099', summary: 'Fix the Spravato monitoring form submission.' }), 'spravato monitoring form submission');
+  assert.equal(plainLanguageLabel({ title: 'INC-1099' }), ''); // nothing derivable → empty, callers add a fallback
+  assert.equal(plainLanguageLabel({}), '');
+}
+
+{
+  // spokenWorkLabel always yields something safe to say, in priority order.
+  assert.equal(spokenWorkLabel({ id: 'INC-950', title: 'Fix clearinghouse rejections' }), 'clearinghouse rejections');
+  assert.equal(spokenWorkLabel({ id: 'INC-950', title: 'Onboarding' }), 'onboarding');   // title kept when not shortenable further
+  assert.equal(spokenWorkLabel({ id: 'INC-950', title: '' }), 'ticket INC-950');          // last resort: humanized code
+  assert.equal(spokenWorkLabel({}), 'that work');
+}
+
+{
+  // The spoken announcement lines LEAD with the descriptor and never the bare code.
+  const speakAs = plainLanguageLabel({ title: 'INC-950: Fix clearinghouse rejections remediation' });
+  assert.equal(speakAs, 'clearinghouse rejections remediation');
+
+  const done = agentFinishedLine({ agent: 'claude', speakAs, tail: 'Opened PR 42.', truncated: false });
+  assert.match(done, /clearinghouse rejections remediation/);
+  assert.doesNotMatch(done, /INC-950/);
+  assert.doesNotMatch(done, /claude agent/); // the default agent isn't named aloud
+  assert.match(done, /just finished its pass/);
+  assert.match(done, /Opened PR 42\./);
+
+  const truncated = agentFinishedLine({ agent: 'codex', speakAs, tail: 'A long list…', truncated: true });
+  assert.match(truncated, /^The codex agent on "clearinghouse rejections remediation"/); // non-default agent IS named
+  assert.match(truncated, /send me the full write-up/);
+
+  const noOutput = agentFinishedLine({ speakAs });
+  assert.match(noOutput, /could not read its output/);
+
+  const progress = agentProgressLine({ agent: 'claude', speakAs, minutes: 6, peek: 'reading the spec' });
+  assert.match(progress, /clearinghouse rejections remediation/);
+  assert.doesNotMatch(progress, /INC-950/);
+  assert.match(progress, /about 6 minutes in/);
+  assert.match(progress, /Latest: reading the spec/);
+  // No peek → no "Latest:" tail.
+  assert.doesNotMatch(agentProgressLine({ speakAs, minutes: 2 }), /Latest:/);
 }
 
 console.log('voice-assistant helpers ok');
