@@ -106,12 +106,20 @@ export function voiceResponseStyle(style = 'brief') {
   ].join('\n');
 }
 
-export function voiceTurnDetectionConfig({ mode = 'semantic', eagerness = 'low', interruptResponse = false } = {}) {
+export function voiceTurnDetectionConfig({
+  mode = 'semantic', eagerness = 'low', interruptResponse = false,
+  threshold, silenceMs,
+} = {}) {
   if (String(mode || '').toLowerCase() === 'server') {
+    // Raising the threshold makes the detector less likely to fire on the quiet
+    // residual echo of our own TTS that survives acoustic echo cancellation — the
+    // root cause of self-interruption. Configurable so a noisy car can be tuned.
+    const th = Number.isFinite(Number(threshold)) ? Math.min(1, Math.max(0, Number(threshold))) : 0.65;
+    const sil = Number.isFinite(Number(silenceMs)) ? Math.max(0, Math.round(Number(silenceMs))) : 800;
     return {
       type: 'server_vad',
-      threshold: 0.65,
-      silence_duration_ms: 800,
+      threshold: th,
+      silence_duration_ms: sil,
       create_response: true,
       interrupt_response: !!interruptResponse,
     };
@@ -122,6 +130,103 @@ export function voiceTurnDetectionConfig({ mode = 'semantic', eagerness = 'low',
     create_response: true,
     interrupt_response: !!interruptResponse,
   };
+}
+
+// The audio-pipeline policy the browser enforces to keep the assistant from hearing
+// its own voice (INC-1088). Half-duplex = gate the outgoing mic closed while our TTS
+// plays and only re-open it after playback ends (+ a tail hangover to cover the WebRTC
+// jitter-buffer drain). Barge-in (interrupt_response) and half-duplex are mutually
+// exclusive — you can't interrupt a reply if the mic is muted while it plays — so
+// half-duplex defaults ON whenever barge-in is OFF. `echoGuard` is the belt-and-braces
+// misattribution filter that drops a "user" transcript matching our recent speech.
+export function voiceAudioPolicy({
+  halfDuplex, interruptResponse = false, tailMs, maxHoldMs, echoGuard, echoThreshold, echoMinTokens,
+} = {}) {
+  const hd = halfDuplex == null ? !interruptResponse : voiceBool(halfDuplex, !interruptResponse);
+  return {
+    halfDuplex: hd,
+    // Keep the mic gated this long after `response.done` so the tail of TTS still
+    // draining out of the jitter buffer / <audio> element isn't heard as speech.
+    tailMs: Number.isFinite(Number(tailMs)) ? Math.max(0, Math.round(Number(tailMs))) : 600,
+    // Hard safety: never leave the mic gated longer than this (a dropped response.done
+    // must never wedge the mic shut for the rest of a drive).
+    maxHoldMs: Number.isFinite(Number(maxHoldMs)) ? Math.max(1000, Math.round(Number(maxHoldMs))) : 20000,
+    echoGuard: echoGuard == null ? true : voiceBool(echoGuard, true),
+    echoThreshold: Number.isFinite(Number(echoThreshold)) ? Math.min(1, Math.max(0.5, Number(echoThreshold))) : 0.8,
+    // Below this many tokens a "user" utterance is too short to safely call an echo
+    // (real commands like "yes", "stop", "next" must always get through).
+    echoMinTokens: Number.isFinite(Number(echoMinTokens)) ? Math.max(2, Math.round(Number(echoMinTokens))) : 4,
+  };
+}
+
+// Normalize spoken text for self-echo comparison: lowercase, strip punctuation,
+// collapse whitespace, split to word tokens.
+export function voiceNormalizeTokens(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// Decide whether a transcribed "user" utterance is really our own TTS echoed back
+// (misattribution). Returns { isEcho, score, against }. Conservative by design:
+// short utterances are never flagged (real one-word commands must survive), and the
+// score is directional containment — what fraction of the USER tokens appear inside
+// one of the recent assistant utterances. Pure + exported so the browser twin in
+// public/voice.js can be regression-tested here.
+export function selfEchoMatch(userText, assistantTexts, { threshold = 0.8, minTokens = 4 } = {}) {
+  const u = voiceNormalizeTokens(userText);
+  const against = Array.isArray(assistantTexts) ? assistantTexts : [assistantTexts];
+  const none = { isEcho: false, score: 0, against: '' };
+  if (u.length < minTokens) return none;
+  let best = none;
+  for (const a of against) {
+    const at = voiceNormalizeTokens(a);
+    if (at.length < minTokens) continue;
+    const aset = new Set(at);
+    // fraction of user tokens present in the assistant utterance
+    let hit = 0;
+    for (const w of u) if (aset.has(w)) hit++;
+    const containment = hit / u.length;
+    if (containment > best.score) best = { isEcho: containment >= threshold, score: containment, against: a };
+  }
+  return best;
+}
+
+// Count self-interruption / misattribution incidents from a voice session's persisted
+// diagnostic lines (JSONL). Powers telemetry + monitoring (AC #4) without needing a
+// live session: `self_interrupt_armed` = VAD fired on our own playback; `self_echo_dropped`
+// = the echo guard dropped a self-transcribed user turn; `false_interrupt_resume` = an
+// armed recovery that resumed a wrongly-cut answer.
+export function summarizeSelfEchoDiagnostics(lines) {
+  const arr = Array.isArray(lines) ? lines : String(lines || '').split('\n');
+  const out = {
+    self_interrupt_candidate: 0, self_interrupt_armed: 0, false_interrupt_resume: 0,
+    self_echo_dropped: 0, half_duplex_gate: 0,
+    calls: 0, self_interrupt_total: 0, misattribution_total: 0, total_diag: 0,
+  };
+  for (const ln of arr) {
+    const s = String(ln || '').trim();
+    if (!s) continue;
+    let e; try { e = JSON.parse(s); } catch { continue; }
+    if (!e || e.kind !== 'diag') continue;
+    out.total_diag++;
+    switch (e.event) {
+      case 'self_interrupt_candidate': out.self_interrupt_candidate++; break;
+      case 'false_interrupt_armed': out.self_interrupt_armed++; break;
+      case 'false_interrupt_resume': out.false_interrupt_resume++; break;
+      case 'self_echo_dropped': out.self_echo_dropped++; break;
+      case 'half_duplex_gate_closed': out.half_duplex_gate++; break;
+      case 'audio_incidents':          // end-of-call rollup from the client
+        out.calls++;
+        out.self_interrupt_total += Number(e.data && e.data.selfInterrupt) || 0;
+        out.misattribution_total += Number(e.data && e.data.misattribution) || 0;
+        break;
+      default: break;
+    }
+  }
+  return out;
 }
 
 const VOICE_SPREADSHEET_EXTS = new Set(['.csv', '.tsv', '.xls', '.xlsx', '.xlsm', '.ods', '.numbers']);
@@ -488,6 +593,18 @@ export function registerVoiceAssistant(app, ctx) {
   const VOICE = cfg('VOICE_ASSISTANT_VOICE', 'marin');
   const RESPONSE_STYLE = cfg('VOICE_ASSISTANT_RESPONSE_STYLE', 'brief');
   const INTERRUPT_RESPONSE = voiceBool(cfg('VOICE_ASSISTANT_INTERRUPT_RESPONSE'), false);
+  // Audio-pipeline hardening (INC-1088): half-duplex mic gating during TTS + self-echo
+  // misattribution guard. Defaults: half-duplex ON (unless barge-in is enabled), echo
+  // guard ON. All tunable per deployment / car.
+  const AUDIO_POLICY = voiceAudioPolicy({
+    halfDuplex: cfg('VOICE_ASSISTANT_HALF_DUPLEX'),
+    interruptResponse: INTERRUPT_RESPONSE,
+    tailMs: cfg('VOICE_ASSISTANT_HALF_DUPLEX_TAIL_MS'),
+    maxHoldMs: cfg('VOICE_ASSISTANT_HALF_DUPLEX_MAX_HOLD_MS'),
+    echoGuard: cfg('VOICE_ASSISTANT_ECHO_GUARD'),
+    echoThreshold: cfg('VOICE_ASSISTANT_ECHO_THRESHOLD'),
+    echoMinTokens: cfg('VOICE_ASSISTANT_ECHO_MIN_TOKENS'),
+  });
   const VOICE_DIR = join(STATE_DIR, 'voice-assistant');
   for (const d of [VOICE_DIR, join(VOICE_DIR, 'transcripts'), join(VOICE_DIR, 'diagnostics'), join(VOICE_DIR, 'research'), join(VOICE_DIR, 'notes')]) {
     try { mkdirSync(d, { recursive: true }); } catch {}
@@ -1580,6 +1697,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 - Full lists & long outputs — check_session only PREVIEWS a reply (it flags output_truncated when it's cut off); never claim you have the full list off a preview, and never read a long artifact aloud. To DISCUSS the whole thing in voice — a full ranked list, every target — call read_session_output: mode:summary for the item count + the top items (say the count, name the top few, offer the rest), mode:full with page 2, 3… (via next_page) to go through it all. To put the WHOLE thing in Jimmy's inbox — a full report, a long write-up, or anything too long to talk through — call request_full_artifact (it emails him the complete artifact with the PR link).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
+- Self-echo: if a "user" message is your own last reply (or a fragment of it) echoed back — same words you just spoke — it is microphone loopback, NOT the user. Ignore it: call wait_for_user, do not answer it, and never treat it as a new instruction or a reason to stop or restart your answer.
 - If a tool errors, say so plainly and move on. NEVER invent tool results, and never claim live state you haven't checked this session.
 
 # Rules
@@ -1721,6 +1839,8 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
               mode: cfg('VOICE_ASSISTANT_VAD', 'semantic'),
               eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'low'),
               interruptResponse: INTERRUPT_RESPONSE,
+              threshold: cfg('VOICE_ASSISTANT_VAD_THRESHOLD'),
+              silenceMs: cfg('VOICE_ASSISTANT_VAD_SILENCE_MS'),
             }),
           },
           output: { voice: VOICE, speed: 1.0 },
@@ -1745,6 +1865,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
       appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'meta', text: reconnectVsid ? 'reconnected' : 'session started', model: MODEL }) + '\n');
       res.json({
         clientSecret: j.value, expiresAt: j.expires_at, model: MODEL, voice: VOICE, vsid, cursor: seq - 1,
+        audioPolicy: AUDIO_POLICY,   // INC-1088: half-duplex + echo-guard the client enforces
         memory: { consent: mcfg.consent, storeAudio: memory.audioOn(), retrieval: memory.retrievalOn() },
       });
     } catch (e) {
@@ -1789,6 +1910,17 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     }
     // Client end-of-call beacon → index this session now (consent-gated inside memory).
     if (vsid && ended) { try { memory.indexSession(vsid, readTurns(vsid), { source: 'transcript' }); } catch {} }
+    // Audio-pipeline telemetry (INC-1088): persist the per-call self-interruption /
+    // misattribution counts to the diagnostics log so they're queryable after the fact.
+    if (vsid && ended && req.body && req.body.incidents) {
+      try {
+        const inc = req.body.incidents;
+        appendFileSync(diagnosticPath(vsid), JSON.stringify({
+          ts: Date.now(), kind: 'diag', source: 'pipeline', event: 'audio_incidents',
+          data: { selfInterrupt: Number(inc.selfInterrupt) || 0, misattribution: Number(inc.misattribution) || 0 },
+        }) + '\n');
+      } catch {}
+    }
     res.json({ ok: true });
   });
 
@@ -1835,6 +1967,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
       enabled: enabled(), model: MODEL, voice: VOICE,
       responseStyle: RESPONSE_STYLE,
       interruptResponse: INTERRUPT_RESPONSE,
+      audioPolicy: AUDIO_POLICY,
       vad: cfg('VOICE_ASSISTANT_VAD', 'semantic'),
       eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'low'),
       briefing: existsSync(BRIEFING_FILE),
