@@ -31,6 +31,7 @@ import multer from 'multer';
 import { readCodexSessionHistory } from './codex-context.mjs';
 import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
+import { createLocalFileResolver } from './local-file-resolver.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -127,7 +128,7 @@ const VOICE_SPREADSHEET_EXTS = new Set(['.csv', '.tsv', '.xls', '.xlsx', '.xlsm'
 const VOICE_FILE_DENY_SEGMENT_RE = /(?:^|\/)(?:\.ssh|\.aws|\.gnupg|\.kube|\.config)(?:\/|$)/i;
 const VOICE_FILE_DENY_FILE_RE = /(?:^|\/)(?:\.env(?:$|\.)|credentials(?:$|\.)|secrets?(?:$|\.)|id_(?:rsa|ed25519|ecdsa|dsa)$|[^/]+\.(?:pem|p12|pfx|key))$/i;
 
-function expandVoicePath(raw, { HOME = homedir(), cwd = HOME } = {}) {
+function expandVoiceRoot(raw, { HOME = homedir(), cwd = HOME } = {}) {
   let s = String(raw || '').trim().replace(/^['"`]+|['"`]+$/g, '');
   while (/[.,;:!?]$/.test(s)) s = s.slice(0, -1);
   if (!s) return '';
@@ -143,7 +144,7 @@ export function voiceFileAccessRoots(raw, { HOME = homedir(), STATE_DIR = join(h
     : defaults;
   const roots = [];
   for (const p of parts) {
-    const expanded = expandVoicePath(p, { HOME, cwd: HOME });
+    const expanded = expandVoiceRoot(p, { HOME, cwd: HOME });
     if (!expanded) continue;
     try {
       const st = statSync(expanded);
@@ -163,6 +164,7 @@ function pathInsideRoot(path, root) {
 export function voiceFileAccessPolicy({ path, purpose = '', user_confirmed = false } = {}, opts = {}) {
   const HOME = opts.HOME || homedir();
   const STATE_DIR = opts.STATE_DIR || join(HOME, '.cc-mobile');
+  const UPLOAD_DIR = opts.UPLOAD_DIR || join(STATE_DIR, 'uploads');
   const maxBytes = Math.max(1, Number(opts.maxBytes || 25 * 1024 * 1024));
   const roots = opts.roots || voiceFileAccessRoots(opts.rootsRaw, { HOME, STATE_DIR });
   const requested = String(path || '').trim();
@@ -175,7 +177,15 @@ export function voiceFileAccessPolicy({ path, purpose = '', user_confirmed = fal
       allowed_roots: roots,
     };
   }
-  const expanded = expandVoicePath(requested, { HOME, cwd: opts.cwd || HOME });
+  const resolver = opts.resolver || createLocalFileResolver({
+    HOME,
+    STATE_DIR,
+    UPLOAD_DIR,
+    defaultCwd: opts.cwd || HOME,
+    searchRoots: roots,
+  });
+  const hit = resolver.resolveLocalFileReference(requested, opts.cwd || HOME);
+  const expanded = hit.found ? hit.path : resolver.expandLocalPathToken(requested, opts.cwd || HOME);
   let real = '', st = null;
   try {
     real = realpathSync(expanded);
@@ -184,7 +194,7 @@ export function voiceFileAccessPolicy({ path, purpose = '', user_confirmed = fal
     return {
       ok: false,
       code: 'not_found',
-      path: expanded,
+      path: expanded || requested,
       direct_access: false,
       message: 'That file is not reachable from the box voice server. Ask the user to upload it in Box or give a path that exists on this server, then delegate an agent.',
       allowed_roots: roots,

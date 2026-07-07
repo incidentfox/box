@@ -187,6 +187,10 @@ assert.equal(voiceBool('off'), false);
     assert.equal(confirmed.needs_permission, false);
     assert.match(confirmed.message, /in scope/);
 
+    const byName = voiceFileAccessPolicy({ path: 'attendees.xlsx' }, { HOME: root, STATE_DIR: root, roots: [root], cwd: root, maxBytes: 1024 });
+    assert.equal(byName.ok, true);
+    assert.equal(byName.path, sheet);
+
     const missing = voiceFileAccessPolicy({ path: join(root, 'missing.csv') }, { HOME: root, STATE_DIR: root, roots: [root] });
     assert.equal(missing.ok, false);
     assert.equal(missing.code, 'not_found');
