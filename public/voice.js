@@ -19,6 +19,7 @@
 
 let voState = 'off';            // off | connecting | live | reconnecting | ended
 let voPc = null, voDc = null, voMicStream = null, voAudioEl = null;
+let voMemAudio = false, voRecorder = null, voRecSeq = 0;  // opt-in audio capture (voice memory)
 let voVsid = null, voCursor = 0;
 let voStartedAt = 0, voConnectedAt = 0, voMuted = false;
 let voWakeLock = null;
@@ -248,6 +249,7 @@ async function voConnect(isReconnect) {
     voVsid = tok.vsid;
     if (!isReconnect) voCursor = tok.cursor || 0;
     voDiag('pipeline', 'token_minted', { reconnect: !!isReconnect, model: tok.model || '', voice: tok.voice || '' });
+    voMemAudio = !!(tok.memory && tok.memory.storeAudio);
 
     // 2. mic (reused across reconnects)
     if (!voMicStream || !voMicStream.getAudioTracks().some((t) => t.readyState === 'live')) {
@@ -258,6 +260,7 @@ async function voConnect(isReconnect) {
       voDiag('playback', 'mic_track', voTrackSettings(track));
     }
     voMicStream.getAudioTracks().forEach((t) => { t.enabled = !voMuted; });
+    if (voMemAudio) voStartAudioCapture(); else voStopAudioCapture();  // opt-in audio storage
 
     // 3. peer connection
     const pc = new RTCPeerConnection();
@@ -350,7 +353,11 @@ function voEnd(finalState) {
   for (const iv of [voClockIv, voPollIv, voFlushIv]) if (iv) clearInterval(iv);
   voReconnectT = voRotateT = voClockIv = voPollIv = voFlushIv = null;
   voStopStats();
+  voStopAudioCapture();
   voFlushEvents();
+  // Tell the server the call ended so it indexes this session into cross-session memory
+  // (a no-op there unless the owner has consented). Best-effort.
+  if (voVsid) api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, ended: true }) }).catch(() => {});
   if (voDc) { try { voDc.close(); } catch {} voDc = null; }
   if (voPc) { try { voPc.close(); } catch {} voPc = null; }
   if (voMicStream) { voMicStream.getTracks().forEach((t) => t.stop()); voMicStream = null; }
@@ -506,6 +513,7 @@ const VO_TOOL_LABELS = {
   check_tasks: 'Checking tasks…', brain_search: 'Searching the brain…', brain_read: 'Reading the brain…',
   get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
   email_jimmy: 'Sending email…', calendar: 'Checking calendar…', think_hard: 'Thinking hard…',
+  voice_memory: 'Updating memory…',
 };
 
 /* ---------- false-interruption recovery (road noise cancels a reply → resume it) ---------- */
@@ -590,6 +598,33 @@ function voFlushEvents() {
   if (!voVsid || !voEventBuf.length) return;
   const events = voEventBuf.splice(0, 50);
   api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, events }) }).catch(() => {});
+}
+
+/* ---------- opt-in audio capture (voice memory) ----------
+ * WebRTC audio goes browser↔OpenAI directly — the server never sees it. So when the
+ * owner has opted into audio storage, WE record the mic locally (MediaRecorder over the
+ * same mic track) and POST timeslices to /api/voice/audio, letting a garbled transcript
+ * be recovered from audio later. Gated on tok.memory.storeAudio — off by default. */
+function voStartAudioCapture() {
+  if (!voMemAudio || !voMicStream || voRecorder) return;
+  if (typeof MediaRecorder === 'undefined') return;
+  try {
+    const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
+    voRecorder = new MediaRecorder(voMicStream, mimeType ? { mimeType } : undefined);
+    voRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) voUploadAudio(e.data); };
+    voRecorder.start(20000); // 20s chunks — bounded upload size, resilient to drops
+  } catch (e) { console.warn('[voice] audio capture unavailable', e); voRecorder = null; }
+}
+function voStopAudioCapture() {
+  if (voRecorder) { try { if (voRecorder.state !== 'inactive') voRecorder.stop(); } catch {} voRecorder = null; }
+}
+function voUploadAudio(blob) {
+  if (!voVsid) return;
+  try {
+    const fd = new FormData();
+    fd.append('audio', blob, `chunk-${voRecSeq}.webm`);
+    api(`/api/voice/audio?vsid=${encodeURIComponent(voVsid)}&seq=${voRecSeq++}`, { method: 'POST', body: fd }).catch(() => {});
+  } catch {}
 }
 
 /* ---------- orb level animation (assistant speech drives the glow) ---------- */

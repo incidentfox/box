@@ -44,6 +44,7 @@ console.log(`\n— voice smoke against ${BASE} —\n`);
   ok('features.voiceAssistant on', !!(cfg.json.features && cfg.json.features.voiceAssistant));
   const st = await api('/api/voice/status');
   ok('/api/voice/status', st.status === 200 && st.json.enabled === true, `model=${st.json.model} tools=${(st.json.tools || []).length}`);
+  ok('status.memory present', st.json.memory && typeof st.json.memory.consent === 'string', `consent=${st.json.memory && st.json.memory.consent} sessions=${st.json.memory && st.json.memory.sessions}`);
 }
 
 // 2. tools (read-safe set)
@@ -78,6 +79,9 @@ console.log(`\n— voice smoke against ${BASE} —\n`);
   ok('get_briefing responds', Array.isArray(gb.sections) || /no briefing/.test(gb.error || ''), gb.sections ? gb.sections.join('|').slice(0, 60) : 'not prepared yet');
   const cal = await tool('calendar');
   ok('calendar', !cal.error && typeof cal.personal === 'string', (cal.personal || '').split('\n')[0].slice(0, 60));
+  // voice_memory: status only — read-safe, never flips consent or purges from a smoke run
+  const vm = await tool('voice_memory', { action: 'status' });
+  ok('voice_memory status', vm && typeof vm.remembering === 'boolean', `remembering=${vm.remembering} sessions=${vm.stored_sessions} audio=${vm.audio}`);
 }
 
 // 3. token mint + 4. realtime WS round-trip with a live tool call

@@ -2776,6 +2776,7 @@ try {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken: AUTH_TOKEN, ownerName: OWNER_NAME,
     defaultCwd: () => DEFAULT_CWD, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
     macAvailable, loadCodexMessages, codexHome: CODEX_HOME, codexMessagePath: codexMsgFile,
+    transcribe: transcribeBuffer, // for voice-memory re-transcription (recover a garbled clip)
   });
 } catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
