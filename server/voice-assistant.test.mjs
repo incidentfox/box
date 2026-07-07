@@ -11,6 +11,7 @@ import {
   plainLanguageLabel,
   sanitizeVoiceEvent,
   spokenWorkLabel,
+  sessionArchiveEligibility,
   summarizeAgentOutput,
   voiceFileAccessPolicy,
   voiceBool,
@@ -57,6 +58,43 @@ assert.equal(voiceBool('off'), false);
   assert.equal(serverVad.interrupt_response, true);
   assert.equal(serverVad.threshold, 0.65);
   assert.equal(serverVad.silence_duration_ms, 800);
+}
+
+// ---- voice session archive gating (INC-1085) -------------------------------
+
+{
+  assert.equal(sessionArchiveEligibility({ id: 's1', status: 'idle' }).ok, true);
+  assert.equal(sessionArchiveEligibility({ id: 's2', status: 'finished' }).ok, true);
+  assert.equal(sessionArchiveEligibility({ id: 's3', status: 'done' }).ok, true);
+  assert.equal(sessionArchiveEligibility({ id: 's4', status: 'completed' }).ok, true);
+}
+
+{
+  const working = sessionArchiveEligibility({ id: 's1', status: 'working' });
+  assert.equal(working.ok, false);
+  assert.equal(working.code, 'working');
+  assert.match(working.reason, /still working/);
+
+  const needs = sessionArchiveEligibility({ id: 's2', status: 'needs_input' });
+  assert.equal(needs.ok, false);
+  assert.equal(needs.code, 'needs_input');
+  assert.match(needs.reason, /needs your input/);
+
+  const live = sessionArchiveEligibility({ id: 's3', status: 'idle', live: true });
+  assert.equal(live.ok, false);
+  assert.equal(live.code, 'live');
+  assert.match(live.reason, /still live/);
+}
+
+{
+  const unknown = sessionArchiveEligibility({ id: 's1', status: 'paused' });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.code, 'not_idle_or_finished');
+  assert.match(unknown.reason, /only archives idle or finished sessions/);
+
+  const archived = sessionArchiveEligibility({ id: 's2', status: 'archived', archived: true });
+  assert.equal(archived.ok, true);
+  assert.equal(archived.already_archived, true);
 }
 
 {
