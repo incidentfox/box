@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { readCodexSessionHistory } from './codex-context.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -45,7 +46,7 @@ export function registerVoiceAssistant(app, ctx) {
   const {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
     defaultCwd, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
-    macAvailable, loadCodexMessages,
+    macAvailable, loadCodexMessages, codexHome, codexMessagePath,
   } = ctx;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
@@ -57,6 +58,7 @@ export function registerVoiceAssistant(app, ctx) {
   }
   const BRIEFING_FILE = join(VOICE_DIR, 'briefing.md');
   const TASKS_FILE = join(VOICE_DIR, 'tasks.json');
+  const SESSION_HISTORY_AUDIT_FILE = join(VOICE_DIR, 'session-history-audit.jsonl');
 
   const enabled = () => !!OPENAI_KEY;
   // Eval mode: action tools simulate success instead of mutating anything (used by
@@ -341,6 +343,10 @@ export function registerVoiceAssistant(app, ctx) {
     project: basename(s.cwd || ''), last_activity: ago(s.mtime), preview: short(s.preview, 90),
   });
 
+  function writeSessionHistoryAudit(row) {
+    try { appendFileSync(SESSION_HISTORY_AUDIT_FILE, JSON.stringify({ ts: Date.now(), ...row }) + '\n'); } catch {}
+  }
+
   function resolveProjectDir(project) {
     if (!project) return defaultCwd();
     const p = String(project).trim().replace(/^~\//, '');
@@ -405,6 +411,68 @@ export function registerVoiceAssistant(app, ctx) {
           match: sessBrief(s),
           latest_reply: lastAgentText(s.id, s.agent, 800) || short(s.preview, 200) || '(no output yet)',
           ...(others.length ? { other_candidates: others } : {}),
+        };
+      },
+    },
+    {
+      name: 'read_session_history',
+      description: 'Read-only Codex helper: find one Codex session by title/topic/id and return its ordered user prompts from persisted history. Use when asked what was requested earlier, what prompts were sent, or to recover full Codex session context. Logs exact paths and queries used. Preamble: "Reading the session history."',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Words from the Codex session title/topic, or the full session id' },
+          limit: { type: 'number', description: 'Maximum prompts to return, default 80, max 200' },
+        },
+        required: ['query'],
+      },
+      handler: async ({ query, limit = 80 }) => {
+        const { hits } = matchSession(query);
+        if (!hits.length) return { error: `no session matches "${query}"` };
+        const codexHits = hits.filter((s) => s.agent === 'codex');
+        if (!codexHits.length) return {
+          error: `matched "${hits[0].title || hits[0].id}", but it is a ${hits[0].agent || 'claude'} session; this read-only helper currently supports Codex sessions`,
+          matched: hits.slice(0, 3).map(sessBrief),
+        };
+        if (codexHits.length > 1 && codexHits[0].title !== codexHits[1].title) {
+          return { need_disambiguation: codexHits.slice(0, 4).map(sessBrief) };
+        }
+        const s = codexHits[0];
+        const maxPrompts = Math.max(1, Math.min(200, Number(limit) || 80));
+        const messages = loadCodexMessages ? loadCodexMessages(s.id) : [];
+        const result = await readCodexSessionHistory({
+          sessionId: s.id,
+          query,
+          codexHome,
+          messages,
+          sidecarPath: codexMessagePath ? codexMessagePath(s.id) : '',
+          limit: maxPrompts,
+        });
+        writeSessionHistoryAudit({
+          tool: 'read_session_history',
+          query,
+          match: sessBrief(s),
+          source: result.source,
+          count: result.count,
+          total: result.total,
+          truncated: result.truncated,
+          unavailable: result.unavailable || '',
+          audit: result.audit,
+        });
+        if (result.unavailable) return {
+          match: sessBrief(s),
+          source: result.source,
+          prompts: [],
+          error: result.unavailable,
+          audit: { log: SESSION_HISTORY_AUDIT_FILE, permission: result.audit.permission, queries: result.audit.queries, paths: result.audit.paths },
+        };
+        return {
+          match: sessBrief(s),
+          source: result.source,
+          prompt_count: result.count,
+          total_prompts_found: result.total,
+          truncated: result.truncated,
+          prompts: result.prompts,
+          audit: { log: SESSION_HISTORY_AUDIT_FILE, permission: result.audit.permission, queries: result.audit.queries, paths: result.audit.paths },
         };
       },
     },
@@ -753,7 +821,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
-- Read tools (get_overview, list_sessions, check_session, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
+- Read tools (get_overview, list_sessions, check_session, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
 - Action tools (start_agent, delegate_ticket, send_to_session, linear_create, linear_update, email_jimmy, take_note): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. When a [TASK UPDATE] system message arrives, weave it in naturally: what finished, the one-line result, offer detail. To check on running work yourself: check_tasks lists every agent and research task you started; check_session reads any agent's latest output (including codex).
