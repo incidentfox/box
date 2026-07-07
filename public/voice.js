@@ -37,7 +37,105 @@ let voSpeechStopAt = 0, voLatencies = [];   // end-of-user-speech → first spok
 let voStatsIv = null, voLastInboundStats = null, voLastStatsLogAt = 0;
 let voResponseDiag = null, voLastAudioTranscriptAt = 0;
 
+/* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
+ * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
+ * Realtime VAD + transcription run server-side, so the ONLY place we can stop the model
+ * from hearing its own voice is here, at the mic: while our TTS is playing we gate the
+ * outgoing mic track closed (half-duplex) and re-open it only after playback ends (+ a
+ * tail hangover for the WebRTC jitter-buffer drain). A self-echo guard is the second line
+ * of defense — a "user" transcript that matches what we just said is dropped and the
+ * poisoned item purged from the model's context. Policy is minted by the server
+ * (/api/voice/token → audioPolicy); the matcher twins selfEchoMatch() in
+ * server/voice-assistant.mjs (regression-tested there — keep the two in sync). */
+const VO_AUDIO_POLICY_DEFAULT = { halfDuplex: true, tailMs: 600, maxHoldMs: 20000, echoGuard: true, echoThreshold: 0.8, echoMinTokens: 4 };
+let voAudioPolicy = { ...VO_AUDIO_POLICY_DEFAULT };
+let voMicGateClosed = false, voMicReopenT = null, voMicMaxHoldT = null;
+let voRecentAsst = [];                                   // last few assistant utterances (self-echo compare)
+let voIncidents = { selfInterrupt: 0, misattribution: 0 };
+
 const VO_PRICES = { atIn: 32, atInCached: 0.4, txIn: 4, txInCached: 0.4, atOut: 64, txOut: 24 }; // $/1M tok (gpt-realtime-2)
+
+// Stronger mic capture constraints. echoCancellation/noiseSuppression/autoGainControl are
+// portable + always honored; the `advanced` block is best-effort — browsers silently drop
+// any hint they don't support, so it never throws OverconstrainedError.
+function voMicConstraints() {
+  return {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    channelCount: 1,
+    advanced: [
+      { echoCancellationType: 'system' },
+      { googEchoCancellation: true },
+      { googAutoGainControl: true },
+      { googNoiseSuppression: true },
+      { googHighpassFilter: true },
+    ],
+  };
+}
+
+// Effective mic state = user hasn't muted AND the half-duplex gate isn't holding it closed.
+function voApplyMic() {
+  if (!voMicStream) return;
+  const on = !voMuted && !(voAudioPolicy.halfDuplex && voMicGateClosed);
+  voMicStream.getAudioTracks().forEach((t) => { if (t.enabled !== on) t.enabled = on; });
+}
+function voHalfDuplexClose() {
+  if (!voAudioPolicy.halfDuplex || voMicGateClosed) return;
+  if (voMicReopenT) { clearTimeout(voMicReopenT); voMicReopenT = null; }
+  voMicGateClosed = true;
+  voApplyMic();
+  voDiag('pipeline', 'half_duplex_gate_closed', {});
+  if (voMicMaxHoldT) clearTimeout(voMicMaxHoldT);
+  // Safety: a dropped response.done must never wedge the mic shut for the rest of a drive.
+  voMicMaxHoldT = setTimeout(() => voHalfDuplexReopen('max_hold'), voAudioPolicy.maxHoldMs);
+}
+function voHalfDuplexReopen(reason) {
+  if (voMicReopenT) { clearTimeout(voMicReopenT); voMicReopenT = null; }
+  if (voMicMaxHoldT) { clearTimeout(voMicMaxHoldT); voMicMaxHoldT = null; }
+  if (!voMicGateClosed) return;
+  voMicGateClosed = false;
+  voApplyMic();
+  voDiag('pipeline', 'half_duplex_gate_open', { reason: reason || 'tail' });
+}
+function voHalfDuplexScheduleReopen() {
+  if (!voAudioPolicy.halfDuplex || !voMicGateClosed) return;
+  if (voMicReopenT) clearTimeout(voMicReopenT);
+  voMicReopenT = setTimeout(() => { voMicReopenT = null; voHalfDuplexReopen('tail'); }, voAudioPolicy.tailMs);
+}
+function voResetAudioGate() {
+  if (voMicReopenT) { clearTimeout(voMicReopenT); voMicReopenT = null; }
+  if (voMicMaxHoldT) { clearTimeout(voMicMaxHoldT); voMicMaxHoldT = null; }
+  voMicGateClosed = false;
+}
+
+// twin of selfEchoMatch() in server/voice-assistant.mjs — keep in sync
+function voNormTokens(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+}
+function voSelfEchoScore(userText) {
+  const u = voNormTokens(userText);
+  if (u.length < voAudioPolicy.echoMinTokens) return 0;
+  let best = 0;
+  for (const a of voRecentAsst) {
+    const at = voNormTokens(a);
+    if (at.length < voAudioPolicy.echoMinTokens) continue;
+    const aset = new Set(at);
+    let hit = 0; for (const w of u) if (aset.has(w)) hit++;
+    best = Math.max(best, hit / u.length);
+  }
+  return best;
+}
+function voIsSelfEcho(userText) {
+  return !!voAudioPolicy.echoGuard && voSelfEchoScore(userText) >= voAudioPolicy.echoThreshold;
+}
+function voRememberAsst(text) {
+  const t = String(text || '').trim();
+  if (t.length < 4) return;
+  if (voRecentAsst[voRecentAsst.length - 1] === t) return;
+  voRecentAsst.push(t);
+  if (voRecentAsst.length > 4) voRecentAsst.shift();
+}
 
 function voBuild() {
   const root = $('voice');
@@ -231,6 +329,7 @@ async function voStart() {
   voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
   voLatencies = []; voSpeechStopAt = 0; voClearFalseInterrupt();
   voStopStats(); voResponseDiag = null; voLastAudioTranscriptAt = 0;
+  voResetAudioGate(); voRecentAsst = []; voIncidents = { selfInterrupt: 0, misattribution: 0 };
   voStartedAt = Date.now();
   voFeedEl().innerHTML = '';
   await voConnect(false);
@@ -252,18 +351,18 @@ async function voConnect(isReconnect) {
     if (!tr.ok) throw new Error(tok.error || 'token mint failed');
     voVsid = tok.vsid;
     if (!isReconnect) voCursor = tok.cursor || 0;
-    voDiag('pipeline', 'token_minted', { reconnect: !!isReconnect, model: tok.model || '', voice: tok.voice || '' });
+    voAudioPolicy = { ...VO_AUDIO_POLICY_DEFAULT, ...(tok.audioPolicy || {}) };
+    voDiag('pipeline', 'token_minted', { reconnect: !!isReconnect, model: tok.model || '', voice: tok.voice || '', halfDuplex: !!voAudioPolicy.halfDuplex, echoGuard: !!voAudioPolicy.echoGuard });
     voMemAudio = !!(tok.memory && tok.memory.storeAudio);
 
     // 2. mic (reused across reconnects)
     if (!voMicStream || !voMicStream.getAudioTracks().some((t) => t.readyState === 'live')) {
-      voMicStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      voMicStream = await navigator.mediaDevices.getUserMedia({ audio: voMicConstraints() });
       const track = voMicStream.getAudioTracks()[0];
       voDiag('playback', 'mic_track', voTrackSettings(track));
     }
-    voMicStream.getAudioTracks().forEach((t) => { t.enabled = !voMuted; });
+    voResetAudioGate();          // fresh connection → mic open (subject to mute)
+    voApplyMic();
     if (voMemAudio) voStartAudioCapture(); else voStopAudioCapture();  // opt-in audio storage
 
     // 3. peer connection
@@ -360,12 +459,20 @@ function voEnd(finalState) {
   for (const iv of [voClockIv, voPollIv, voFlushIv]) if (iv) clearInterval(iv);
   voReconnectT = voRotateT = voClockIv = voPollIv = voFlushIv = null;
   if (voNotifyQ) voNotifyQ.setChannelOpen(false);
+  voResetAudioGate();
   voStopStats();
   voStopAudioCapture();
+  // Telemetry: one summary line per call so self-interruption / misattribution rates are
+  // queryable from the persisted diagnostics without a live session (see AC #4).
+  voDiag('pipeline', 'audio_incident_summary', {
+    selfInterrupt: voIncidents.selfInterrupt, misattribution: voIncidents.misattribution,
+    halfDuplex: !!voAudioPolicy.halfDuplex, echoGuard: !!voAudioPolicy.echoGuard,
+    durationMs: voStartedAt ? Date.now() - voStartedAt : 0,
+  });
   voFlushEvents();
   // Tell the server the call ended so it indexes this session into cross-session memory
-  // (a no-op there unless the owner has consented). Best-effort.
-  if (voVsid) api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, ended: true }) }).catch(() => {});
+  // (a no-op there unless the owner has consented) and records the incident counts. Best-effort.
+  if (voVsid) api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, ended: true, incidents: voIncidents }) }).catch(() => {});
   if (voDc) { try { voDc.close(); } catch {} voDc = null; }
   if (voPc) { try { voPc.close(); } catch {} voPc = null; }
   if (voMicStream) { voMicStream.getTracks().forEach((t) => t.stop()); voMicStream = null; }
@@ -376,7 +483,7 @@ function voEnd(finalState) {
 
 function voToggleMute() {
   voMuted = !voMuted;
-  if (voMicStream) voMicStream.getAudioTracks().forEach((t) => { t.enabled = !voMuted; });
+  voApplyMic();   // compose with the half-duplex gate
   $('voMute').classList.toggle('active', voMuted);
   voSetState(voState);
 }
@@ -402,7 +509,15 @@ function voHandleEvent(ev) {
   if (t === 'input_audio_buffer.speech_started') {
     voOrbMode('listening');
     if (voNotifyQ) voNotifyQ.onUserSpeechStart(); // hold notifications — never talk over the user
-    voDiag('api', 'speech_started', { activeResponse: !!voActiveResponse, assistantChars: voAsstText.length });
+    voDiag('api', 'speech_started', { activeResponse: !!voActiveResponse, assistantChars: voAsstText.length, micGateClosed: voMicGateClosed });
+    // In half-duplex the mic is gated closed while we speak, so the VAD should not fire on
+    // our own playback. Count a self-interruption candidate only when TTS is actually
+    // playing (gate closed, or the assistant is already mid-sentence) — a speech_started
+    // during the silent thinking/tool phase is a legitimate user interjection, not self-echo.
+    if (voActiveResponse && (voMicGateClosed || voAsstText.length > 0)) {
+      voIncidents.selfInterrupt++;
+      voDiag('pipeline', 'self_interrupt_candidate', { micGateClosed: voMicGateClosed, halfDuplex: !!voAudioPolicy.halfDuplex, assistantChars: voAsstText.length });
+    }
     // Possible barge-in. If the assistant was mid-answer, this cancels it server-side —
     // but road noise / a cough triggers the same thing (a "false interruption"). Arm a
     // recovery: if no user words get transcribed within 2.8s, resume the answer.
@@ -431,6 +546,18 @@ function voHandleEvent(ev) {
     return;
   }
   if (t === 'conversation.item.input_audio_transcription.completed') {
+    // Misattribution guard: if this "user" turn is really our own TTS echoed back into
+    // the mic, drop it and purge it from the model's context so it can't respond to
+    // itself. Half-duplex normally prevents the echo reaching OpenAI at all; this catches
+    // the onset window and covers barge-in mode where the mic stays hot.
+    if (voIsSelfEcho(ev.transcript)) {
+      voIncidents.misattribution++;
+      voDiag('pipeline', 'self_echo_dropped', { score: Math.round(voSelfEchoScore(ev.transcript) * 100) / 100, chars: (ev.transcript || '').length });
+      const eb = voUserItems.get(ev.item_id);
+      if (eb) { try { eb.remove(); } catch {} voUserItems.delete(ev.item_id); }
+      if (ev.item_id) voSend({ type: 'conversation.item.delete', item_id: ev.item_id });
+      return;   // do NOT log it as a user turn or clear a false-interrupt recovery
+    }
     voClearFalseInterrupt();
     let b = voUserItems.get(ev.item_id);
     if (!b) { b = voBubble('user', ''); voUserItems.set(ev.item_id, b); }
@@ -457,6 +584,9 @@ function voHandleEvent(ev) {
     }
     voLastAudioTranscriptAt = now;
     if (voResponseDiag) voResponseDiag.transcriptChars += (ev.delta || '').length;
+    // Assistant TTS is now playing → gate the mic closed (half-duplex) so OpenAI can't
+    // hear it. Idempotent, and cancels any pending re-open if audio resumes.
+    voHalfDuplexClose();
     if (!voAsstBubble) {
       voAsstBubble = voBubble('asst', '');
       // turn latency: end of user speech → first spoken output (includes tool time — honest UX number)
@@ -469,6 +599,7 @@ function voHandleEvent(ev) {
   }
   if (t === 'response.output_audio_transcript.done' || t === 'response.audio_transcript.done') {
     if (ev.transcript && voAsstBubble) { voAsstText = ev.transcript; voAsstBubble.textContent = ev.transcript; }
+    voRememberAsst(ev.transcript || voAsstText);   // for the self-echo comparison
     return;
   }
 
@@ -481,7 +612,10 @@ function voHandleEvent(ev) {
     voActiveResponse = false;
     voOrbMode('listening');
     // (queued-notification flush happens below, once state is settled)
-    if (voAsstText) { voEventBuf.push({ ts: Date.now(), kind: 'assistant', text: voAsstText }); voAsstText = ''; voAsstBubble = null; }
+    // Playback is winding down: re-open the mic after the tail hangover (jitter-buffer
+    // drain) so we don't hear the last syllables of our own TTS as user speech.
+    voHalfDuplexScheduleReopen();
+    if (voAsstText) { voRememberAsst(voAsstText); voEventBuf.push({ ts: Date.now(), kind: 'assistant', text: voAsstText }); voAsstText = ''; voAsstBubble = null; }
     const u = ev.response && ev.response.usage;
     if (u) {
       const ind = u.input_token_details || {}, outd = u.output_token_details || {};

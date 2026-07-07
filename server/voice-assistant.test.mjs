@@ -16,6 +16,10 @@ import {
   voiceBool,
   voiceResponseStyle,
   voiceTurnDetectionConfig,
+  voiceAudioPolicy,
+  voiceNormalizeTokens,
+  selfEchoMatch,
+  summarizeSelfEchoDiagnostics,
 } from './voice-assistant.mjs';
 
 assert.equal(voiceBool(undefined, true), true);
@@ -302,6 +306,106 @@ assert.equal(voiceBool('off'), false);
   assert.match(progress, /Latest: reading the spec/);
   // No peek → no "Latest:" tail.
   assert.doesNotMatch(agentProgressLine({ speakAs, minutes: 2 }), /Latest:/);
+}
+
+// ---- audio-pipeline hardening: half-duplex + self-echo guard (INC-1088) -----
+
+{
+  // server_vad threshold/silence are now tunable, defaults unchanged.
+  const def = voiceTurnDetectionConfig({ mode: 'server' });
+  assert.equal(def.threshold, 0.65);
+  assert.equal(def.silence_duration_ms, 800);
+  const tuned = voiceTurnDetectionConfig({ mode: 'server', threshold: 0.85, silenceMs: 500 });
+  assert.equal(tuned.threshold, 0.85);
+  assert.equal(tuned.silence_duration_ms, 500);
+  // out-of-range values clamp, not crash.
+  assert.equal(voiceTurnDetectionConfig({ mode: 'server', threshold: 5 }).threshold, 1);
+  assert.equal(voiceTurnDetectionConfig({ mode: 'server', threshold: -1 }).threshold, 0);
+  // garbage falls back to the default.
+  assert.equal(voiceTurnDetectionConfig({ mode: 'server', threshold: 'abc' }).threshold, 0.65);
+  // semantic VAD ignores the server-only knobs.
+  assert.equal(voiceTurnDetectionConfig({ threshold: 0.9 }).type, 'semantic_vad');
+}
+
+{
+  // Half-duplex is ON by default and turns OFF when barge-in is enabled (mutually exclusive).
+  const d = voiceAudioPolicy();
+  assert.equal(d.halfDuplex, true);
+  assert.equal(d.echoGuard, true);
+  assert.equal(d.tailMs, 600);
+  assert.equal(d.maxHoldMs, 20000);
+  assert.equal(d.echoThreshold, 0.8);
+  assert.equal(d.echoMinTokens, 4);
+  assert.equal(voiceAudioPolicy({ interruptResponse: true }).halfDuplex, false);
+  // explicit override wins over the barge-in default, both directions.
+  assert.equal(voiceAudioPolicy({ interruptResponse: true, halfDuplex: '1' }).halfDuplex, true);
+  assert.equal(voiceAudioPolicy({ halfDuplex: '0' }).halfDuplex, false);
+  assert.equal(voiceAudioPolicy({ echoGuard: 'off' }).echoGuard, false);
+  // tunables parse + clamp.
+  assert.equal(voiceAudioPolicy({ tailMs: '900' }).tailMs, 900);
+  assert.equal(voiceAudioPolicy({ maxHoldMs: 100 }).maxHoldMs, 1000);   // floor
+  assert.equal(voiceAudioPolicy({ echoThreshold: 0.1 }).echoThreshold, 0.5); // floor
+  assert.equal(voiceAudioPolicy({ echoMinTokens: 1 }).echoMinTokens, 2);     // floor
+  assert.equal(voiceAudioPolicy({ tailMs: 'x' }).tailMs, 600);               // garbage → default
+}
+
+{
+  assert.deepEqual(voiceNormalizeTokens('Spectrum, ~3,000 bills/month!'), ['spectrum', '3', '000', 'bills', 'month']);
+  assert.deepEqual(voiceNormalizeTokens(''), []);
+  assert.deepEqual(voiceNormalizeTokens(null), []);
+}
+
+{
+  // Self-echo: the assistant's own words echoed back are flagged; real user speech is not.
+  const asst = ['Spectrum submits about three thousand bills a month right now.'];
+  const echo = selfEchoMatch('Spectrum submits about three thousand bills a month', asst);
+  assert.equal(echo.isEcho, true);
+  assert.ok(echo.score >= 0.8);
+
+  const real = selfEchoMatch('what is our revenue this quarter', asst);
+  assert.equal(real.isEcho, false);
+
+  // Short commands must ALWAYS get through even if they overlap (min-token gate).
+  assert.equal(selfEchoMatch('stop', asst).isEcho, false);
+  assert.equal(selfEchoMatch('yes do that', asst).isEcho, false);
+
+  // Partial echo (a leading fragment of what we just said) still trips the guard.
+  const frag = selfEchoMatch('Spectrum submits about three thousand', asst);
+  assert.equal(frag.isEcho, true);
+
+  // No assistant history → never an echo.
+  assert.equal(selfEchoMatch('Spectrum submits about three thousand bills a month', []).isEcho, false);
+
+  // A high threshold can be demanded; a near-miss then fails.
+  const strict = selfEchoMatch('Spectrum submits about three thousand bills a year', asst, { threshold: 0.95 });
+  assert.equal(strict.isEcho, false);
+}
+
+{
+  // Diagnostics rollup counts incident event types + folds in end-of-call totals.
+  const lines = [
+    JSON.stringify({ kind: 'diag', event: 'half_duplex_gate_closed' }),
+    JSON.stringify({ kind: 'diag', event: 'self_interrupt_candidate' }),
+    JSON.stringify({ kind: 'diag', event: 'false_interrupt_armed' }),
+    JSON.stringify({ kind: 'diag', event: 'self_echo_dropped' }),
+    JSON.stringify({ kind: 'diag', event: 'false_interrupt_resume' }),
+    JSON.stringify({ kind: 'diag', event: 'audio_incidents', data: { selfInterrupt: 2, misattribution: 1 } }),
+    JSON.stringify({ kind: 'user', text: 'ignored — not a diag' }),
+    'not json at all',
+    '',
+  ].join('\n');
+  const sum = summarizeSelfEchoDiagnostics(lines);
+  assert.equal(sum.half_duplex_gate, 1);
+  assert.equal(sum.self_interrupt_candidate, 1);
+  assert.equal(sum.self_interrupt_armed, 1);
+  assert.equal(sum.self_echo_dropped, 1);
+  assert.equal(sum.false_interrupt_resume, 1);
+  assert.equal(sum.calls, 1);
+  assert.equal(sum.self_interrupt_total, 2);
+  assert.equal(sum.misattribution_total, 1);
+  assert.equal(sum.total_diag, 6);
+  // Accepts an array of lines too.
+  assert.equal(summarizeSelfEchoDiagnostics(lines.split('\n')).calls, 1);
 }
 
 console.log('voice-assistant helpers ok');
