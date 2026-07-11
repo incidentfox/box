@@ -21,6 +21,8 @@ import {
   voiceAgentOutputSummary,
   voiceAgentStartKey,
   voiceAutonomyPolicy,
+  voiceContextPolicy,
+  voiceEventAudible,
   voiceNumOr,
   voiceNormalizeTokens,
   voiceRealtimeModelUnavailable,
@@ -57,10 +59,29 @@ assert.equal(voiceBool('off'), false);
 
 {
   const brief = voiceResponseStyle();
-  assert.match(brief, /ONE short spoken sentence/);
-  assert.match(brief, /twelve words/);
-  assert.match(brief, /Three sentences is the hard cap/);
+  assert.match(brief, /one or two compact spoken sentences/);
+  assert.match(brief, /25-45 words/);
+  assert.match(brief, /ONE topic at a time/);
   assert.doesNotMatch(brief, /3-5 spoken sentences/);
+}
+
+{
+  const policy = voiceContextPolicy();
+  assert.match(policy, /WHAT the work is trying to accomplish/);
+  assert.match(policy, /WHY it matters/);
+  assert.match(policy, /WHAT is happening next/);
+  assert.match(policy, /at most two important topics/);
+  assert.match(policy, /answer his exact last question in the first sentence/);
+  assert.match(policy, /READ-ONLY/);
+  assert.match(policy, /overrides the startup context snapshot/);
+}
+
+{
+  assert.equal(voiceEventAudible('task_done'), false);
+  assert.equal(voiceEventAudible('task_progress'), false);
+  assert.equal(voiceEventAudible('task_failed'), true);
+  assert.equal(voiceEventAudible('watch_pr_ready'), true);
+  assert.equal(voiceEventAudible('watch_needs_input'), true);
 }
 
 {
