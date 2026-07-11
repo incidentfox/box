@@ -33,6 +33,7 @@ import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
+import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -836,6 +837,7 @@ export function registerVoiceAssistant(app, ctx) {
     requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
     defaultCwd, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
     macAvailable, loadCodexMessages, codexHome, codexMessagePath, transcribe,
+    runAdapterTurn, adapterSessionInfo, voiceSttEnabled,
   } = ctx;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
@@ -845,6 +847,20 @@ export function registerVoiceAssistant(app, ctx) {
   const FALLBACK_MODEL = cfg('VOICE_ASSISTANT_FALLBACK_MODEL', MODEL === 'gpt-realtime-2.1' ? 'gpt-realtime-2' : '');
   const VOICE = cfg('VOICE_ASSISTANT_VOICE', 'marin');
   const RESPONSE_STYLE = cfg('VOICE_ASSISTANT_RESPONSE_STYLE', 'brief');
+  const MODE = voiceAssistantMode(cfg('VOICE_ASSISTANT_MODE', 'realtime'));
+  // Adapter mode keeps speech providers separate from the reasoning/tool engine:
+  // audio is transcribed by the existing box STT fallback, the normal Claude/Codex
+  // session runner owns context and tools, then OpenAI's HTTP TTS speaks its text.
+  const ADAPTER_AGENT = voiceAdapterAgent(cfg('VOICE_ADAPTER_AGENT', 'claude'));
+  const ADAPTER_TTS_MODEL = cfg('VOICE_ADAPTER_TTS_MODEL', 'gpt-4o-mini-tts');
+  const ADAPTER_TTS_VOICE = cfg('VOICE_ADAPTER_TTS_VOICE', VOICE);
+  const ADAPTER_MAX_RESPONSE_CHARS = Math.max(200, Math.min(6000, Number(cfg('VOICE_ADAPTER_MAX_RESPONSE_CHARS', 1400)) || 1400));
+  const ADAPTER_MAX_TURN_MS = Math.max(15000, Math.min(10 * 60 * 1000, Number(cfg('VOICE_ADAPTER_MAX_TURN_MS', 180000)) || 180000));
+  const ADAPTER_VAD = voiceAdapterVAD({
+    threshold: cfg('VOICE_ADAPTER_VAD_THRESHOLD'),
+    silenceMs: cfg('VOICE_ADAPTER_VAD_SILENCE_MS'),
+    minSpeechMs: cfg('VOICE_ADAPTER_VAD_MIN_SPEECH_MS'),
+  });
   const INTERRUPT_RESPONSE = voiceBool(cfg('VOICE_ASSISTANT_INTERRUPT_RESPONSE'), false);
   // Audio-pipeline hardening (INC-1088): half-duplex mic gating during TTS + self-echo
   // misattribution guard. Defaults: half-duplex ON (unless barge-in is enabled), echo
@@ -884,6 +900,7 @@ export function registerVoiceAssistant(app, ctx) {
   const uploadAudio = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
   const enabled = () => !!OPENAI_KEY;
+  const adapterEnabled = () => MODE === 'adapter' && enabled() && !!voiceSttEnabled && typeof transcribe === 'function' && typeof runAdapterTurn === 'function';
   let resolvedModel = MODEL;
   let modelFallback = null;
   // Eval mode: action tools simulate success instead of mutating anything (used by
@@ -2614,6 +2631,71 @@ ${voiceAutonomyPolicy()}
     }
   });
 
+  // Experimental adapter transport: short audio clip -> existing STT fallback -> a
+  // persistent Claude/Codex Box session -> OpenAI HTTP TTS. Unlike Realtime mode, the
+  // LLM never receives the audio stream; all tool access stays in the normal CLI engine.
+  const uploadAdapterAudio = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+  async function synthesizeAdapterSpeech(text) {
+    const r = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ADAPTER_TTS_MODEL,
+        voice: ADAPTER_TTS_VOICE,
+        input: text,
+        response_format: 'mp3',
+        instructions: 'Speak naturally, concise and calm for a hands-free phone conversation. Do not read markdown punctuation aloud.',
+      }),
+    });
+    if (!r.ok) throw new Error(`TTS ${r.status}: ${short(await r.text(), 180)}`);
+    const audio = Buffer.from(await r.arrayBuffer());
+    if (!audio.length || audio.length > 8 * 1024 * 1024) throw new Error('TTS returned an invalid audio payload');
+    return { audio: audio.toString('base64'), mime: 'audio/mpeg', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE };
+  }
+  async function adapterSpeechPayload(text) {
+    try { return await synthesizeAdapterSpeech(text); }
+    catch (e) { return { tts_error: String((e && e.message) || e).slice(0, 240) }; }
+  }
+  app.post('/api/voice/adapter/turn', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
+    if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+    const vsid = String(req.body && req.body.vsid || '').trim();
+    const key = voiceAdapterSessionKey(vsid);
+    if (!key) return res.status(400).json({ error: 'invalid voice session id' });
+    const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key) : { sessionId: '', busy: false };
+    if (prior.busy) {
+      const text = 'That voice turn is still running in the same session. Give it a moment, then ask me for the result.';
+      return res.status(202).json({ text, pending: true, ...(await adapterSpeechPayload(text)) });
+    }
+    try {
+      const stt = await transcribe(req.file.buffer, req.file.mimetype, req.file.originalname);
+      const transcript = String(stt && stt.text || '').trim();
+      if (!transcript) return res.status(422).json({ error: 'no speech detected', stt_model: stt && stt.model || '' });
+      const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId });
+      const turn = runAdapterTurn({ key, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})` });
+      let timeout;
+      const result = await Promise.race([
+        turn,
+        new Promise((resolve) => { timeout = setTimeout(() => resolve({ timeout: true }), ADAPTER_MAX_TURN_MS); }),
+      ]);
+      clearTimeout(timeout);
+      if (result && result.timeout) {
+        const text = 'I am still working on that. I will keep the same session context, so ask again in a moment for the result.';
+        return res.status(202).json({ transcript, stt_model: stt.model, text, pending: true, ...(await adapterSpeechPayload(text)) });
+      }
+      if (result && result.error) throw new Error(result.error);
+      if (result && result.canceled) throw new Error('voice adapter turn was cancelled');
+      const text = spokenAdapterText(result && result.text, ADAPTER_MAX_RESPONSE_CHARS) || 'I completed that turn, but the session did not return speakable text.';
+      try {
+        appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'user', text: transcript, source: 'adapter', stt_model: stt.model }) + '\n');
+        appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'assistant', text, source: 'adapter', agent: ADAPTER_AGENT, session_id: result && result.sessionId || '' }) + '\n');
+      } catch {}
+      res.json({ transcript, stt_model: stt.model, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', ...(await adapterSpeechPayload(text)) });
+    } catch (e) {
+      res.status(502).json({ error: String((e && e.message) || e).slice(0, 400) });
+    }
+  });
+
   app.post('/api/voice/tool', requireAuth, async (req, res) => {
     const { name, args, call_id, vsid } = req.body || {};
     const tool = toolByName.get(String(name || ''));
@@ -2720,13 +2802,19 @@ ${voiceAutonomyPolicy()}
 
   app.get('/api/voice/status', requireAuth, (req, res) => {
     res.json({
-      enabled: enabled(), model: resolvedModel, preferredModel: MODEL,
+      enabled: enabled(), mode: MODE, model: resolvedModel, preferredModel: MODEL,
       fallbackModel: FALLBACK_MODEL || null, fallback: modelFallback, voice: VOICE,
       responseStyle: RESPONSE_STYLE,
       interruptResponse: INTERRUPT_RESPONSE,
       audioPolicy: AUDIO_POLICY,
       vad: cfg('VOICE_ASSISTANT_VAD', 'semantic'),
       eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'low'),
+      adapter: {
+        enabled: adapterEnabled(), agent: ADAPTER_AGENT,
+        stt: 'box transcribe (Deepgram primary, ElevenLabs fallback)',
+        tts: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE },
+        vad: ADAPTER_VAD, maxTurnMs: ADAPTER_MAX_TURN_MS, maxResponseChars: ADAPTER_MAX_RESPONSE_CHARS,
+      },
       briefing: existsSync(BRIEFING_FILE),
       slack: slackConfigured(cfg),
       tasks: [...TASKS.values()].slice(-20),
@@ -2735,6 +2823,6 @@ ${voiceAutonomyPolicy()}
     });
   });
 
-  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODEL}${FALLBACK_MODEL ? `; fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
+  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODE}${MODE === 'realtime' ? `; ${MODEL}${FALLBACK_MODEL ? ` fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}` : `; ${ADAPTER_AGENT} adapter, ${ADAPTER_TTS_MODEL}`}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
   return { enabled };
 }

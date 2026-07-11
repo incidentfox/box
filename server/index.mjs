@@ -2703,6 +2703,12 @@ try {
     defaultCwd: () => DEFAULT_CWD, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
     macAvailable, loadCodexMessages, codexHome: CODEX_HOME, codexMessagePath: codexMsgFile,
     transcribe: transcribeBuffer, // for voice-memory re-transcription (recover a garbled clip)
+    voiceSttEnabled: !!(ELEVEN_KEY || DEEPGRAM_KEY),
+    runAdapterTurn: runVoiceAdapterTurn,
+    adapterSessionInfo: (key) => {
+      const s = rt(key);
+      return { sessionId: s.sessionId || '', agent: s.agent || '', busy: !!s.running || s.queue.length > 0 };
+    },
   });
 } catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
@@ -3675,6 +3681,22 @@ function enqueue(extKey, msg) {
   runWorker(s);
   return msg.qid;
 }
+
+// A synchronous facade over the normal Box queue for the experimental voice adapter.
+// It deliberately uses the existing Claude/Codex turn runners: context, tool streaming,
+// sandbox settings, remote-control ownership, and session persistence stay identical to
+// a phone chat. Adapter callers may have only one outstanding spoken turn per session.
+function runVoiceAdapterTurn({ key, text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter' } = {}) {
+  const s = rt(key);
+  if (s.running || s.queue.length) return Promise.reject(new Error('voice adapter session is busy — wait for the current reply'));
+  if (s.sessionId && s.agent && s.agent !== agent) return Promise.reject(new Error(`voice adapter session belongs to ${s.agent}; start a new call before switching agents`));
+  return new Promise((resolve) => {
+    enqueue(key, {
+      text, displayText: text, mode: 'normal', agent, cwd, title,
+      onComplete: (result) => resolve(result),
+    });
+  });
+}
 app.post('/api/agent/enqueue', requireAuth, (req, res) => {
   const body = req.body || {};
   const text = String(body.text || body.prompt || '').trim();
@@ -3742,12 +3764,16 @@ async function runWorker(s) {
     if (msg.parentId) s.parentId = msg.parentId;
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
-    s.curText = ''; s.curTools = []; s.curParts = []; s.canceled = false; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
+    s.curText = ''; s.curTools = []; s.curParts = []; s.canceled = false; s.lastTurnError = ''; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
     if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
     await runTurn(s, msg);
+    if (typeof msg.onComplete === 'function') {
+      const text = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
+      try { msg.onComplete({ text, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
+    }
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
@@ -3837,7 +3863,8 @@ function runTurn(s, msg) {
           ensureFirstPromptLanded(s, rec, prompt); // re-inject if a still-settling TUI dropped the first paste
         }
       } catch (e) {
-        bcast(s, { type: 'error', msg: String(e && e.message || e).slice(-400) });
+        s.lastTurnError = String(e && e.message || e).slice(-400);
+        bcast(s, { type: 'error', msg: s.lastTurnError });
         finish();
       }
     })();
@@ -3957,13 +3984,13 @@ function runCodexTurn(s, msg, resolve) {
         const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
         bcast(s, ev);
       } else if (ev.type === 'notice' || ev.type === 'error') {
-        if (ev.type === 'error') lastError = cleanCodexError(ev.msg);
+      if (ev.type === 'error') { lastError = cleanCodexError(ev.msg); s.lastTurnError = lastError; }
         bcast(s, ev);
       }
     },
   });
 s.proc.on('close', finish);
-  s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); bcast(s, { type: 'error', msg: lastError }); finish(); });
+  s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
 // Gemini now runs as a REAL agent via the `gemini` CLI (see gemini-exec-engine.mjs), so a
 // turn streams the same {session,text,tool,tool_result,context} events Codex does — handle

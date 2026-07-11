@@ -280,6 +280,33 @@ that holds the box's controls.
   and asserts the spoken answer) — both against an isolated test instance; see
   `CLAUDE.md` for the isolated-HOME pattern.
 
+### Experimental CLI adapter mode
+
+Set `VOICE_ASSISTANT_MODE=adapter` to replace Realtime's reasoning/tool loop with a
+persistent Box **Claude Code** or **Codex** session. The phone records one detected
+utterance, Box transcribes it through its existing Deepgram → ElevenLabs fallback,
+sends the text to that normal CLI session, then speaks the bounded response through
+OpenAI HTTP TTS. `VOICE_ADAPTER_AGENT=claude|codex` chooses the engine.
+
+The adapter deliberately reuses the normal Box session runners, so session context,
+tool visibility, Codex sandbox settings, Claude remote-control ownership, and existing
+tool safeguards remain in force. It adds a voice-aware prompt: concise spoken answers,
+read-only handling for status/explanation requests, and explicit confirmation before
+destructive, external, privacy-sensitive, financial, deployment, or irreversible work.
+
+This is a turn-based experiment, not a streaming duplex call. Expect STT + CLI startup/
+tool work + TTS latency (typically several seconds; Codex or tool-heavy turns can take
+much longer). One call has one in-flight turn; after `VOICE_ADAPTER_MAX_TURN_MS` (default
+180s), it speaks a pending status while the same CLI session continues. Keep spoken
+answers under `VOICE_ADAPTER_MAX_RESPONSE_CHARS` (default 1400) to avoid slow TTS and
+context bloat. The persistent CLI session still accumulates its full provider context;
+the response cap limits what is spoken, not the agent's context window. Start a new call
+when changing subjects after a long session, or before switching `VOICE_ADAPTER_AGENT`.
+
+Run `npm run test:voice-adapter` for the configuration/prompt/VAD helpers. The existing
+`smoke:voice` is Realtime-WebSocket specific; adapter integration should be exercised
+against an isolated-HOME server with a real or fixture WAV, never the production state.
+
 ## Concierge (let a computer-use agent do the boring setup)
 
 Don't want to hunt for API keys or rent a server yourself? The [`concierge/`](concierge/)
