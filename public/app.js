@@ -6,7 +6,7 @@ let ws = null;
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off' },
+  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'high', sandbox: 'off' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
@@ -3086,7 +3086,7 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-sol' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-terra' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
   const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
@@ -3641,6 +3641,9 @@ const CODEX_EFFORTS = [
   { id: 'xhigh', label: 'XHigh', desc: 'Maximum depth' },
   { id: 'max', label: 'Max', desc: 'Hardest tasks' },
 ];
+const codexEffortsForModel = (model) => String(model || '').startsWith('gpt-5.6')
+  ? CODEX_EFFORTS.filter((effort) => effort.id !== 'max')
+  : CODEX_EFFORTS;
 const CLAUDE_MODELS = [
   { id: 'opus', label: 'Opus 4.8', desc: 'Default — 1M context, most capable' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
@@ -3663,9 +3666,13 @@ function openModelSheet() {
   const rows = [];
   if (agent === 'codex') {
     rows.push({ ic: '', label: 'Model', desc: 'Applies to the next Codex turn in this Box chat', fn: () => openModelSheet() });
-    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.codex.model = m.id; sendSettings(); toast(`Codex model: ${m.label}`); openModelSheet(); }));
+    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
+      cur.settings.codex.model = m.id;
+      if (m.id.startsWith('gpt-5.6') && cur.settings.codex.reasoningEffort === 'max') cur.settings.codex.reasoningEffort = 'xhigh';
+      sendSettings(); toast(`Codex model: ${m.label}`); openModelSheet();
+    }));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
-    for (const e of CODEX_EFFORTS) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.codex.reasoningEffort = e.id; sendSettings(); toast(`Codex effort: ${e.label}`); openModelSheet(); }));
+    for (const e of codexEffortsForModel(cfg.model)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.codex.reasoningEffort = e.id; sendSettings(); toast(`Codex effort: ${e.label}`); openModelSheet(); }));
     return openSheet('Codex model', rows);
   }
   if (agent === 'gemini') {
@@ -3682,9 +3689,13 @@ function openModelSheet() {
   }
   if (agent === 'mac') {
     rows.push({ ic: '', label: 'Model', desc: 'Codex model used on the next Computer Use turn (runs on your Mac)', fn: () => openModelSheet() });
-    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.mac.model = m.id; sendSettings(); toast(`Computer Use model: ${m.label}`); openModelSheet(); }));
+    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
+      cur.settings.mac.model = m.id;
+      if (m.id.startsWith('gpt-5.6') && cur.settings.mac.reasoningEffort === 'max') cur.settings.mac.reasoningEffort = 'xhigh';
+      sendSettings(); toast(`Computer Use model: ${m.label}`); openModelSheet();
+    }));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
-    for (const e of CODEX_EFFORTS) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.mac.reasoningEffort = e.id; sendSettings(); toast(`Computer Use effort: ${e.label}`); openModelSheet(); }));
+    for (const e of codexEffortsForModel(cfg.model)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.mac.reasoningEffort = e.id; sendSettings(); toast(`Computer Use effort: ${e.label}`); openModelSheet(); }));
     return openSheet('Computer Use model', rows);
   }
   rows.push({ ic: '', label: 'Model', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
