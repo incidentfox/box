@@ -21,7 +21,9 @@ export function voiceAdapterVAD({ threshold, silenceMs, minSpeechMs } = {}) {
   return {
     // Browser RMS is 0..1. This is intentionally conservative for a moving car;
     // callers may tune it per deployment without changing the client bundle.
-    threshold: Math.min(0.2, Math.max(0.005, num(threshold, 0.025))),
+    // Phone browser waveform RMS is commonly 0.003–0.02 for ordinary speech. The
+    // original 0.025 floor made adapter capture effectively deaf on many devices.
+    threshold: Math.min(0.2, Math.max(0.001, num(threshold, 0.004))),
     silenceMs: Math.max(350, Math.min(3000, Math.round(num(silenceMs, 900)))),
     minSpeechMs: Math.max(200, Math.min(5000, Math.round(num(minSpeechMs, 350)))),
   };
