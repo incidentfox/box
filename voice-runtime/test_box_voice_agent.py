@@ -19,9 +19,10 @@ def test_text_and_default_voice_are_available(monkeypatch):
 
 def test_deepgram_utterance_end_satisfies_provider_minimum():
     assert deepgram_options()["utterance_end_ms"] >= 1000
+    assert deepgram_options()["endpointing_ms"] >= 500
 
 
 def test_turn_timing_defaults_allow_a_natural_pause(monkeypatch):
     monkeypatch.delenv("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", raising=False)
     monkeypatch.delenv("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", raising=False)
-    assert turn_timing_options() == (0.65, 3.0)
+    assert turn_timing_options() == (1.2, 4.5)
