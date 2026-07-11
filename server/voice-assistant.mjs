@@ -2656,6 +2656,18 @@ ${voiceAutonomyPolicy()}
     try { return await synthesizeAdapterSpeech(text); }
     catch (e) { return { tts_error: String((e && e.message) || e).slice(0, 240) }; }
   }
+  // Low-latency transcript preview for adapter mode. It intentionally DOES NOT touch
+  // a CLI session: a partial utterance may change, and Codex/Claude turns are atomic.
+  // The browser sends a rolling MediaRecorder blob about once a second, paints this
+  // response immediately, then submits the settled final transcript to the agent.
+  app.post('/api/voice/adapter/transcribe', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
+    if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
+    if (!req.file) return res.status(400).json({ error: 'audio is required' });
+    try {
+      const stt = await transcribe(req.file.buffer, req.file.mimetype, req.file.originalname);
+      res.json({ text: String(stt && stt.text || '').trim(), stt_model: stt && stt.model || '' });
+    } catch (e) { res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) }); }
+  });
   app.post('/api/voice/adapter/turn', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
     if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
