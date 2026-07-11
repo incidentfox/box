@@ -46,7 +46,9 @@ def deepgram_options() -> dict[str, Any]:
         "language": "multi",
         "interim_results": True,
         "smart_format": True,
-        "endpointing_ms": 100,
+        # Let streaming STT retain a phrase through a short pause. The semantic
+        # detector decides when it is a real handoff, not this acoustic hint.
+        "endpointing_ms": 500,
         "utterance_end_ms": 1000,
     }
 
@@ -59,8 +61,8 @@ def turn_timing_options() -> tuple[float, float]:
         except ValueError:
             return default
 
-    minimum = min(2.0, max(0.4, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 0.65)))
-    maximum = min(6.0, max(minimum + 0.25, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 3.0)))
+    minimum = min(3.0, max(0.8, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 1.2)))
+    maximum = min(8.0, max(minimum + 0.5, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 4.5)))
     return minimum, maximum
 
 
@@ -108,7 +110,7 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.65, activation_threshold=0.5)
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.8, activation_threshold=0.5)
 
 
 server.setup_fnc = prewarm
@@ -142,7 +144,10 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
         tts=tts.FallbackAdapter([primary_tts, fallback_tts], max_retry_per_tts=1),
         vad=ctx.proc.userdata["vad"],
-        turn_detection=inference.TurnDetector(),
+        # Force LiveKit's hosted v1 semantic detector instead of falling back to
+        # the compact local model. It judges whether a phrase is complete, so a
+        # dangling "if it…" stays open rather than becoming a Codex turn.
+        turn_detection=inference.TurnDetector(version="v1"),
         min_endpointing_delay=min_endpointing_delay,
         max_endpointing_delay=max_endpointing_delay,
         allow_interruptions=False,
