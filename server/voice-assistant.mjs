@@ -28,7 +28,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import multer from 'multer';
-import { readCodexSessionHistory } from './codex-context.mjs';
+import { codexMessageText, readCodexSessionHistory } from './codex-context.mjs';
 import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 import { createLocalFileResolver } from './local-file-resolver.mjs';
@@ -559,6 +559,136 @@ export function voiceAgentOutputSummary(text, { maxItems = 3 } = {}) {
   return summary.headline || '(no text output captured)';
 }
 
+// ---- secret redaction (INC-1134) --------------------------------------------
+// Agent transcripts and tool outputs routinely contain live credentials — a printed
+// API key, a Bearer header, an .env dump, a DB URL with a password. ANY text the voice
+// layer surfaces (spoken back, paginated, or — worst — emailed OFF the box) must be
+// scrubbed first. redactSecrets is a pure, linear-time scrubber: it replaces each
+// secret span with a `[redacted:kind]` marker and reports how many it removed, so the
+// model can say "one credential was redacted" instead of reading a key aloud. It is
+// deliberately conservative on the generic "label = value" rule so ordinary prose
+// ("password: yes") is never mangled; the prefixed-token rules do the heavy lifting.
+const SECRET_RULES = [
+  // PEM private-key blocks first, so their base64 body isn't half-eaten by later rules.
+  { kind: 'private-key', re: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g },
+  // Provider keys / tokens with distinctive prefixes (anthropic before openai so a
+  // `sk-ant-…` key is labelled correctly and not swallowed by the generic `sk-` rule).
+  { kind: 'anthropic-key', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+  { kind: 'openai-key', re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g },
+  { kind: 'stripe-key', re: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}/g },
+  { kind: 'github-token', re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g },
+  { kind: 'github-pat', re: /\bgithub_pat_[A-Za-z0-9_]{20,}/g },
+  { kind: 'slack-token', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+  { kind: 'google-oauth', re: /\bya29\.[A-Za-z0-9._-]{20,}/g },
+  { kind: 'google-api-key', re: /\bAIza[0-9A-Za-z_-]{35}/g },
+  { kind: 'aws-access-key', re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|AIPA)[0-9A-Z]{16}/g },
+  { kind: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  // Authorization schemes (Bearer/Basic/Token <blob>) — keep the scheme, drop the blob.
+  { kind: 'bearer', re: /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{16,}/gi, replace: (_m, scheme) => `${scheme} [redacted:bearer]` },
+  // Connection URLs (postgres/mysql/mongodb/redis/amqp/http) with inline creds → drop
+  // just the password, leaving the rest of the URL legible.
+  { kind: 'conn-url-pw', re: /\b((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?|https?):\/\/[^:@\s/]+:)([^@\s/]{3,})@/gi, replace: (_m, head) => `${head}[redacted:password]@` },
+  // Labeled secrets: <label> = <value>. Value must be quoted OR ≥12 credential-ish
+  // chars, so "password: yes" and normal sentences are left untouched.
+  { kind: 'labeled-secret', re: /\b((?:api[_-]?keys?|secret(?:[_-]?(?:key|access[_-]?key))?|access[_-]?key|auth[_-]?token|client[_-]?secret|passwords?|passwd|tokens?)\s*[:=]\s*)(?:"[^"\n]{3,}"|'[^'\n]{3,}'|[A-Za-z0-9_\-./+=]{12,})/gi, replace: (_m, head) => `${head}[redacted:secret]` },
+];
+
+export function redactSecrets(input) {
+  let text = String(input == null ? '' : input);
+  if (!text) return { text, redactions: 0 };
+  let redactions = 0;
+  for (const rule of SECRET_RULES) {
+    text = text.replace(rule.re, (...args) => {
+      redactions++;
+      return typeof rule.replace === 'function' ? rule.replace(...args) : `[redacted:${rule.kind}]`;
+    });
+  }
+  return { text, redactions };
+}
+
+// ---- full-conversation transcript access (INC-1134) --------------------------
+// read_session_output surfaces only the agent's LAST message. To answer "what did we
+// decide earlier / read me the whole thread" the voice model used to have to MESSAGE
+// the agent and ask it to summarize ITSELF — a slow, lossy round-trip that also risked
+// steering a working agent. These pure helpers turn a persisted session (a Claude
+// JSONL, or a Codex/mac sidecar message array) into an ordered [{role,text,ts}]
+// transcript the read_session_history tool can page through read-only, secrets scrubbed.
+
+// Ordered user+assistant TEXT turns from a Claude session JSONL string. Mirrors the box
+// history parser: tool-result-only turns, thinking blocks, image markers, and system/
+// meta user lines (leading '<' or 'Caveat:') are dropped; only human-readable text stays.
+export function claudeTurnsFromJsonl(raw) {
+  const turns = [];
+  for (const line of String(raw == null ? '' : raw).split('\n')) {
+    if (!line.trim()) continue;
+    let o; try { o = JSON.parse(line); } catch { continue; }
+    if ((o.type !== 'user' && o.type !== 'assistant') || !o.message) continue;
+    const c = o.message.content;
+    let text = '';
+    if (typeof c === 'string') text = c;
+    else if (Array.isArray(c)) {
+      if (c.length && c.every((b) => b && b.type === 'tool_result')) continue; // tool echo only
+      text = c.filter((b) => b && b.type === 'text' && b.text).map((b) => b.text).join('\n');
+    }
+    text = text.replace(/^\[Image attached at .+?\]\n?/gm, '').trim();
+    if (!text) continue;
+    if (o.type === 'user' && (text.startsWith('<') || text.startsWith('Caveat:'))) continue;
+    turns.push({ role: o.message.role === 'assistant' || o.type === 'assistant' ? 'assistant' : 'user', text, ts: o.timestamp || null });
+  }
+  return turns;
+}
+
+// Ordered turns from a Codex/mac sidecar message array (role + content|parts|text).
+export function codexTurnsFromMessages(messages) {
+  const turns = [];
+  for (const m of Array.isArray(messages) ? messages : []) {
+    if (!m) continue;
+    const role = m.role || m.type;
+    if (role !== 'user' && role !== 'assistant') continue;
+    const text = codexMessageText(m);
+    if (text) turns.push({ role, text, ts: m.ts || m.timestamp || m.createdAt || m.created || null });
+  }
+  return turns;
+}
+
+// Turn an ordered transcript into a voice-ready view: secrets redacted, size-bounded,
+// and either the user PROMPTS (compact recall of "what was asked earlier") or the FULL
+// ordered conversation paginated whole-line so no turn is cut mid-sentence. Deterministic
+// and fast — no extra model call, no round-trip to the live agent.
+export function buildTranscriptView(turns, {
+  include = 'full', page = 1, pageSize = 1800, limit = 80, maxCharsPerTurn = 2000, redact = true,
+} = {}) {
+  const all = (Array.isArray(turns) ? turns : []).filter((t) => t && t.text);
+  let redactions = 0;
+  const scrub = (s) => {
+    if (!redact) return String(s == null ? '' : s);
+    const r = redactSecrets(s); redactions += r.redactions; return r.text;
+  };
+  const cap = Math.max(80, Math.min(8000, Math.floor(Number(maxCharsPerTurn) || 2000)));
+
+  if (String(include) === 'prompts') {
+    const lim = Math.max(1, Math.min(200, Math.floor(Number(limit) || 80)));
+    const users = all.filter((t) => t.role === 'user');
+    const kept = users.slice(-lim);
+    const prompts = kept.map((t, i) => ({ index: i + 1, ts: t.ts || null, text: short(scrub(t.text), cap) }));
+    return {
+      mode: 'prompts',
+      prompts,
+      prompt_count: prompts.length,
+      total_prompts: users.length,
+      truncated: users.length > kept.length,
+      turn_count: all.length,
+      redactions,
+    };
+  }
+
+  // full: render a role-labelled transcript and paginate it whole-line so a single call
+  // returns one readable page plus next_page to keep going through the whole thread.
+  const rendered = all.map((t) => `${t.role === 'assistant' ? 'assistant' : 'user'}: ${short(scrub(t.text), cap)}`).join('\n\n');
+  const pg = paginateText(rendered, { page, pageSize });
+  return { mode: 'full', turn_count: all.length, redactions, ...pg };
+}
+
 export function voiceAgentStartKey({ scope = '', agent = 'claude', project = '', title = '', task = '' } = {}) {
   const topic = String(title || task).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return `${String(scope || 'global').toLowerCase()}|${String(agent || 'claude').toLowerCase()}|${String(project || '').toLowerCase()}|${topic}`;
@@ -842,6 +972,37 @@ export function registerVoiceAssistant(app, ctx) {
   }
   function lastAgentText(sessionId, agent, chars = 600) {
     return short(lastAgentFull(sessionId, agent), chars);
+  }
+
+  // Read a Claude session JSONL for full-transcript access (read_session_history /
+  // request_full_artifact). Reads a bounded tail (default 4MB — big enough for a very
+  // long thread) so a giant log can't blow memory; when the file is bigger than the
+  // window we drop the partial first line and flag that older turns were omitted (the
+  // model can still point Jimmy at export_path / email the complete file).
+  function readClaudeTranscriptRaw(sessionId, maxBytes = 4 * 1024 * 1024) {
+    try {
+      const file = findSessionFile(sessionId);
+      if (!file) return { raw: '', truncated: false };
+      const st = statSync(file);
+      const len = Math.min(st.size, maxBytes);
+      const buf = Buffer.alloc(len);
+      const fd = openSync(file, 'r'); readSync(fd, buf, 0, len, st.size - len); closeSync(fd);
+      let raw = buf.toString('utf8');
+      const truncated = len < st.size;
+      if (truncated) { const nl = raw.indexOf('\n'); if (nl >= 0) raw = raw.slice(nl + 1); }
+      return { raw, truncated };
+    } catch { return { raw: '', truncated: false }; }
+  }
+
+  // Ordered [{role,text,ts}] transcript for any readable agent, plus whether the tail
+  // was truncated. claude/gemini/agy live in JSONLs; codex/mac in the message sidecar.
+  function loadSessionTurns(sessionId, agent) {
+    if (agent === 'codex' || agent === 'mac') {
+      const msgs = (loadCodexMessages && loadCodexMessages(sessionId)) || [];
+      return { turns: codexTurnsFromMessages(msgs), truncated: false, source: 'codex_sidecar' };
+    }
+    const { raw, truncated } = readClaudeTranscriptRaw(sessionId);
+    return { turns: claudeTurnsFromJsonl(raw), truncated, source: 'claude_jsonl' };
   }
 
   // ---- background tasks + proactive updates ---------------------------------
@@ -1367,17 +1528,18 @@ export function registerVoiceAssistant(app, ctx) {
         if (hits.length > 1 && hits[1] && hits[0].title === hits[1].title) hits.length = 1;
         const s = hits[0];
         const others = hits.slice(1, 4).map((x) => short(x.title, 50));
-        const full = lastAgentFull(s.id, s.agent);
+        // Scrub any credential before it reaches the model / TTS.
+        const full = redactSecrets(lastAgentFull(s.id, s.agent)).text;
         return {
           match: sessBrief(s),
-          ...voiceSessionOutputPreview(full, s.preview),
+          ...voiceSessionOutputPreview(full, redactSecrets(s.preview).text),
           ...(others.length ? { other_candidates: others } : {}),
         };
       },
     },
     {
       name: 'read_session_output',
-      description: "Fetch an agent session's COMPLETE latest output — the full ranked list / long report that check_session only previews. Works for claude AND codex/mac sessions. mode:'summary' (default) returns the item count plus the top items (say the count, then the top few, offer the rest); mode:'full' returns the whole output one page at a time (pass page:2, 3… using next_page to continue). Use when Jimmy asks for 'the full list / all of them / everything' from an agent, or when a reply was cut off. Never claim you have a full list off a truncated preview. Preamble: \"Pulling the full list.\"",
+      description: "Fetch an agent session's COMPLETE latest output — the full ranked list / long report that check_session only previews. Works for claude AND codex/mac sessions. Secrets are auto-redacted. mode:'summary' (default) returns the item count plus the top items (say the count, then the top few, offer the rest); mode:'full' returns the whole output one page at a time (pass page:2, 3… using next_page to continue). Use when Jimmy asks for 'the full list / all of them / everything' from an agent, or when a reply was cut off. Never claim you have a full list off a truncated preview. For the WHOLE conversation (not just the latest message) use read_session_history. Preamble: \"Pulling the full list.\"",
       parameters: {
         type: 'object',
         properties: {
@@ -1401,10 +1563,14 @@ export function registerVoiceAssistant(app, ctx) {
           return { need_disambiguation: hits.slice(0, 4).map(sessBrief) };
         }
         const s = hits[0];
-        const full = lastAgentFull(s.id, s.agent);
+        const transcript_ref = { session_id: s.id, agent: s.agent || 'claude', export_path: `/api/sessions/${s.id}/export` };
+        // Redact credentials from the captured output before it is summarized/paged/spoken.
+        const red = redactSecrets(lastAgentFull(s.id, s.agent));
+        const full = red.text;
+        const redactedFields = red.redactions ? { secrets_redacted: red.redactions } : {};
         if (!full) {
-          const preview = short(s.preview, 200);
-          return { match: sessBrief(s), error: 'no readable text output captured yet for this session', ...(preview ? { preview } : {}) };
+          const preview = short(redactSecrets(s.preview).text, 200);
+          return { match: sessBrief(s), error: 'no readable text output captured yet for this session', transcript_ref, ...(preview ? { preview } : {}) };
         }
         const items = detectListItems(full);
         if (String(mode) === 'full') {
@@ -1412,81 +1578,101 @@ export function registerVoiceAssistant(app, ctx) {
           return {
             match: sessBrief(s), source: s.agent || 'claude', mode: 'full',
             ...(items.length ? { item_count: items.length } : {}),
-            ...pg,
+            ...pg, ...redactedFields, transcript_ref,
           };
         }
         const summary = summarizeAgentOutput(full, { maxItems: max_items });
         return {
           match: sessBrief(s), source: s.agent || 'claude', mode: 'summary',
-          ...summary,
+          ...summary, ...redactedFields, transcript_ref,
           hint: summary.kind === 'list'
             ? 'Say item_count, then top_items; for the rest call read_session_output mode:full.'
-            : 'For the complete text call read_session_output mode:full (paginated).',
+            : 'For the complete text call read_session_output mode:full (paginated). For the whole conversation use read_session_history.',
         };
       },
     },
     {
       name: 'read_session_history',
-      description: 'Read-only Codex helper: find one Codex session by title/topic/id and return its ordered user prompts from persisted history. Use when asked what was requested earlier, what prompts were sent, or to recover full Codex session context. Logs exact paths and queries used. Preamble: "Reading the session history."',
+      description: "Read-only transcript reader: find one agent session (claude, codex, or mac) by title/topic/id and read its PERSISTED conversation WITHOUT messaging the live agent — so you get the full context yourself instead of asking the agent to summarize itself. include:'full' (default) returns the ordered user+assistant turns, paginated (pass page:2,3… using next_page) so you can walk the whole thread; include:'prompts' returns just the user prompts (\"what did I ask earlier\"). Secrets (API keys, tokens, passwords) are auto-redacted. Also returns transcript_ref (session_id + export_path) so you can hand Jimmy a reliable link, and request_full_artifact transcript:true emails the complete conversation. Logs the exact paths/queries used. Preamble: \"Reading the session history.\"",
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Words from the Codex session title/topic, or the full session id' },
-          limit: { type: 'number', description: 'Maximum prompts to return, default 80, max 200' },
+          query: { type: 'string', description: 'Words from the session title/topic, or the full session id' },
+          include: { type: 'string', enum: ['full', 'prompts'], description: "full (default) = ordered user+assistant turns, paginated; prompts = just the user prompts that were sent" },
+          page: { type: 'number', description: 'For include:full — 1-based page (default 1). Use next_page from the previous call to continue.' },
+          page_size: { type: 'number', description: 'For include:full — characters per page (default 1800, max 6000).' },
+          limit: { type: 'number', description: 'For include:prompts — maximum prompts to return, default 80, max 200' },
         },
         required: ['query'],
       },
-      handler: async ({ query, limit = 80 }) => {
+      handler: async ({ query, include = 'full', page = 1, page_size = 1800, limit = 80 } = {}) => {
         const { hits, all } = matchSession(query);
         if (!hits.length) {
           const sug = sessionSuggestions(query, all);
           return { error: `no session matches "${query}"`, ...(sug.length ? { did_you_mean: sug.map(sessBrief) } : {}) };
         }
-        const codexHits = hits.filter((s) => s.agent === 'codex');
-        if (!codexHits.length) return {
-          error: `matched "${hits[0].title || hits[0].id}", but it is a ${hits[0].agent || 'claude'} session; this read-only helper currently supports Codex sessions`,
-          matched: hits.slice(0, 3).map(sessBrief),
-        };
-        if (codexHits.length > 1 && codexHits[0].title !== codexHits[1].title) {
-          return { need_disambiguation: codexHits.slice(0, 4).map(sessBrief) };
+        if (hits.length > 1 && hits[0].title !== hits[1].title) {
+          return { need_disambiguation: hits.slice(0, 4).map(sessBrief) };
         }
-        const s = codexHits[0];
-        const maxPrompts = Math.max(1, Math.min(200, Number(limit) || 80));
-        const messages = loadCodexMessages ? loadCodexMessages(s.id) : [];
-        const result = await readCodexSessionHistory({
-          sessionId: s.id,
-          query,
-          codexHome,
-          messages,
-          sidecarPath: codexMessagePath ? codexMessagePath(s.id) : '',
-          limit: maxPrompts,
-        });
+        const s = hits[0];
+        const agent = s.agent || 'claude';
+        const includeMode = String(include) === 'prompts' ? 'prompts' : 'full';
+        const transcript_ref = { session_id: s.id, agent, export_path: `/api/sessions/${s.id}/export` };
+        const auditLog = { log: SESSION_HISTORY_AUDIT_FILE, mode: 'read-only', writes: false };
+        const email_hint = 'To send Jimmy the complete conversation, call request_full_artifact with transcript:true.';
+
+        // Codex + "prompts": keep the well-tested rollout+sidecar prompt reader (it covers
+        // prompts that predate the box sidecar and carries the richer path/permission audit).
+        if (agent === 'codex' && includeMode === 'prompts') {
+          const maxPrompts = Math.max(1, Math.min(200, Number(limit) || 80));
+          const messages = loadCodexMessages ? loadCodexMessages(s.id) : [];
+          const result = await readCodexSessionHistory({
+            sessionId: s.id, query, codexHome, messages,
+            sidecarPath: codexMessagePath ? codexMessagePath(s.id) : '', limit: maxPrompts,
+          });
+          let redactions = 0;
+          const prompts = (result.prompts || []).map((p) => {
+            const r = redactSecrets(p.text); redactions += r.redactions; return { ...p, text: r.text };
+          });
+          writeSessionHistoryAudit({
+            tool: 'read_session_history', query, match: sessBrief(s), agent, include: includeMode,
+            source: result.source, count: result.count, total: result.total, truncated: result.truncated,
+            redactions, unavailable: result.unavailable || '', audit: result.audit,
+          });
+          if (result.unavailable) return {
+            match: sessBrief(s), agent, source: result.source, prompts: [], error: result.unavailable,
+            transcript_ref, email_hint, audit: { ...auditLog, ...result.audit },
+          };
+          return {
+            match: sessBrief(s), agent, source: result.source, mode: 'prompts',
+            prompt_count: result.count, total_prompts_found: result.total, truncated: result.truncated,
+            secrets_redacted: redactions, prompts, transcript_ref, email_hint,
+            audit: { ...auditLog, permission: result.audit.permission, queries: result.audit.queries, paths: result.audit.paths },
+          };
+        }
+
+        // Everything else (claude any mode; any agent, full conversation): read the ordered
+        // transcript straight from the persisted file/sidecar, redact, and paginate.
+        const { turns, truncated: tailTruncated, source } = loadSessionTurns(s.id, agent);
+        const view = buildTranscriptView(turns, { include: includeMode, page, pageSize: page_size, limit });
         writeSessionHistoryAudit({
-          tool: 'read_session_history',
-          query,
-          match: sessBrief(s),
-          source: result.source,
-          count: result.count,
-          total: result.total,
-          truncated: result.truncated,
-          unavailable: result.unavailable || '',
-          audit: result.audit,
+          tool: 'read_session_history', query, match: sessBrief(s), agent, include: includeMode,
+          source, turns: turns.length, redactions: view.redactions,
+          ...(view.page ? { page: view.page, total_pages: view.total_pages } : {}),
+          older_turns_omitted: !!tailTruncated,
         });
-        if (result.unavailable) return {
-          match: sessBrief(s),
-          source: result.source,
-          prompts: [],
-          error: result.unavailable,
-          audit: { log: SESSION_HISTORY_AUDIT_FILE, permission: result.audit.permission, queries: result.audit.queries, paths: result.audit.paths },
+        if (!turns.length) return {
+          match: sessBrief(s), agent, source,
+          error: agent === 'gemini' || agent === 'agy'
+            ? `matched "${s.title || s.id}" (${agent}); transcript reading currently supports claude, codex, and mac sessions`
+            : 'no readable conversation turns captured yet for this session',
+          transcript_ref, audit: auditLog,
         };
         return {
-          match: sessBrief(s),
-          source: result.source,
-          prompt_count: result.count,
-          total_prompts_found: result.total,
-          truncated: result.truncated,
-          prompts: result.prompts,
-          audit: { log: SESSION_HISTORY_AUDIT_FILE, permission: result.audit.permission, queries: result.audit.queries, paths: result.audit.paths },
+          match: sessBrief(s), agent, source, ...view,
+          secrets_redacted: view.redactions,
+          ...(tailTruncated ? { older_turns_omitted: true, note: 'Only the most recent portion of a long transcript is shown; email the complete file with request_full_artifact transcript:true.' } : {}),
+          transcript_ref, email_hint, audit: auditLog,
         };
       },
     },
@@ -1938,13 +2124,19 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'request_full_artifact',
-      description: 'Email the COMPLETE artifact to Jimmy only when he explicitly asks to send/email it. Never call because output is long, truncated, or because he asked for a spoken explanation; use read_session_output or linear_issue instead. Identify by task id, ticket, or session/topic.',
-      parameters: { type: 'object', properties: { ref: { type: 'string', description: 'Task id, Linear ticket id, or words identifying the session/task/topic' } }, required: ['ref'] },
-      handler: async ({ ref }) => {
+      description: "Email the COMPLETE artifact to Jimmy only when he explicitly asks to send/email it. Never call because output is long, truncated, or because he asked for a spoken explanation; use read_session_output or read_session_history instead. Identify by task id, ticket, or session/topic. Set transcript:true when he wants the WHOLE conversation emailed, not just the latest output. Secrets are auto-redacted before sending.",
+      parameters: { type: 'object', properties: { ref: { type: 'string', description: 'Task id, Linear ticket id, or words identifying the session/task/topic' }, transcript: { type: 'boolean', description: 'true = email the full ordered conversation (all turns) for the matched session, not just its latest output' } }, required: ['ref'] },
+      handler: async ({ ref, transcript = false }) => {
         const raw = String(ref || '').trim();
         if (!raw) return { error: 'tell me which task or session you want the full output of' };
         const prOf = (text) => (String(text).match(/https?:\/\/github\.com\/\S+?\/pull\/\d+/) || [])[0] || '';
-        let title = '', body = '';
+        // Render an ordered conversation to markdown for the transcript path.
+        const transcriptMd = (sessionId, agent) => {
+          const { turns } = loadSessionTurns(sessionId, agent);
+          if (!turns.length) return '';
+          return turns.map((t) => `## ${t.role === 'assistant' ? 'Agent' : 'Jimmy'}\n\n${t.text}`).join('\n\n');
+        };
+        let title = '', body = '', sessionId = '', agent = '', usedTranscript = false;
         // 1) a background task, by exact id or by title words (most recent wins)
         let task = TASKS.get(raw) || TASKS.get(raw.toLowerCase());
         if (!task) {
@@ -1954,27 +2146,38 @@ export function registerVoiceAssistant(app, ctx) {
         }
         if (task) {
           title = task.title;
-          if (task.file && existsSync(task.file)) { try { body = readFileSync(task.file, 'utf8'); } catch {} }
-          if (!body) body = task.fullOutput || task.summary || '';
-          if (!body && task.sessionId) body = lastAgentText(task.sessionId, task.agent, 100000);
-          if (!body && task.key) { try { const s = rt(task.key); body = lastAgentText(s.sessionId, s.agent, 100000); } catch {} }
+          sessionId = task.sessionId || '';
+          agent = task.agent || '';
+          if (!sessionId && task.key) { try { const s = rt(task.key); sessionId = s.sessionId; agent = s.agent; } catch {} }
+          if (transcript && sessionId) { body = transcriptMd(sessionId, agent); usedTranscript = !!body; }
+          if (!body) {
+            if (task.file && existsSync(task.file)) { try { body = readFileSync(task.file, 'utf8'); } catch {} }
+            if (!body) body = task.fullOutput || task.summary || '';
+            if (!body && sessionId) body = lastAgentText(sessionId, agent, 100000);
+          }
           if (!body) return { error: `"${short(title, 50)}" has no output captured yet — it may still be starting up` };
         } else {
           // 2) a live agent session, by fuzzy match
-          const { hits } = matchSession(raw);
+          const { hits } = matchSession(raw, { includeArchived: true });
           if (!hits.length) return { error: `no task or session matches "${raw}"` };
           const s = hits[0];
-          title = s.title;
-          body = lastAgentText(s.id, s.agent, 100000);
+          title = s.title; sessionId = s.id; agent = s.agent || 'claude';
+          if (transcript) { body = transcriptMd(sessionId, agent); usedTranscript = !!body; }
+          if (!body) body = lastAgentText(sessionId, agent, 100000);
           if (!body) return { error: `found "${short(title, 50)}" but it has no readable output yet` };
         }
+        const kind = usedTranscript ? 'transcript' : 'output';
         const prUrl = prOf(body);
-        if (DRYRUN) return { emailed: true, dry_run: true, subject: `Full output: ${short(title, 60)}`, chars: body.length, ...(prUrl ? { pr_url: prUrl } : {}) };
-        const subject = `Full output: ${short(title, 70)}`;
-        const md = `# ${title}\n\n${prUrl ? `PR: ${prUrl}\n\n` : ''}${clip(body, 60000)}\n`;
+        // Scrub credentials before anything leaves the box.
+        const red = redactSecrets(body);
+        body = red.text;
+        const label = kind === 'transcript' ? 'Full transcript' : 'Full output';
+        if (DRYRUN) return { emailed: true, dry_run: true, kind, subject: `${label}: ${short(title, 60)}`, chars: body.length, secrets_redacted: red.redactions, ...(sessionId ? { session_id: sessionId } : {}), ...(prUrl ? { pr_url: prUrl } : {}) };
+        const subject = `${label}: ${short(title, 70)}`;
+        const md = `# ${title}\n\n${prUrl ? `PR: ${prUrl}\n\n` : ''}${red.redactions ? `_(${red.redactions} credential${red.redactions === 1 ? '' : 's'} redacted)_\n\n` : ''}${clip(body, 60000)}\n`;
         const r = await emailJimmy(subject, md);
         if (r.code !== 0) return { error: short(r.out, 200) };
-        return { emailed: true, subject, chars: body.length, ...(prUrl ? { pr_url: prUrl } : {}) };
+        return { emailed: true, kind, subject, chars: body.length, secrets_redacted: red.redactions, ...(sessionId ? { session_id: sessionId } : {}), ...(prUrl ? { pr_url: prUrl } : {}) };
       },
     },
     {
@@ -2158,6 +2361,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 - Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND. Normal progress/completion events stay silent in the UI; do not switch topics to announce them. Only an explicit watcher or urgent failure is spoken as [TASK UPDATE]. If one arrives, give one self-contained sentence with purpose + impact + next step, then return to the active topic without asking a generic follow-up question.
 - Watchers — when Jimmy says "tell me when that finishes / when the PR is ready / if it needs me", call watch_session. It registers a server-side watcher; status changes arrive later as [TASK UPDATE] system messages through the normal notification queue.
 - Full lists & long outputs — when check_session flags output_truncated, it has already fetched the complete output and included full_summary. Use that summary immediately; do not announce truncation or ask Jimmy whether to fetch more. If his question needs exact wording or every item, call read_session_output mode:full immediately and page through next_page as needed. Never read a long artifact aloud. To put the WHOLE thing in Jimmy's inbox, call request_full_artifact (it emails him the complete artifact with the PR link).
+- Whole conversation, not just the latest reply — read_session_output/check_session only show an agent's LAST message. When Jimmy asks what an agent discussed earlier, what it was told, or for the full thread/context, call read_session_history (include:'full' pages the ordered turns; include:'prompts' recalls just what was asked). It reads the persisted transcript directly — NEVER message the agent to summarize itself, and never guess. Secrets are auto-redacted; it returns a transcript_ref you can cite. If he wants the entire conversation in his inbox, call request_full_artifact with transcript:true.
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
 - Self-echo: if a "user" message is your own last reply (or a fragment of it) echoed back — same words you just spoke — it is microphone loopback, NOT the user. Ignore it: call wait_for_user, do not answer it, and never treat it as a new instruction or a reason to stop or restart your answer.

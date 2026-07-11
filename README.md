@@ -255,6 +255,12 @@ that holds the box's controls.
   API), search your brain and Slack, take notes, email you, read your calendar. Long
   tasks run in the background and the assistant **announces them when they finish** —
   mid-conversation.
+- **Reads the whole conversation, not just the last reply**: ask "what did that agent
+  and I decide earlier?" and it reads the session's **persisted transcript** directly
+  (`read_session_history`, paginated) instead of messaging the agent to summarize itself.
+  Secrets are auto-redacted before anything is spoken or emailed, long threads paginate,
+  and every result carries a reliable `transcript_ref` (+ an email path for the complete
+  conversation) ([`docs/voice-session-history.md`](docs/voice-session-history.md), INC-1134).
 - **Built for bad cellular**: sessions auto-rotate before OpenAI's 60-minute cap and
   auto-reconnect after dead zones, folding the recent transcript into the new session
   so the conversation just continues.

@@ -6,8 +6,12 @@ import {
   agentFinishedLine,
   agentProgressLine,
   archiveSessionPolicy,
+  buildTranscriptView,
+  claudeTurnsFromJsonl,
+  codexTurnsFromMessages,
   detectListItems,
   paginateText,
+  redactSecrets,
   plainLanguageLabel,
   sanitizeVoiceEvent,
   spokenWorkLabel,
@@ -546,6 +550,147 @@ assert.equal(voiceBool('off'), false);
   assert.equal(sum.total_diag, 6);
   // Accepts an array of lines too.
   assert.equal(summarizeSelfEchoDiagnostics(lines.split('\n')).calls, 1);
+}
+
+// ---- secret redaction (INC-1134) --------------------------------------------
+{
+  // Each distinctively-prefixed credential is scrubbed and counted.
+  const cases = [
+    ['sk-ant-api03-abcDEF0123456789ghijKLMNOP', 'anthropic-key'],
+    ['sk-proj-abcDEF0123456789ghijKLMNOPqrst', 'openai-key'],
+    ['ghp_ABCDEFabcdef0123456789ABCDEFabcdef01', 'github-token'],
+    ['github_pat_11ABCDEFG0aBcDeFgHiJkL_mNoPqRsTuVwX', 'github-pat'],
+    ['xoxb-1234567890-abcdefABCDEF', 'slack-token'],
+    ['AKIAIOSFODNN7EXAMPLE', 'aws-access-key'],
+    ['AIza' + 'a1b2c3d4e5f6g7h8i9j0klmnopqrstuvwxy', 'google-api-key'], // AIza + exactly 35
+    ['sk_live_abcdef0123456789ABCDEF', 'stripe-key'],
+  ];
+  for (const [secret, kind] of cases) {
+    const r = redactSecrets(`here is the key ${secret} ok`);
+    assert.equal(r.redactions, 1, `expected one redaction for ${kind}`);
+    assert.ok(!r.text.includes(secret), `${kind} not scrubbed: ${r.text}`);
+    assert.match(r.text, new RegExp(`\\[redacted:${kind}\\]`));
+  }
+}
+{
+  // PEM private-key block (multiline) redacted whole; Bearer keeps the scheme.
+  const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEabc123\nDEFghi456\n-----END RSA PRIVATE KEY-----';
+  const rk = redactSecrets(`before\n${pem}\nafter`);
+  assert.equal(rk.redactions, 1);
+  assert.ok(!rk.text.includes('MIIEabc123'));
+  assert.match(rk.text, /before[\s\S]*\[redacted:private-key\][\s\S]*after/);
+
+  const rb = redactSecrets('Authorization: Bearer abcDEF0123456789ghij');
+  assert.equal(rb.redactions, 1);
+  assert.match(rb.text, /Bearer \[redacted:bearer\]/);
+
+  // DB URL keeps host/user, drops just the password.
+  const ru = redactSecrets('DATABASE_URL=postgres://appuser:s3cr3tP4ssw0rd@db.internal:5432/mindbill');
+  assert.ok(!ru.text.includes('s3cr3tP4ssw0rd'));
+  assert.match(ru.text, /postgres:\/\/appuser:\[redacted:password\]@db\.internal/);
+
+  // Labeled secret with a long value is scrubbed; the label stays for context.
+  const rl = redactSecrets('api_key = a1b2c3d4e5f6g7h8');
+  assert.equal(rl.redactions, 1);
+  assert.match(rl.text, /api_key = \[redacted:secret\]/);
+}
+{
+  // Ordinary prose is never mangled, and redaction is idempotent.
+  const prose = 'The password policy is fine and the token was rotated yesterday. Total: 42 bills.';
+  const r1 = redactSecrets(prose);
+  assert.equal(r1.redactions, 0);
+  assert.equal(r1.text, prose);
+  // Empty/nullish input is safe.
+  assert.deepEqual(redactSecrets(''), { text: '', redactions: 0 });
+  assert.deepEqual(redactSecrets(null), { text: '', redactions: 0 });
+  // Running it twice changes nothing (markers contain no secret shapes).
+  const once = redactSecrets('key: ghp_ABCDEFabcdef0123456789ABCDEFabcdef01').text;
+  assert.equal(redactSecrets(once).redactions, 0);
+}
+
+// ---- transcript turn extraction (INC-1134) ----------------------------------
+{
+  // Claude JSONL → ordered user+assistant text turns; tool-only + meta lines dropped.
+  const jsonl = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'rank the top prospects' }, timestamp: 't1' }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'hmm' }, { type: 'text', text: 'Here are the top three.' }] }, timestamp: 't2' }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'noise' }] } }), // tool-only → skip
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<command-message>meta</command-message>' } }), // meta → skip
+    'not json', // junk → skip
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Second reply.' }] }, timestamp: 't3' }),
+  ].join('\n');
+  const turns = claudeTurnsFromJsonl(jsonl);
+  assert.equal(turns.length, 3);
+  assert.deepEqual(turns.map((t) => t.role), ['user', 'assistant', 'assistant']);
+  assert.equal(turns[0].text, 'rank the top prospects');
+  assert.equal(turns[1].text, 'Here are the top three.'); // thinking block excluded
+  assert.equal(turns[0].ts, 't1');
+  // Empty / non-string input is safe.
+  assert.deepEqual(claudeTurnsFromJsonl(''), []);
+  assert.deepEqual(claudeTurnsFromJsonl(null), []);
+}
+{
+  // Codex sidecar messages (content string, parts array, plain text) → turns.
+  const msgs = [
+    { role: 'user', content: 'find billers on daisyBill', ts: 1 },
+    { role: 'assistant', parts: [{ t: 'text', text: 'Found 12 candidates.' }], ts: 2 },
+    { role: 'tool', content: 'ignored' },
+    { role: 'assistant', text: 'Ranked them by size.', ts: 3 },
+  ];
+  const turns = codexTurnsFromMessages(msgs);
+  assert.equal(turns.length, 3);
+  assert.equal(turns[0].text, 'find billers on daisyBill');
+  assert.equal(turns[1].text, 'Found 12 candidates.');
+  assert.equal(turns[2].text, 'Ranked them by size.');
+  assert.deepEqual(codexTurnsFromMessages(null), []);
+}
+
+// ---- buildTranscriptView (INC-1134) -----------------------------------------
+{
+  const turns = [
+    { role: 'user', text: 'first ask', ts: 1 },
+    { role: 'assistant', text: 'first answer', ts: 2 },
+    { role: 'user', text: 'second ask with a token ghp_ABCDEFabcdef0123456789ABCDEFabcdef01', ts: 3 },
+    { role: 'assistant', text: 'second answer', ts: 4 },
+  ];
+  // prompts mode: user turns only, redacted, in order.
+  const p = buildTranscriptView(turns, { include: 'prompts' });
+  assert.equal(p.mode, 'prompts');
+  assert.equal(p.prompt_count, 2);
+  assert.equal(p.total_prompts, 2);
+  assert.equal(p.turn_count, 4);
+  assert.equal(p.prompts[0].text, 'first ask');
+  assert.ok(!p.prompts[1].text.includes('ghp_'));
+  assert.equal(p.redactions, 1);
+
+  // prompts mode honours limit + truncated flag.
+  const many = Array.from({ length: 10 }, (_, i) => ({ role: 'user', text: `ask ${i}` }));
+  const lim = buildTranscriptView(many, { include: 'prompts', limit: 3 });
+  assert.equal(lim.prompt_count, 3);
+  assert.equal(lim.total_prompts, 10);
+  assert.equal(lim.truncated, true);
+  assert.equal(lim.prompts[2].text, 'ask 9'); // keeps the most recent
+
+  // full mode: paginated role-labelled transcript, secrets scrubbed, all turns counted.
+  const f = buildTranscriptView(turns, { include: 'full', pageSize: 200 });
+  assert.equal(f.mode, 'full');
+  assert.equal(f.turn_count, 4);
+  assert.equal(f.redactions, 1);
+  assert.ok(f.total_pages >= 1);
+  assert.equal(f.page, 1);
+  // Reassemble every page and confirm both roles + no leaked secret.
+  let joined = '';
+  for (let i = 1; i <= f.total_pages; i++) joined += (joined ? '\n' : '') + buildTranscriptView(turns, { include: 'full', page: i, pageSize: 200 }).text;
+  assert.match(joined, /user: first ask/);
+  assert.match(joined, /assistant: second answer/);
+  assert.ok(!joined.includes('ghp_'));
+
+  // redact:false leaves text intact (for callers that scrub elsewhere).
+  assert.equal(buildTranscriptView(turns, { include: 'prompts', redact: false }).redactions, 0);
+  // Empty input is safe.
+  const empty = buildTranscriptView([], { include: 'full' });
+  assert.equal(empty.turn_count, 0);
+  assert.equal(empty.total_pages, 1);
 }
 
 console.log('voice-assistant helpers ok');
