@@ -6,10 +6,10 @@ let ws = null;
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.5', reasoningEffort: 'high', sandbox: 'off' },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
-  mac: { model: 'gpt-5.5', reasoningEffort: 'medium' },
+  mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
 const AGENT_META = {
@@ -21,6 +21,11 @@ const AGENT_META = {
 };
 const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) => [k, v.label]));
 const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000, mac: 258400 };
+function defaultContextWindow(agent) {
+  const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
+  if ((agent === 'codex' || agent === 'mac') && (!model || model.startsWith('gpt-5.6'))) return 1050000;
+  return DEFAULT_CONTEXT_WINDOW[agent];
+}
 const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
 const agentIcon = (agent) => (AGENT_META[agent] && AGENT_META[agent].icon) || '⌘';
 const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy' || agent === 'mac') ? agent : 'claude';
@@ -1216,7 +1221,7 @@ function fmtTokens(n) {
 function currentContext() {
   const agent = agentType(cur.agent);
   const cx = cur.context || {};
-  const win = Number(cx.windowTokens) || DEFAULT_CONTEXT_WINDOW[agent];
+  const win = Number(cx.windowTokens) || defaultContextWindow(agent);
   const used = Math.max(0, Math.round(Number(cx.usedTokens) || 0));
   return {
     usedTokens: used,
@@ -3081,7 +3086,7 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.5' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.5' : 'opus');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-sol' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
   const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
@@ -3608,9 +3613,12 @@ function renderSuggest(items) {
 }
 
 const CODEX_MODELS = [
-  { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'Strongest coding model' },
-  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'Balanced frontier model' },
-  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Faster everyday work' },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'Strongest GPT-5.6 model' },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'Everyday workhorse' },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', desc: 'Fast high-volume work' },
+  { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'Previous frontier model' },
+  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'Older frontier fallback' },
+  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Fast older fallback' },
   { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: 'Previous Codex model' },
   { id: 'gpt-5.2', label: 'GPT-5.2', desc: 'Older fallback' },
 ];
@@ -3631,6 +3639,7 @@ const CODEX_EFFORTS = [
   { id: 'medium', label: 'Medium', desc: 'Balanced' },
   { id: 'high', label: 'High', desc: 'Deeper reasoning' },
   { id: 'xhigh', label: 'XHigh', desc: 'Maximum depth' },
+  { id: 'max', label: 'Max', desc: 'Hardest tasks' },
 ];
 const CLAUDE_MODELS = [
   { id: 'opus', label: 'Opus 4.8', desc: 'Default — 1M context, most capable' },
