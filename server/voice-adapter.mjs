@@ -2,8 +2,8 @@
 // The transport remains deliberately thin: the existing Box session engines retain
 // ownership of Codex/Claude context, tool streaming, and their normal safeguards.
 
-export function voiceAssistantMode(value = 'realtime') {
-  return String(value || 'realtime').trim().toLowerCase() === 'adapter' ? 'adapter' : 'realtime';
+export function voiceAssistantMode(value = 'adapter') {
+  return String(value || 'adapter').trim().toLowerCase() === 'realtime' ? 'realtime' : 'adapter';
 }
 
 export function voiceAdapterAgent(value = 'claude') {
