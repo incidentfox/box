@@ -42,6 +42,7 @@ let voDropCurrentResponse = false; // empty/noise turn: cancel and suppress the 
 let voMode = 'realtime', voAdapterCfg = null, voAdapterAudioCtx = null, voAdapterAnalyser = null;
 let voAdapterRaf = 0, voAdapterRecorder = null, voAdapterChunks = [], voAdapterSpeechAt = 0;
 let voAdapterSilentAt = 0, voAdapterBusy = false, voAdapterSpeaking = false;
+let voAdapterManualGraceUntil = 0, voAdapterLastVadDiagAt = 0;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -182,7 +183,10 @@ function voBuild() {
   </div>`;
   paintIcons(root);
   $('voBack').onclick = () => history.back();
-  $('voMain').onclick = () => { if (voState === 'off' || voState === 'ended') voStart(); };
+  $('voMain').onclick = () => {
+    if (voState === 'off' || voState === 'ended') voStart();
+    else if (voState === 'live' && voMode === 'adapter') voAdapterManualRecord();
+  };
   $('voEnd').onclick = () => voEnd('ended');
   $('voMute').onclick = voToggleMute;
   voAudioEl = new Audio();
@@ -217,7 +221,7 @@ function voSetState(st) {
   pill.className = 'voStatus ' + st + (voMuted && st === 'live' ? ' muted' : '');
   const orb = $('voOrb');
   orb.className = 'voOrb ' + (st === 'live' ? 'listening' : st);
-  $('voOrbLabel').textContent = st === 'off' ? 'Start' : st === 'ended' ? 'Restart' : st === 'connecting' ? '…' : st === 'reconnecting' ? '…' : '';
+  $('voOrbLabel').textContent = st === 'off' ? 'Start' : st === 'ended' ? 'Restart' : st === 'connecting' ? '…' : st === 'reconnecting' ? '…' : (st === 'live' && voMode === 'adapter' ? 'Tap to talk' : '');
   $('voEnd').disabled = !(st === 'live' || st === 'connecting' || st === 'reconnecting');
   $('voMain').classList.toggle('clickable', st === 'off' || st === 'ended');
 }
@@ -376,6 +380,7 @@ function voAdapterId() {
 }
 async function voStartAdapter(cfg) {
   if (!cfg.enabled) throw new Error('adapter mode needs the box STT/TTS and selected CLI agent');
+  if (typeof MediaRecorder === 'undefined') throw new Error('this browser cannot record microphone audio for adapter mode');
   voSetState('connecting');
   voAdapterCfg = cfg;
   voVsid = voAdapterId();
@@ -389,7 +394,7 @@ async function voStartAdapter(cfg) {
     source.connect(voAdapterAnalyser);
     voAdapterWatch();
   } catch (e) { throw new Error('microphone analysis unavailable: ' + String((e && e.message) || e)); }
-  voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready.`);
+  voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready and listening. Tap the orb to force a turn if needed.`);
 }
 function voAdapterLevel() {
   if (!voAdapterAnalyser) return 0;
@@ -403,18 +408,34 @@ function voAdapterWatch() {
     voAdapterRaf = requestAnimationFrame(tick);
     if (voMode !== 'adapter' || voState !== 'live' || voMuted || voAdapterBusy || voAdapterSpeaking) return;
     const now = Date.now(), vad = (voAdapterCfg && voAdapterCfg.vad) || {};
-    const loud = voAdapterLevel() >= (vad.threshold || 0.025);
+    const level = voAdapterLevel();
+    const threshold = vad.threshold || 0.004;
+    if (now - voAdapterLastVadDiagAt > 1000) {
+      voAdapterLastVadDiagAt = now;
+      voDiag('adapter', 'vad_level', { level: Math.round(level * 10000) / 10000, threshold, recording: !!voAdapterRecorder });
+    }
+    const loud = level >= threshold;
     if (loud) {
       voAdapterSilentAt = 0;
       if (!voAdapterRecorder) voAdapterBeginRecording();
       voOrbMode('listening');
     } else if (voAdapterRecorder) {
       if (!voAdapterSilentAt) voAdapterSilentAt = now;
+      // A manual tap grants time to begin speaking even when the automatic detector
+      // has not observed enough amplitude yet.
+      if (now < voAdapterManualGraceUntil) return;
       const enough = now - voAdapterSpeechAt >= (vad.minSpeechMs || 350);
       if ((enough && now - voAdapterSilentAt >= (vad.silenceMs || 900)) || now - voAdapterSpeechAt >= 30000) voAdapterFinishRecording();
     }
   };
   tick();
+}
+function voAdapterManualRecord() {
+  if (voAdapterBusy || voAdapterSpeaking || voMuted) return;
+  if (voAdapterRecorder) { voAdapterManualGraceUntil = 0; voAdapterFinishRecording(); return; }
+  voAdapterManualGraceUntil = Date.now() + 3000;
+  voAdapterBeginRecording();
+  voNotice('Listening for your turn…');
 }
 function voAdapterBeginRecording() {
   if (!voMicStream || typeof MediaRecorder === 'undefined') return;
@@ -424,7 +445,7 @@ function voAdapterBeginRecording() {
     voAdapterRecorder = new MediaRecorder(voMicStream, mimeType ? { mimeType } : undefined);
     voAdapterRecorder.ondataavailable = (e) => { if (e.data && e.data.size) voAdapterChunks.push(e.data); };
     voAdapterRecorder.onstop = () => {
-      const recorder = voAdapterRecorder; voAdapterRecorder = null;
+      const recorder = voAdapterRecorder; voAdapterRecorder = null; voAdapterManualGraceUntil = 0;
       const blob = new Blob(voAdapterChunks, { type: recorder && recorder.mimeType || 'audio/webm' });
       voAdapterChunks = [];
       if (blob.size > 200) voAdapterSubmit(blob);
