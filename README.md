@@ -283,12 +283,15 @@ that holds the box's controls.
 ### Experimental CLI adapter mode
 
 `adapter` is the default `VOICE_ASSISTANT_MODE`; set `VOICE_ASSISTANT_MODE=realtime` to
-return to the original OpenAI Realtime path. Adapter mode replaces Realtime's reasoning/tool loop with a
-persistent Box **Claude Code** or **Codex** session. The phone records one detected
-utterance, Box transcribes it through its existing Deepgram → ElevenLabs fallback,
-sends the text to that normal CLI session, then speaks the bounded response through
-OpenAI HTTP TTS. `VOICE_ADAPTER_AGENT=codex|claude` chooses the engine; Codex is the
-default for the lower-latency interactive path.
+return to the original OpenAI Realtime path. `VOICE_ADAPTER_TRANSPORT=livekit` is the
+new default adapter transport: a persistent LiveKit WebRTC room carries microphone and
+speaker audio, **Deepgram nova-3** streams interim text, Silero VAD plus LiveKit's
+hosted semantic turn detector finalizes the turn, and **Cartesia Sonic 3** speaks the
+answer. A local LiveKit Agent worker posts only the final transcript to the existing
+persistent Box **Codex** (or Claude Code) session; it does not get new tool authority.
+Cartesia is primary and OpenAI `gpt-4o-mini-tts` is an automatic TTS-provider fallback.
+`VOICE_ADAPTER_AGENT=codex|claude` chooses the engine; Codex is the default for the
+lower-latency interactive path.
 
 The adapter deliberately reuses the normal Box session runners, so session context,
 tool visibility, Codex sandbox settings, Claude remote-control ownership, and existing
@@ -296,22 +299,26 @@ tool safeguards remain in force. It adds a voice-aware prompt: concise spoken an
 read-only handling for status/explanation requests, and explicit confirmation before
 destructive, external, privacy-sensitive, financial, deployment, or irreversible work.
 
-This is a turn-based experiment, not a streaming duplex call. Expect STT + CLI startup/
-tool work + TTS latency (typically several seconds; Codex or tool-heavy turns can take
-much longer). One call has one in-flight turn; after `VOICE_ADAPTER_MAX_TURN_MS` (default
-180s), it speaks a pending status while the same CLI session continues. Keep spoken
-answers under `VOICE_ADAPTER_MAX_RESPONSE_CHARS` (default 1400) to avoid slow TTS and
-context bloat. The persistent CLI session still accumulates its full provider context;
-the response cap limits what is spoken, not the agent's context window. Start a new call
-when changing subjects after a long session, or before switching `VOICE_ADAPTER_AGENT`.
+This is a turn-based experiment, not a streaming duplex call. LiveKit begins the turn
+detector after roughly 350 ms of silence and caps waiting around 1.5 s; the remaining
+latency is Codex/tool work and then TTS, so a simple Codex response still takes several
+seconds and a tool-heavy turn can take much longer. One call has one in-flight turn;
+after `VOICE_ADAPTER_MAX_TURN_MS` (default 180s), it speaks a pending status while the
+same CLI session continues. Keep spoken answers under `VOICE_ADAPTER_MAX_RESPONSE_CHARS`
+(default 1400) to avoid slow TTS and context bloat. The persistent CLI session still
+accumulates its full provider context; the response cap limits what is spoken, not the
+agent's context window. Start a new call when changing subjects after a long session, or
+before switching `VOICE_ADAPTER_AGENT`.
 
-The production adapter streams raw microphone PCM through Box's authenticated Deepgram
-relay, renders interim text as it arrives, and uses Deepgram end-of-speech to make one
-half-duplex handoff to the CLI session. It closes that capture stream while the session
-works and while TTS plays, then reopens it for the next turn. The browser's blob
-transcription path remains only as a fallback for browsers that cannot use streaming STT.
+The LiveKit adapter keeps one media connection open for the entire call: it never tears
+down/recreates a browser audio graph between Codex turns. The microphone is disabled
+only while Cartesia plays, then re-enabled on that same track. Interim transcripts are
+rendered live. If the worker or LiveKit is unavailable, set
+`VOICE_ADAPTER_TRANSPORT=legacy` to return to the previous authenticated browser PCM
+relay (including its OpenAI HTTP TTS behavior).
 
-Run `npm run test:voice-adapter` for the configuration/prompt/VAD helpers. The existing
+Run `npm run test:voice-adapter`, `npm run test:voice-livekit`, and
+`cd voice-runtime && uv run pytest` for the configuration and worker helpers. The existing
 `smoke:voice` is Realtime-WebSocket specific; adapter integration should be exercised
 against an isolated-HOME server with a real or fixture WAV, never the production state.
 

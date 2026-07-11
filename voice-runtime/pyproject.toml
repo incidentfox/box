@@ -1,0 +1,18 @@
+[project]
+name = "box-livekit-voice"
+version = "0.1.0"
+description = "LiveKit media runtime for Box's persistent Codex voice adapter"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "httpx>=0.28,<0.29",
+  "livekit-agents[silero]>=1.6,<1.7",
+  "livekit-plugins-cartesia>=1.6,<1.7",
+  "livekit-plugins-deepgram>=1.6,<1.7",
+  "livekit-plugins-openai>=1.6,<1.7",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

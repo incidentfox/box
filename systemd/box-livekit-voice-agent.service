@@ -1,0 +1,19 @@
+[Unit]
+Description=Box LiveKit voice media worker
+After=network-online.target box-app.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/factory/development/box-selfhost/voice-runtime
+EnvironmentFile=-/run/software-factory/secrets.env
+EnvironmentFile=-/home/factory/development/box-selfhost/.env
+Environment=BOX_VOICE_BACKEND_URL=http://127.0.0.1:7321
+ExecStart=/home/factory/.local/bin/uv run --locked python box_voice_agent.py start
+Restart=always
+RestartSec=3
+StandardOutput=append:/tmp/box-livekit-voice-agent.log
+StandardError=append:/tmp/box-livekit-voice-agent.log
+
+[Install]
+WantedBy=default.target

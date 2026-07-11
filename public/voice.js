@@ -46,6 +46,8 @@ let voAdapterManualGraceUntil = 0, voAdapterLastVadDiagAt = 0;
 let voAdapterPreviewAt = 0, voAdapterPreviewInFlight = false, voAdapterPreviewSeq = 0, voAdapterUserBubble = null;
 let voAdapterSttWs = null, voAdapterSttProc = null, voAdapterSttSource = null, voAdapterSttSink = null;
 let voAdapterCommitted = '', voAdapterPartial = '', voAdapterEndpointT = null;
+let voAdapterTransport = 'legacy', voLivekitRoom = null, voLivekitTranscript = '', voLivekitBubble = null;
+let voLivekitAsstTranscript = '', voLivekitAsstBubble = null;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -86,9 +88,11 @@ function voMicConstraints() {
 
 // Effective mic state = user hasn't muted AND the half-duplex gate isn't holding it closed.
 function voApplyMic() {
-  if (!voMicStream) return;
   const on = !voMuted && !(voAudioPolicy.halfDuplex && voMicGateClosed);
-  voMicStream.getAudioTracks().forEach((t) => { if (t.enabled !== on) t.enabled = on; });
+  if (voMicStream) voMicStream.getAudioTracks().forEach((t) => { if (t.enabled !== on) t.enabled = on; });
+  if (voLivekitRoom && voLivekitRoom.localParticipant) {
+    voLivekitRoom.localParticipant.setMicrophoneEnabled(on).catch(() => {});
+  }
 }
 function voHalfDuplexClose() {
   if (!voAudioPolicy.halfDuplex || voMicGateClosed) return;
@@ -383,15 +387,77 @@ function voAdapterId() {
 }
 async function voStartAdapter(cfg) {
   if (!cfg.enabled) throw new Error('adapter mode needs the box STT/TTS and selected CLI agent');
-  if (typeof MediaRecorder === 'undefined') throw new Error('this browser cannot record microphone audio for adapter mode');
   voSetState('connecting');
   voAdapterCfg = cfg;
+  voAdapterTransport = cfg.transport === 'livekit' ? 'livekit' : 'legacy';
   voVsid = voAdapterId();
+  if (voAdapterTransport === 'livekit') return voStartLivekitAdapter(cfg);
+  if (typeof MediaRecorder === 'undefined') throw new Error('this browser cannot record microphone audio for adapter mode');
   voMicStream = await navigator.mediaDevices.getUserMedia({ audio: voMicConstraints() });
   voApplyMic();
   try { await voAdapterStartStreamingStt(); }
   catch (e) { throw new Error('streaming transcription unavailable: ' + String((e && e.message) || e)); }
   voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready. Speak naturally; the turn hands off after end-of-speech. Tap End turn to hand off sooner.`);
+}
+function voLivekitAppendTranscript(segments) {
+  const final = (segments || []).filter((s) => s && s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
+  const partial = (segments || []).filter((s) => s && !s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
+  if (final) voLivekitTranscript = `${voLivekitTranscript} ${final}`.replace(/\s+/g, ' ').trim();
+  if (!voLivekitBubble) voLivekitBubble = voBubble('user', 'Listening…');
+  voLivekitBubble.textContent = [voLivekitTranscript, partial].filter(Boolean).join(' ') || 'Listening…';
+  voScroll();
+}
+function voLivekitAppendAssistantTranscript(segments) {
+  const final = (segments || []).filter((s) => s && s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
+  const partial = (segments || []).filter((s) => s && !s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
+  if (final) voLivekitAsstTranscript = `${voLivekitAsstTranscript} ${final}`.replace(/\s+/g, ' ').trim();
+  if (!voLivekitAsstBubble) voLivekitAsstBubble = voBubble('asst', '');
+  const text = [voLivekitAsstTranscript, partial].filter(Boolean).join(' ');
+  voLivekitAsstBubble.textContent = text;
+  if (final) { voAsstText = voLivekitAsstTranscript; voRememberAsst(voLivekitAsstTranscript); }
+  voScroll();
+}
+async function voStartLivekitAdapter(cfg) {
+  if (!globalThis.LivekitClient) throw new Error('LiveKit client library did not load; refresh once to update the app shell');
+  const r = await api('/api/voice/livekit/token', { method: 'POST', body: JSON.stringify({ vsid: voVsid }) });
+  const join = await r.json(); if (!r.ok) throw new Error(join.error || 'LiveKit voice token failed');
+  voVsid = join.vsid || voVsid;
+  const LK = globalThis.LivekitClient;
+  const room = new LK.Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: voMicConstraints() });
+  voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null;
+  voLivekitAsstTranscript = ''; voLivekitAsstBubble = null;
+  room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => {
+    if (!participant || participant.identity === room.localParticipant.identity) voLivekitAppendTranscript(segments);
+    else voLivekitAppendAssistantTranscript(segments);
+  });
+  room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind !== LK.Track.Kind.Audio) return;
+    track.attach(voAudioEl);
+    voAudioEl.play().catch(() => {});
+  });
+  room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+    const agentSpeaking = (speakers || []).some((p) => p.identity !== room.localParticipant.identity);
+    const wasSpeaking = voAdapterSpeaking;
+    if (agentSpeaking && !wasSpeaking) { voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; }
+    if (!agentSpeaking && wasSpeaking) { voLivekitTranscript = ''; voLivekitBubble = null; }
+    voAdapterSpeaking = agentSpeaking;
+    voOrbMode(agentSpeaking ? 'speaking' : 'listening');
+    // True half-duplex: the same long-lived LiveKit mic track is disabled while
+    // Cartesia speaks, then re-enabled without rebuilding the capture pipeline.
+    voApplyMic();
+  });
+  room.on(LK.RoomEvent.Reconnecting, () => { voSetState('reconnecting'); voDiag('livekit', 'reconnecting', {}); });
+  room.on(LK.RoomEvent.Reconnected, () => { voSetState('live'); voDiag('livekit', 'reconnected', {}); });
+  room.on(LK.RoomEvent.Disconnected, () => {
+    if (voLivekitRoom !== room) return;
+    voLivekitRoom = null;
+    if (voState === 'live' || voState === 'reconnecting') voNotice('Voice connection ended. Tap Restart to reconnect.');
+  });
+  await room.connect(join.url, join.token);
+  await room.localParticipant.setMicrophoneEnabled(!voMuted);
+  voSetState('live'); voConnectedAt = Date.now(); voBanner('');
+  voNotice(`LiveKit adapter — ${cfg.agent || 'agent'} is ready. Deepgram transcribes live; pause naturally and it will hand off to Codex.`);
+  voDiag('livekit', 'connected', { room: join.room || '', agent: join.agent || '' });
 }
 function voAdapterPcm16(f32, fromRate, toRate) {
   let data = f32;
@@ -515,6 +581,7 @@ function voAdapterWatch() {
   tick();
 }
 function voAdapterManualRecord() {
+  if (voAdapterTransport === 'livekit') { voNotice('LiveKit is listening continuously; pause briefly to hand off your turn.'); return; }
   if (voAdapterBusy || voAdapterSpeaking || voMuted) return;
   // A deliberate tap means "end this turn now". Deepgram finalizes the buffered PCM
   // and returns the same endpoint event as natural end-of-speech.
@@ -776,6 +843,7 @@ function voEnd(finalState) {
   if (voVsid) api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, ended: true, incidents: voIncidents }) }).catch(() => {});
   if (voDc) { try { voDc.close(); } catch {} voDc = null; }
   if (voPc) { try { voPc.close(); } catch {} voPc = null; }
+  if (voLivekitRoom) { try { voLivekitRoom.disconnect(); } catch {} voLivekitRoom = null; }
   if (voMicStream) { voMicStream.getTracks().forEach((t) => t.stop()); voMicStream = null; }
   if (voWakeLock) { try { voWakeLock.release(); } catch {} voWakeLock = null; }
   if (voOrbRaf) cancelAnimationFrame(voOrbRaf);

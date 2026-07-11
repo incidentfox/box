@@ -1,0 +1,17 @@
+from box_voice_agent import DEFAULT_CARTESIA_VOICE, RuntimeConfig, safe_vsid, text_from_message, vsid_from_room
+
+
+class FakeMessage:
+    text_content = "  hello there  "
+
+
+def test_voice_room_id_is_strict_and_safe():
+    assert vsid_from_room("box-voice-hello_world") == "hello_world"
+    assert vsid_from_room("other-room") == ""
+    assert safe_vsid("bad / session") == "badsession"
+
+
+def test_text_and_default_voice_are_available(monkeypatch):
+    monkeypatch.delenv("VOICE_ADAPTER_CARTESIA_VOICE", raising=False)
+    assert text_from_message(FakeMessage()) == "hello there"
+    assert RuntimeConfig.from_env().cartesia_voice == DEFAULT_CARTESIA_VOICE
