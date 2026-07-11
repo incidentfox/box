@@ -1,4 +1,4 @@
-import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 
 export function voiceAdapterTransport(value = 'livekit') {
   return String(value || 'livekit').trim().toLowerCase() === 'legacy' ? 'legacy' : 'livekit';
@@ -35,6 +35,19 @@ export function livekitConfigured(config) {
   return !!(config && config.transport === 'livekit' && config.url && config.apiUrl && config.apiKey && config.apiSecret && config.agentName);
 }
 
+export function livekitRoomOptions({ config, vsid, metadata = {} } = {}) {
+  const room = livekitRoomName(vsid);
+  if (!room) throw new Error('invalid voice session id');
+  return {
+    name: room,
+    emptyTimeout: 30,
+    departureTimeout: 30,
+    maxParticipants: 2,
+    metadata: JSON.stringify({ source: 'box-voice', vsid: String(vsid) }),
+    agents: [{ agentName: config.agentName, metadata: JSON.stringify({ vsid: String(vsid), ...metadata }) }],
+  };
+}
+
 export async function createLivekitVoiceJoin({ config, vsid, metadata = {} } = {}) {
   if (!livekitConfigured(config)) throw new Error('LiveKit voice runtime is not configured');
   const room = livekitRoomName(vsid);
@@ -47,9 +60,11 @@ export async function createLivekitVoiceJoin({ config, vsid, metadata = {} } = {
     metadata: JSON.stringify({ vsid: String(vsid), source: 'box-voice' }),
   });
   token.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true, canPublishData: true });
-  const dispatch = new AgentDispatchClient(config.apiUrl, config.apiKey, config.apiSecret);
-  const job = await dispatch.createDispatch(room, config.agentName, {
-    metadata: JSON.stringify({ vsid: String(vsid), ...metadata }),
-  });
-  return { url: config.url, room, identity, token: await token.toJwt(), dispatchId: job.id || '' };
+  // Create the room before the caller joins, with exactly the Box worker dispatched.
+  // This LiveKit project also contains unrelated voice deployments; reserving the two
+  // available participant slots (caller + our worker) prevents an auto-dispatched
+  // agent from entering a Box voice conversation.
+  const rooms = new RoomServiceClient(config.apiUrl, config.apiKey, config.apiSecret);
+  const roomInfo = await rooms.createRoom(livekitRoomOptions({ config, vsid, metadata }));
+  return { url: config.url, room, identity, token: await token.toJwt(), roomSid: roomInfo.sid || '' };
 }
