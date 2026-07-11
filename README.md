@@ -263,7 +263,7 @@ that holds the box's controls.
   after playback), and a self-echo guard drops any "user" turn that matches what it just
   said — so it never cuts itself off or replies to its own voice
   ([`docs/voice-half-duplex.md`](docs/voice-half-duplex.md), INC-1088).
-- Config: `VOICE_ASSISTANT_MODEL` / `VOICE_ASSISTANT_VOICE` / `VOICE_ASSISTANT_VAD` /
+- Config: `VOICE_ASSISTANT_MODEL` / `VOICE_ASSISTANT_FALLBACK_MODEL` / `VOICE_ASSISTANT_VOICE` / `VOICE_ASSISTANT_VAD` /
   `VOICE_ASSISTANT_RESPONSE_STYLE` / `VOICE_ASSISTANT_INTERRUPT_RESPONSE` /
   `VOICE_ASSISTANT_HALF_DUPLEX` / `VOICE_ASSISTANT_ECHO_GUARD` in `.env`
   (see `.env.example`); optional `PARALLEL_API_KEY` for the research tools. Browser

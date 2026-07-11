@@ -118,6 +118,16 @@ export function voiceNumOr(value, dflt) {
   return Number.isFinite(n) ? n : dflt;
 }
 
+// Only fail over when OpenAI says the requested model itself is unavailable to
+// this project. Authentication, rate-limit, and transient server errors must stay
+// visible instead of being masked by a second model request.
+export function voiceRealtimeModelUnavailable(status, error = {}) {
+  const code = String(error && error.code || '').toLowerCase();
+  const message = String(error && error.message || '').toLowerCase();
+  if (![400, 403, 404].includes(status)) return false;
+  return /model_not_found|invalid_model|model.*(?:not found|does not exist|unavailable|unsupported|access)|(?:not have|no) access.*model/.test(`${code} ${message}`);
+}
+
 export function voiceTurnDetectionConfig({
   mode = 'semantic', eagerness = 'low', interruptResponse = false,
   threshold, silenceMs,
@@ -618,7 +628,10 @@ export function registerVoiceAssistant(app, ctx) {
   } = ctx;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
-  const MODEL = cfg('VOICE_ASSISTANT_MODEL', 'gpt-realtime-2');
+  const MODEL = cfg('VOICE_ASSISTANT_MODEL', 'gpt-realtime-2.1');
+  // Keep custom/cheaper model selections strict by default. The automatic fallback
+  // only applies to the new default unless a deployment explicitly configures one.
+  const FALLBACK_MODEL = cfg('VOICE_ASSISTANT_FALLBACK_MODEL', MODEL === 'gpt-realtime-2.1' ? 'gpt-realtime-2' : '');
   const VOICE = cfg('VOICE_ASSISTANT_VOICE', 'marin');
   const RESPONSE_STYLE = cfg('VOICE_ASSISTANT_RESPONSE_STYLE', 'brief');
   const INTERRUPT_RESPONSE = voiceBool(cfg('VOICE_ASSISTANT_INTERRUPT_RESPONSE'), false);
@@ -660,6 +673,8 @@ export function registerVoiceAssistant(app, ctx) {
   const uploadAudio = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
   const enabled = () => !!OPENAI_KEY;
+  let resolvedModel = MODEL;
+  let modelFallback = null;
   // Eval mode: action tools simulate success instead of mutating anything (used by
   // scripts/voice-evals.mjs so scenario runs are cheap, fast, and side-effect free).
   const DRYRUN = cfg('VOICE_TOOLS_DRYRUN') === '1';
@@ -2159,25 +2174,78 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
           output: { voice: VOICE, speed: 1.0 },
         },
       };
-      // gpt-realtime-2 is a reasoning model; low effort is the recommended latency/quality
+      // GPT-Realtime-2.x is a reasoning model; low effort is the recommended latency/quality
       // point for production voice. Retried without the field if the API rejects it.
       const effort = cfg('VOICE_ASSISTANT_REASONING', 'low');
-      if (/^gpt-realtime-2/.test(MODEL) && effort && effort !== 'none') sessionCfg.reasoning = { effort };
+      const checkModel = async (model) => {
+        const response = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, {
+          headers: { Authorization: `Bearer ${OPENAI_KEY}` },
+        });
+        const json = await response.json().catch(() => ({}));
+        return { response, json };
+      };
       const mint = () => fetch('https://api.openai.com/v1/realtime/client_secrets', {
         method: 'POST',
         headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ expires_after: { anchor: 'created_at', seconds: 600 }, session: sessionCfg }),
       });
-      let r = await mint();
-      let j = await r.json();
-      if (!r.ok && sessionCfg.reasoning && /reasoning|unknown|unrecognized|unexpected/i.test(JSON.stringify(j.error || {}))) {
-        delete sessionCfg.reasoning;
-        r = await mint(); j = await r.json();
+      const mintModel = async (model) => {
+        sessionCfg.model = model;
+        if (/^gpt-realtime-2/.test(model) && effort && effort !== 'none') sessionCfg.reasoning = { effort };
+        else delete sessionCfg.reasoning;
+        let response = await mint();
+        let json = await response.json();
+        if (!response.ok && sessionCfg.reasoning && /reasoning|unknown|unrecognized|unexpected/i.test(JSON.stringify(json.error || {}))) {
+          delete sessionCfg.reasoning;
+          response = await mint(); json = await response.json();
+        }
+        return { response, json };
+      };
+
+      let activeModel = MODEL;
+      let fallbackReason = '';
+      const primaryCheck = await checkModel(MODEL);
+      if (!primaryCheck.response.ok && voiceRealtimeModelUnavailable(primaryCheck.response.status, primaryCheck.json.error || {})) {
+        fallbackReason = short(primaryCheck.json.error?.message || primaryCheck.json.error?.code || `HTTP ${primaryCheck.response.status}`, 180);
+        if (!FALLBACK_MODEL || FALLBACK_MODEL === MODEL) {
+          console.error(`[box] voice model ${MODEL} unavailable (${fallbackReason}); no fallback configured`);
+          return res.status(502).json({ error: `Realtime model ${MODEL} unavailable: ${fallbackReason}` });
+        }
+        console.warn(`[box] voice model ${MODEL} unavailable (${fallbackReason}); falling back to ${FALLBACK_MODEL}`);
+        activeModel = FALLBACK_MODEL;
+        const fallbackCheck = await checkModel(activeModel);
+        if (!fallbackCheck.response.ok && voiceRealtimeModelUnavailable(fallbackCheck.response.status, fallbackCheck.json.error || {})) {
+          const fallbackError = short(fallbackCheck.json.error?.message || fallbackCheck.json.error?.code || `HTTP ${fallbackCheck.response.status}`, 180);
+          console.error(`[box] voice fallback model ${activeModel} unavailable (${fallbackError})`);
+          return res.status(502).json({ error: `Realtime models unavailable: ${MODEL} (${fallbackReason}); ${activeModel} (${fallbackError})` });
+        }
+      }
+
+      let { response: r, json: j } = await mintModel(activeModel);
+      const mintError = j.error || {};
+      if (activeModel === MODEL && (!r.ok || !j.value) && FALLBACK_MODEL && FALLBACK_MODEL !== MODEL && voiceRealtimeModelUnavailable(r.status, mintError)) {
+        fallbackReason = short(mintError.message || mintError.code || `HTTP ${r.status}`, 180);
+        console.warn(`[box] voice model ${MODEL} unavailable (${fallbackReason}); falling back to ${FALLBACK_MODEL}`);
+        activeModel = FALLBACK_MODEL;
+        ({ response: r, json: j } = await mintModel(activeModel));
+      }
+      if (activeModel !== MODEL && (r.ok && j.value)) {
+        modelFallback = { from: MODEL, to: activeModel, reason: fallbackReason || 'model unavailable', at: Date.now() };
+      }
+      if (activeModel !== MODEL && (!r.ok || !j.value)) {
+        const fallbackError = short(j.error?.message || j.error?.code || `HTTP ${r.status}`, 180);
+        console.error(`[box] voice fallback model ${activeModel} failed (${fallbackError})`);
       }
       if (!r.ok || !j.value) return res.status(502).json({ error: (j.error && j.error.message) || 'client_secret mint failed' });
-      appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'meta', text: reconnectVsid ? 'reconnected' : 'session started', model: MODEL }) + '\n');
+      if (activeModel === MODEL) modelFallback = null;
+      resolvedModel = activeModel;
+      appendFileSync(transcriptPath(vsid), JSON.stringify({
+        ts: Date.now(), kind: 'meta', text: reconnectVsid ? 'reconnected' : 'session started',
+        model: activeModel, requestedModel: MODEL, fallback: activeModel !== MODEL,
+      }) + '\n');
       res.json({
-        clientSecret: j.value, expiresAt: j.expires_at, model: MODEL, voice: VOICE, vsid, cursor: seq - 1,
+        clientSecret: j.value, expiresAt: j.expires_at, model: activeModel, requestedModel: MODEL,
+        fallback: activeModel !== MODEL, voice: VOICE, vsid, cursor: seq - 1,
         audioPolicy: AUDIO_POLICY,   // INC-1088: half-duplex + echo-guard the client enforces
         memory: { consent: mcfg.consent, storeAudio: memory.audioOn(), retrieval: memory.retrievalOn() },
       });
@@ -2292,7 +2360,8 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 
   app.get('/api/voice/status', requireAuth, (req, res) => {
     res.json({
-      enabled: enabled(), model: MODEL, voice: VOICE,
+      enabled: enabled(), model: resolvedModel, preferredModel: MODEL,
+      fallbackModel: FALLBACK_MODEL || null, fallback: modelFallback, voice: VOICE,
       responseStyle: RESPONSE_STYLE,
       interruptResponse: INTERRUPT_RESPONSE,
       audioPolicy: AUDIO_POLICY,
@@ -2306,6 +2375,6 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     });
   });
 
-  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODEL}, voice=${VOICE}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
+  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODEL}${FALLBACK_MODEL ? `; fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
   return { enabled };
 }

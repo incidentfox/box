@@ -53,7 +53,7 @@ let voMicGateClosed = false, voMicReopenT = null, voMicMaxHoldT = null;
 let voRecentAsst = [];                                   // last few assistant utterances (self-echo compare)
 let voIncidents = { selfInterrupt: 0, misattribution: 0 };
 
-const VO_PRICES = { atIn: 32, atInCached: 0.4, txIn: 4, txInCached: 0.4, atOut: 64, txOut: 24 }; // $/1M tok (gpt-realtime-2)
+const VO_PRICES = { atIn: 32, atInCached: 0.4, txIn: 4, txInCached: 0.4, atOut: 64, txOut: 24 }; // $/1M tok (gpt-realtime-2.1)
 
 // Stronger mic capture constraints. echoCancellation/noiseSuppression/autoGainControl are
 // portable + always honored; the `advanced` block is best-effort — browsers silently drop
