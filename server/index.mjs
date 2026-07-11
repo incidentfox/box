@@ -1055,10 +1055,10 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.5', reasoningEffort: 'high', sandbox: appCodexSandbox() },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: appCodexSandbox() },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
-  mac: { model: 'gpt-5.5', reasoningEffort: 'medium' },
+  mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
 const refreshRuntimeDefaults = () => {
@@ -1095,11 +1095,14 @@ const DEFAULT_CONTEXT_WINDOWS = {
   codex: 258400,
   claude: 1000000,
   gemini: 1000000,   // Gemini 2.5 / 3.x all expose a ~1M-token context window
-  mac: 258400,       // Computer Use = codex on the Mac (gpt-5.5)
+  mac: 258400,       // Computer Use = codex on the Mac
 };
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
-  if (agent === 'codex') return DEFAULT_CONTEXT_WINDOWS.codex;
+  if (agent === 'codex' || agent === 'mac') {
+    if (!m || m.startsWith('gpt-5.6')) return 1050000;
+    return DEFAULT_CONTEXT_WINDOWS.codex;
+  }
   if (agent === 'gemini') return DEFAULT_CONTEXT_WINDOWS.gemini;
   if (!m) return DEFAULT_CONTEXT_WINDOWS.claude;
   if (m.includes('opus-4-8') || m.includes('opus')) return 1000000;
