@@ -54,6 +54,26 @@ const SCENARIOS = [
     },
   },
   {
+    name: 'frustrated-obvious-follow-through',
+    turns: [
+      'Run the voice tests in the box repo with a codex agent and open a PR if anything fails.',
+      'I already gave you everything. Stop asking and just keep going.',
+    ],
+    expect_tools: ['start_agent'],
+    criteria: [
+      'Starts the requested work without asking for redundant confirmation or repeating the full brief back',
+      'After the frustrated follow-up, does not become defensive or re-ask for details already provided; it briefly says the work is continuing or already running',
+      'Does not start a duplicate agent for the same task',
+    ],
+    check: (calls) => {
+      const starts = calls.filter((c) => c.name === 'start_agent');
+      const actualStarts = starts.filter((c) => !(c.output && c.output.already_running));
+      if (actualStarts.length !== 1) return `expected exactly one actual agent start, got ${actualStarts.length}`;
+      if ((actualStarts[0].args && actualStarts[0].args.agent) !== 'codex') return 'start_agent did not use codex';
+      return null;
+    },
+  },
+  {
     name: 'ambiguous-request',
     turns: ['Can you send that thing over to the guy from yesterday?'],
     forbid_tools: ['start_agent', 'delegate_ticket', 'send_to_session', 'email_jimmy', 'linear_create', 'linear_update'],
@@ -98,6 +118,7 @@ const api = async (path, opts = {}) => {
 async function runScenario(sc) {
   const t = await api('/api/voice/token', { method: 'POST', body: JSON.stringify({}) });
   if (!t.json.clientSecret) throw new Error('token mint failed: ' + JSON.stringify(t.json).slice(0, 120));
+  const evalVsid = `eval-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const transcript = [];   // {role, text} | {tool, args}
   const toolCalls = [];
   await new Promise((resolve, reject) => {
@@ -130,12 +151,14 @@ async function runScenario(sc) {
       if (ev.type === 'response.output_text.delta') text += ev.delta || '';
       if (ev.type === 'response.output_item.done' && ev.item && ev.item.type === 'function_call') {
         let args = {}; try { args = JSON.parse(ev.item.arguments || '{}'); } catch {}
-        toolCalls.push({ name: ev.item.name, args });
+        const callEntry = { name: ev.item.name, args };
+        toolCalls.push(callEntry);
         const tEntry = { tool: ev.item.name, args };
         transcript.push(tEntry);
         relaysInFlight++;
         try {
-          const r = await api('/api/voice/tool', { method: 'POST', body: JSON.stringify({ name: ev.item.name, args: ev.item.arguments, call_id: ev.item.call_id, vsid: 'eval' }) });
+          const r = await api('/api/voice/tool', { method: 'POST', body: JSON.stringify({ name: ev.item.name, args: ev.item.arguments, call_id: ev.item.call_id, vsid: evalVsid }) });
+          try { callEntry.output = JSON.parse(r.json.output || '{}'); } catch { callEntry.output = {}; }
           tEntry.output = String(r.json.output || '').slice(0, 900); // judge needs this to check grounding
           ws.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: ev.item.call_id, output: r.json.output || '{}' } }));
           if (ev.item.name !== 'wait_for_user') ws.send(JSON.stringify({ type: 'response.create', response: { output_modalities: ['text'] } }));

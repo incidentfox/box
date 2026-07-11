@@ -18,9 +18,13 @@ import {
   voiceResponseStyle,
   voiceTurnDetectionConfig,
   voiceAudioPolicy,
+  voiceAgentOutputSummary,
+  voiceAgentStartKey,
+  voiceAutonomyPolicy,
   voiceNumOr,
   voiceNormalizeTokens,
   voiceRealtimeModelUnavailable,
+  voiceSessionOutputPreview,
   selfEchoMatch,
   summarizeSelfEchoDiagnostics,
 } from './voice-assistant.mjs';
@@ -30,6 +34,15 @@ assert.equal(voiceBool('1'), true);
 assert.equal(voiceBool('yes'), true);
 assert.equal(voiceBool('0'), false);
 assert.equal(voiceBool('off'), false);
+
+{
+  const policy = voiceAutonomyPolicy();
+  assert.match(policy, /safe, reversible, and strongly implied/);
+  assert.match(policy, /Reuse details already provided/);
+  assert.match(policy, /sounds frustrated/);
+  assert.match(policy, /already running/);
+  assert.match(policy, /destructive or hard-to-reverse/);
+}
 
 {
   assert.equal(voiceRealtimeModelUnavailable(404, { code: 'model_not_found' }), true);
@@ -342,10 +355,11 @@ assert.equal(voiceBool('off'), false);
   assert.doesNotMatch(done, /claude agent/); // the default agent isn't named aloud
   assert.match(done, /just finished its pass/);
   assert.match(done, /Opened PR 42\./);
+  assert.doesNotMatch(done, /Want me/);
 
   const truncated = agentFinishedLine({ agent: 'codex', speakAs, tail: 'A long list…', truncated: true });
   assert.match(truncated, /^The codex agent on "clearinghouse rejections remediation"/); // non-default agent IS named
-  assert.match(truncated, /send me the full write-up/);
+  assert.match(truncated, /already pulled the complete output/);
 
   const noOutput = agentFinishedLine({ speakAs });
   assert.match(noOutput, /could not read its output/);
@@ -357,6 +371,32 @@ assert.equal(voiceBool('off'), false);
   assert.match(progress, /Latest: reading the spec/);
   // No peek → no "Latest:" tail.
   assert.doesNotMatch(agentProgressLine({ speakAs, minutes: 2 }), /Latest:/);
+}
+
+{
+  const full = Array.from({ length: 30 }, (_, i) => `${i + 1}. target ${i + 1} with enough detail for the complete ranked output`).join('\n');
+  const preview = voiceSessionOutputPreview(full, 'stale preview', { previewChars: 200, maxItems: 3 });
+  assert.equal(preview.output_truncated, true);
+  assert.equal(preview.full_chars, full.length);
+  assert.equal(preview.full_summary.kind, 'list');
+  assert.equal(preview.full_summary.item_count, 30);
+  assert.deepEqual(preview.full_summary.top_items, [
+    'target 1 with enough detail for the complete ranked output',
+    'target 2 with enough detail for the complete ranked output',
+    'target 3 with enough detail for the complete ranked output',
+  ]);
+  assert.match(preview.more, /fetched automatically/);
+
+  const shortOutput = voiceSessionOutputPreview('done', 'stale');
+  assert.equal(shortOutput.latest_reply, 'done');
+  assert.equal(shortOutput.output_truncated, undefined);
+
+  assert.match(voiceAgentOutputSummary(full, { maxItems: 2 }), /^30 items\. Top results: target 1 with enough detail/);
+  assert.equal(voiceAgentOutputSummary('Implemented the fix. Tests pass.'), 'Implemented the fix. Tests pass.');
+  assert.equal(
+    voiceAgentStartKey({ scope: 'drive-1', agent: 'Codex', project: '/repo/box', title: 'Run voice tests!' }),
+    'drive-1|codex|/repo/box|run voice tests',
+  );
 }
 
 // ---- audio-pipeline hardening: half-duplex + self-echo guard (INC-1088) -----

@@ -107,6 +107,16 @@ export function voiceResponseStyle(style = 'brief') {
   ].join('\n');
 }
 
+export function voiceAutonomyPolicy() {
+  return [
+    '- When the next step is safe, reversible, and strongly implied, take it immediately. Do not ask for confirmation or repeat the request back.',
+    '- Reuse details already provided in this conversation. Ask one focused question only when missing information could materially change the outcome.',
+    '- If Jimmy sounds frustrated or says he already answered, do not defend yourself or restart the handoff. Briefly acknowledge only if useful, then continue with the safest high-confidence action.',
+    '- If an agent task is already running, "keep going" means leave that same task running. Never call start_agent again for it unless Jimmy explicitly asks for a duplicate or a second parallel attempt.',
+    '- Confirmation is still required for destructive or hard-to-reverse actions, privacy/consent changes, scoped local-file ingest, and communication to anyone other than Jimmy.',
+  ].join('\n');
+}
+
 // Coerce a config value to a number, treating "unset" as the default. Crucially, an
 // absent env var comes through cfg() as an EMPTY STRING, not undefined — and Number('')
 // is 0 (finite), which would otherwise be read as a real 0 and clamp every knob to its
@@ -508,6 +518,39 @@ export function summarizeAgentOutput(text, { maxItems = 5 } = {}) {
   return { kind: 'prose', item_count: 0, total_chars: totalChars, headline };
 }
 
+// check_session stays compact, but a truncated preview must not create another
+// confirmation loop. Compute a useful summary from the COMPLETE output in the same
+// call so the model can answer immediately; exact text remains available through
+// read_session_output pagination.
+export function voiceSessionOutputPreview(fullText, fallbackPreview = '', { previewChars = 800, maxItems = 5 } = {}) {
+  const full = String(fullText == null ? '' : fullText).trim();
+  const cap = Math.max(200, Math.min(4000, Math.floor(Number(previewChars) || 800)));
+  const truncated = full.length > cap;
+  return {
+    latest_reply: short(full, cap) || short(fallbackPreview, 200) || '(no output yet)',
+    ...(truncated ? {
+      output_truncated: true,
+      full_chars: full.length,
+      full_summary: summarizeAgentOutput(full, { maxItems }),
+      more: 'The complete output was fetched automatically. Use full_summary now; call read_session_output mode:full immediately if exact text or every item is needed.',
+    } : {}),
+  };
+}
+
+export function voiceAgentOutputSummary(text, { maxItems = 3 } = {}) {
+  const summary = summarizeAgentOutput(text, { maxItems });
+  if (summary.kind === 'list') {
+    const top = summary.top_items.join('; ');
+    return `${summary.item_count} items${top ? `. Top results: ${top}` : ''}.`;
+  }
+  return summary.headline || '(no text output captured)';
+}
+
+export function voiceAgentStartKey({ scope = '', agent = 'claude', project = '', title = '', task = '' } = {}) {
+  const topic = String(title || task).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return `${String(scope || 'global').toLowerCase()}|${String(agent || 'claude').toLowerCase()}|${String(project || '').toLowerCase()}|${topic}`;
+}
+
 // ---- plain-language work labels (INC-1087) ----------------------------------
 // Driving-safety problem: the voice assistant kept referring to work by bare code
 // ("INC nine fifty finished") which is meaningless at the wheel. These pure helpers
@@ -616,8 +659,8 @@ export function agentProgressLine({ agent = 'claude', speakAs = 'that work', min
 export function agentFinishedLine({ agent = 'claude', speakAs = 'that work', tail = '', truncated = false } = {}) {
   const who = agent && agent !== 'claude' ? `${agent} ` : '';
   const reported = tail ? ' It reported: ' + tail : ' I could not read its output — ask me to check the session for details.';
-  const more = truncated ? ' That is the short version — say "send me the full write-up" and I will email you the whole thing.' : '';
-  return `The ${who}agent on "${speakAs}" just finished its pass.${reported}${more} Want me to send it a follow-up?`;
+  const more = truncated ? ' I already pulled the complete output; it is ready to discuss or email without another handoff.' : '';
+  return `The ${who}agent on "${speakAs}" just finished its pass.${reported}${more}`;
 }
 
 export function registerVoiceAssistant(app, ctx) {
@@ -788,6 +831,7 @@ export function registerVoiceAssistant(app, ctx) {
   let seq = 1;
   const EVENTS = [];       // { seq, ts, kind, title, speak } — polled by the client
   const TASKS = new Map(); // id -> { id, kind, title, status, startedAt, doneAt, summary, file, runId }
+  const RECENT_AGENT_STARTS = new Map(); // short idempotency window for frustrated/repeated voice turns
 
   function pushEvent(kind, title, speak) {
     EVENTS.push({ seq: seq++, ts: Date.now(), kind, title, speak: short(speak, 2400) });
@@ -1089,8 +1133,8 @@ export function registerVoiceAssistant(app, ctx) {
       if (sawRunning && !busy) {
         clearInterval(iv);
         const full = lastAgentText(s.sessionId, s.agent, 100000);
-        const tail = short(full, 700);
         const truncated = full.length > 720;
+        const tail = truncated ? voiceAgentOutputSummary(full) : short(full, 700);
         task.sessionId = s.sessionId; task.agent = s.agent;
         if (truncated) task.fullOutput = clip(full, 40000);
         finishTask(task, truncated ? 'done_truncated' : 'done', full || '(no text output captured)',
@@ -1290,7 +1334,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'check_session',
-      description: 'Find one session by name/topic and report what it is doing right now, including a PREVIEW of its latest reply. Use before sending a message to it. If output_truncated is true, the reply was cut off — call read_session_output for the complete artifact (full list / pagination / summary).',
+      description: 'Find one session by name/topic and report what it is doing right now. When the reply is truncated, this tool proactively reads the complete output and returns full_summary; use that summary immediately without asking. Call read_session_output mode:full only when exact text or every item is needed.',
       parameters: { type: 'object', properties: { query: { type: 'string', description: 'Words from the session title, project, or topic' } }, required: ['query'] },
       handler: async ({ query }) => {
         const { hits, all } = matchSession(query, { includeArchived: true });
@@ -1302,11 +1346,9 @@ export function registerVoiceAssistant(app, ctx) {
         const s = hits[0];
         const others = hits.slice(1, 4).map((x) => short(x.title, 50));
         const full = lastAgentFull(s.id, s.agent);
-        const truncated = full.length > 800;
         return {
           match: sessBrief(s),
-          latest_reply: short(full, 800) || short(s.preview, 200) || '(no output yet)',
-          ...(truncated ? { output_truncated: true, full_chars: full.length, more: 'Reply truncated for voice. To work with the whole thing here (full list / count + top items / pagination) call read_session_output; to email Jimmy the complete artifact call request_full_artifact.' } : {}),
+          ...voiceSessionOutputPreview(full, s.preview),
           ...(others.length ? { other_candidates: others } : {}),
         };
       },
@@ -1550,7 +1592,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'start_agent',
-      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness), codex (good for mechanical coding), or mac (Computer Use on the paired laptop/browser). The task is auto-wrapped in a standard brief (autonomy, deliverable) so it runs to completion without needing a handoff back — just describe the work plainly. Runs in the background; you are told when the first turn completes. Give a descriptive short title.',
+      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness), codex (good for mechanical coding), or mac (Computer Use on the paired laptop/browser). The task is auto-wrapped in a standard brief (autonomy, deliverable) so it runs to completion without needing a handoff back — just describe the work plainly. Runs in the background; you are told when the first turn completes. Give a descriptive short title. Never call this again for a task already started in the current conversation; "keep going" means the existing agent continues.',
       parameters: {
         type: 'object',
         properties: {
@@ -1560,19 +1602,41 @@ export function registerVoiceAssistant(app, ctx) {
           title: { type: 'string', description: 'Short human title, e.g. "Fix invoice rounding"' },
           deliverable: { type: 'string', description: 'Optional: the concrete artifact to produce, e.g. "a PR", "a CSV of prospects", "a written comparison". Shapes what it reports back.' },
           done_when: { type: 'string', description: 'Optional: the acceptance criteria in one line, e.g. "tests pass and the PR is open".' },
+          allow_duplicate: { type: 'boolean', description: 'Set true only when Jimmy explicitly asks for a duplicate or second parallel attempt.' },
         },
         required: ['task'],
       },
-      handler: async ({ task, project, agent = 'claude', title, deliverable = '', done_when = '' }) => {
+      handler: async ({ task, project, agent = 'claude', title, deliverable = '', done_when = '', allow_duplicate = false }, { vsid = '' } = {}) => {
         if (agent === 'mac' && macAvailable && !macAvailable()) return { error: 'Mac Computer Use bridge is not reachable right now' };
-        const key = 'new-' + randomBytes(4).toString('hex');
         const cwd = resolveProjectDir(project);
         const t = title || short(task, 48);
+        const dedupeKey = voiceAgentStartKey({ scope: vsid, agent, project: cwd, title: t, task });
+        const dedupeMs = Math.max(10000, Number(cfg('VOICE_AGENT_START_DEDUPE_MS', '120000')) || 120000);
+        const prior = RECENT_AGENT_STARTS.get(dedupeKey);
+        if (!allow_duplicate && prior && Date.now() - prior.at < dedupeMs) {
+          return {
+            started: true, already_running: true, title: prior.title, agent: prior.agent,
+            project_dir: prior.projectDir,
+            note: 'Kept the existing agent running; suppressed a duplicate start from the repeated voice turn.',
+          };
+        }
+        const key = 'new-' + randomBytes(4).toString('hex');
+        const rememberStart = () => {
+          RECENT_AGENT_STARTS.set(dedupeKey, { at: Date.now(), key, title: t, agent, projectDir: cwd });
+          if (RECENT_AGENT_STARTS.size > 100) {
+            for (const [k, v] of RECENT_AGENT_STARTS) if (Date.now() - v.at >= dedupeMs) RECENT_AGENT_STARTS.delete(k);
+          }
+        };
         // mac/Computer-Use runs a browser, not a repo — the code-worktree/PR brief would
         // just confuse it, so hand it the raw ask. claude/codex get the standard template.
         const briefed = agent === 'mac' ? task : buildAgentTask(task, { owner: ownerName, deliverable, doneWhen: done_when });
-        if (DRYRUN) return { started: true, dry_run: true, title: t, agent, project_dir: cwd, templated: agent !== 'mac' };
+        if (DRYRUN) {
+          rememberStart();
+          newTask('agent', t, { what: spokenWorkLabel({ title: t }), agent, dryRun: true });
+          return { started: true, title: t, agent, project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; completion will be announced' };
+        }
         enqueue(key, { text: briefed, mode: 'normal', agent, cwd, title: t });
+        rememberStart();
         watchSession(key, t);
         return { started: true, title: t, agent, project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; completion will be announced' };
       },
@@ -1801,7 +1865,7 @@ export function registerVoiceAssistant(app, ctx) {
       parameters: { type: 'object', properties: {} },
       handler: async () => ({
         running: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind} "${t.what || t.title}" — started ${ago(t.startedAt)}${t.lastActivity ? '; latest: ' + short(t.lastActivity, 90) : ''}`),
-        recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.what || t.title} — ${short(t.summary, 120)}${(t.status === 'done_truncated' || t.fullOutput || t.file) ? ' (full output available — say "email me the full one")' : ''}`),
+        recent: [...TASKS.values()].filter((t) => t.status !== 'running').slice(-5).map((t) => `${t.status}: ${t.what || t.title} — ${short(t.summary, 120)}${(t.status === 'done_truncated' || t.fullOutput || t.file) ? ' (complete output already captured; summarize now or email if requested)' : ''}`),
         watchers: [...WATCHERS.values()].filter((w) => w.status === 'active').map(watchView),
       }),
     },
@@ -2015,20 +2079,21 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
 # Tools
 - Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
 - Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
-- Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): narrate as you act. If a delegated task is at all ambiguous, repeat it back in one line first.
+- Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): narrate briefly as you act. Do not repeat back or ask for confirmation when the intended safe next step is clear.
 - Session cleanup: when Jimmy asks to archive, clean up, or hide sessions, call archive_session. It only archives idle or finished sessions and refuses working, live, or needs-input sessions; tell him plainly which sessions were archived and which were left alone. Do not use send_to_session on an archived session unless he explicitly asks to resume that archived chat.
 - Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
-- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. A [TASK UPDATE] is a SYSTEM event, never something Jimmy said — never answer it as if it were his words, and never let it cut him off mid-sentence; it only ever reaches you at a pause, so just fold it in and ask if he wants you to act on it. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session gives a quick preview of any agent's latest output (including codex).
+- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. A [TASK UPDATE] is a SYSTEM event, never something Jimmy said — never answer it as if it were his words, and never let it cut him off mid-sentence; it only ever reaches you at a pause, so just fold it in. When the obvious safe follow-up is to inspect a finished result, do that instead of asking whether to act. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session includes a full-output summary when a preview is truncated.
 - Watchers — when Jimmy says "tell me when that finishes / when the PR is ready / if it needs me", call watch_session. It registers a server-side watcher; status changes arrive later as [TASK UPDATE] system messages through the normal notification queue.
-- Full lists & long outputs — check_session only PREVIEWS a reply (it flags output_truncated when it's cut off); never claim you have the full list off a preview, and never read a long artifact aloud. To DISCUSS the whole thing in voice — a full ranked list, every target — call read_session_output: mode:summary for the item count + the top items (say the count, name the top few, offer the rest), mode:full with page 2, 3… (via next_page) to go through it all. To put the WHOLE thing in Jimmy's inbox — a full report, a long write-up, or anything too long to talk through — call request_full_artifact (it emails him the complete artifact with the PR link).
+- Full lists & long outputs — when check_session flags output_truncated, it has already fetched the complete output and included full_summary. Use that summary immediately; do not announce truncation or ask Jimmy whether to fetch more. If his question needs exact wording or every item, call read_session_output mode:full immediately and page through next_page as needed. Never read a long artifact aloud. To put the WHOLE thing in Jimmy's inbox, call request_full_artifact (it emails him the complete artifact with the PR link).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.
 - wait_for_user: if the latest audio is silence, road noise, music, the car's own voice prompts, a passenger conversation, or speech clearly not addressed to you — call wait_for_user and say NOTHING. Do not say "I'm here", "I didn't catch that", or "take your time".
 - Self-echo: if a "user" message is your own last reply (or a fragment of it) echoed back — same words you just spoke — it is microphone loopback, NOT the user. Ignore it: call wait_for_user, do not answer it, and never treat it as a new instruction or a reason to stop or restart your answer.
 - If a tool errors, say so plainly and move on. NEVER invent tool results, and never claim live state you haven't checked this session.
 
 # Rules
+${voiceAutonomyPolicy()}
 - If the user's audio is unintelligible or partial (a real attempt to talk to you, not background noise), ask for a repeat — briefly and specifically. Only respond to what you actually heard.
 - take_note proactively whenever a real idea, decision, or follow-up is spoken; confirm with one word ("Noted."). After a meaty discussion, offer to email a summary and file Linear issues for the action items.
 - Quick facts → web_search. Big open questions → deep_research. Company history, deals, people → brain_search FIRST, web second.
@@ -2262,7 +2327,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · J
     if (typeof args === 'string') { try { parsed = JSON.parse(args || '{}'); } catch { parsed = {}; } }
     const t0 = Date.now();
     let result;
-    try { result = await tool.handler(parsed || {}); }
+    try { result = await tool.handler(parsed || {}, { vsid }); }
     catch (e) { result = { error: String((e && e.message) || e).slice(0, 400) }; }
     try { if (vsid) appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'tool', name, args: parsed, ms: Date.now() - t0, ok: !(result && result.error) }) + '\n'); } catch {}
     res.json({ call_id, output: JSON.stringify(result) });
