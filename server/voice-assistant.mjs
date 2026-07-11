@@ -240,6 +240,26 @@ export function selfEchoMatch(userText, assistantTexts, { threshold = 0.8, minTo
   return best;
 }
 
+// When barge-in (interrupt_response) is on, the mic stays hot while the assistant speaks,
+// so OpenAI's VAD can cancel a reply mid-sentence (`turn_detected`) on the assistant's own
+// echo or a burst of road noise — the reply "stops mid-sentence" even though the network is
+// fine. To tell a FALSE interrupt (resume the cut-off answer) from a REAL barge-in (honor
+// the user), we look at what the interrupting audio actually transcribed to:
+//   • ''            → noise/coughs, nothing said        → resume
+//   • our own words → the assistant's TTS echoed back    → resume
+//   • real words    → the user genuinely spoke           → honor (drop the partial)
+// The `assistantTexts` set MUST include the utterance being spoken at the moment of the cut
+// (not just completed ones) — that current sentence is the one most likely to be echoing.
+// Pure + exported so the browser twin (voResumeSoon / self-echo handling in public/voice.js)
+// can be regression-tested here. Returns { resume:boolean, reason }.
+export function shouldResumeAfterBargeIn(transcript, assistantTexts, { echoThreshold = 0.8, echoMinTokens = 4 } = {}) {
+  const text = String(transcript == null ? '' : transcript).trim();
+  if (!text) return { resume: true, reason: 'empty' };
+  const echo = selfEchoMatch(text, assistantTexts, { threshold: echoThreshold, minTokens: echoMinTokens });
+  if (echo.isEcho) return { resume: true, reason: 'self_echo' };
+  return { resume: false, reason: 'real_words' };
+}
+
 // Count self-interruption / misattribution incidents from a voice session's persisted
 // diagnostic lines (JSONL). Powers telemetry + monitoring (AC #4) without needing a
 // live session: `self_interrupt_armed` = VAD fired on our own playback; `self_echo_dropped`
