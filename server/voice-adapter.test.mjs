@@ -4,9 +4,9 @@ import {
   voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode,
 } from './voice-adapter.mjs';
 
-assert.equal(voiceAssistantMode(), 'realtime');
+assert.equal(voiceAssistantMode(), 'adapter');
 assert.equal(voiceAssistantMode('adapter'), 'adapter');
-assert.equal(voiceAssistantMode('anything-else'), 'realtime');
+assert.equal(voiceAssistantMode('anything-else'), 'adapter');
 assert.equal(voiceAdapterAgent('codex'), 'codex');
 assert.equal(voiceAdapterAgent('gemini'), 'claude');
 assert.equal(voiceAdapterSessionKey('2026-07-11-aa/bb'), 'voice-adapter-2026-07-11-aabb');

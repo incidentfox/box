@@ -282,7 +282,8 @@ that holds the box's controls.
 
 ### Experimental CLI adapter mode
 
-Set `VOICE_ASSISTANT_MODE=adapter` to replace Realtime's reasoning/tool loop with a
+`adapter` is the default `VOICE_ASSISTANT_MODE`; set `VOICE_ASSISTANT_MODE=realtime` to
+return to the original OpenAI Realtime path. Adapter mode replaces Realtime's reasoning/tool loop with a
 persistent Box **Claude Code** or **Codex** session. The phone records one detected
 utterance, Box transcribes it through its existing Deepgram → ElevenLabs fallback,
 sends the text to that normal CLI session, then speaks the bounded response through
