@@ -20,6 +20,7 @@ import {
   voiceAudioPolicy,
   voiceNumOr,
   voiceNormalizeTokens,
+  voiceRealtimeModelUnavailable,
   selfEchoMatch,
   summarizeSelfEchoDiagnostics,
 } from './voice-assistant.mjs';
@@ -29,6 +30,17 @@ assert.equal(voiceBool('1'), true);
 assert.equal(voiceBool('yes'), true);
 assert.equal(voiceBool('0'), false);
 assert.equal(voiceBool('off'), false);
+
+{
+  assert.equal(voiceRealtimeModelUnavailable(404, { code: 'model_not_found' }), true);
+  assert.equal(voiceRealtimeModelUnavailable(403, { message: 'Project does not have access to model gpt-realtime-2.1' }), true);
+  assert.equal(voiceRealtimeModelUnavailable(403, { message: 'Missing scope api.model.read' }), false);
+  assert.equal(voiceRealtimeModelUnavailable(400, { message: 'The model gpt-realtime-2.1 does not exist or you do not have access to it.' }), true);
+  assert.equal(voiceRealtimeModelUnavailable(400, { message: 'Invalid value for audio.output.voice' }), false);
+  assert.equal(voiceRealtimeModelUnavailable(401, { message: 'Incorrect API key' }), false);
+  assert.equal(voiceRealtimeModelUnavailable(429, { message: 'Rate limit reached' }), false);
+  assert.equal(voiceRealtimeModelUnavailable(500, { message: 'Server error' }), false);
+}
 
 {
   const brief = voiceResponseStyle();
