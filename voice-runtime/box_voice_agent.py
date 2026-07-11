@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, cli, inference, tts
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, TurnHandlingOptions, cli, inference, tts
 from livekit.plugins import cartesia, deepgram, openai, silero
 
 AGENT_NAME = "box-codex-voice"
@@ -53,17 +53,38 @@ def deepgram_options() -> dict[str, Any]:
     }
 
 
-def turn_timing_options() -> tuple[float, float]:
-    """Natural pause window for hands-free speech; stays configurable at deploy time."""
+def turn_handling_options() -> TurnHandlingOptions:
+    """Use LiveKit's current semantic endpointing API with documented bounds."""
     def number(name: str, default: float) -> float:
         try:
             return float(os.getenv(name, default))
         except ValueError:
             return default
 
-    minimum = min(3.0, max(0.8, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 1.2)))
-    maximum = min(8.0, max(minimum + 0.5, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 4.5)))
-    return minimum, maximum
+    # LiveKit documents 0.5–3.0 seconds as the standard dynamic endpointing
+    # window. Keep the knobs bounded, but do not use the old, much longer
+    # custom window that allowed a completed turn to linger indefinitely.
+    minimum = min(2.0, max(0.5, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 0.5)))
+    maximum = min(5.0, max(minimum + 0.5, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 3.0)))
+    return TurnHandlingOptions(
+        # v1 is LiveKit's hosted audio+semantic detector. It avoids handing a
+        # dangling phrase such as "if we..." to Codex as a completed request.
+        turn_detection=inference.TurnDetector(version="v1"),
+        endpointing={"mode": "dynamic", "min_delay": minimum, "max_delay": maximum, "alpha": 0.9},
+        # Box is deliberately half-duplex while TTS plays. The browser gates
+        # its mic, so a live interruption would otherwise be inconsistent.
+        interruption={"enabled": False},
+        preemptive_generation={"enabled": False},
+    )
+
+
+def is_manual_turn_commit(data: bytes, topic: str, participant_identity: str) -> bool:
+    """Accept only the caller's explicit, reliable End-turn control packet."""
+    return (
+        topic == "box.voice.control"
+        and participant_identity.startswith("caller-")
+        and data == b'{"type":"commit_turn"}'
+    )
 
 
 @dataclass(frozen=True)
@@ -139,19 +160,29 @@ async def entrypoint(ctx: JobContext) -> None:
         voice=os.getenv("VOICE_ADAPTER_TTS_VOICE", "marin"),
         instructions="Speak naturally, concise and calm for a hands-free phone conversation.",
     )
-    min_endpointing_delay, max_endpointing_delay = turn_timing_options()
     session = AgentSession(
         stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
         tts=tts.FallbackAdapter([primary_tts, fallback_tts], max_retry_per_tts=1),
         vad=ctx.proc.userdata["vad"],
-        # Force LiveKit's hosted v1 semantic detector instead of falling back to
-        # the compact local model. It judges whether a phrase is complete, so a
-        # dangling "if it…" stays open rather than becoming a Codex turn.
-        turn_detection=inference.TurnDetector(version="v1"),
-        min_endpointing_delay=min_endpointing_delay,
-        max_endpointing_delay=max_endpointing_delay,
-        allow_interruptions=False,
+        turn_handling=turn_handling_options(),
     )
+    # Semantic endpointing is the normal path. This packet makes the visible
+    # End turn button real: it flushes Deepgram and commits the buffered turn
+    # immediately when a caller chooses not to wait for the detector.
+    @ctx.room.on("data_received")
+    def on_data_packet(packet: Any) -> None:
+        participant = getattr(packet, "participant", None)
+        if not is_manual_turn_commit(
+            bytes(getattr(packet, "data", b"")),
+            str(getattr(packet, "topic", "")),
+            str(getattr(participant, "identity", "")),
+        ):
+            return
+        try:
+            session.commit_user_turn(transcript_timeout=2.0, stt_flush_duration=0.25)
+        except RuntimeError:
+            # A late tap after call teardown has no side effects.
+            return
     await session.start(agent=BoxCodexVoiceAgent(vsid, runtime), room=ctx.room)
     await ctx.connect()
 

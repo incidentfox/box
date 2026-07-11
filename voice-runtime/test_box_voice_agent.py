@@ -1,4 +1,4 @@
-from box_voice_agent import DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, safe_vsid, text_from_message, turn_timing_options, vsid_from_room
+from box_voice_agent import DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, is_manual_turn_commit, safe_vsid, text_from_message, turn_handling_options, vsid_from_room
 
 
 class FakeMessage:
@@ -22,7 +22,20 @@ def test_deepgram_utterance_end_satisfies_provider_minimum():
     assert deepgram_options()["endpointing_ms"] >= 500
 
 
-def test_turn_timing_defaults_allow_a_natural_pause(monkeypatch):
+def test_turn_handling_uses_livekit_semantic_detector_and_documented_dynamic_bounds(monkeypatch):
     monkeypatch.delenv("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", raising=False)
     monkeypatch.delenv("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", raising=False)
-    assert turn_timing_options() == (1.2, 4.5)
+    monkeypatch.setenv("LIVEKIT_API_KEY", "test-key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret")
+    options = turn_handling_options()
+    assert options["turn_detection"].model == "turn-detector-v1"
+    assert options["endpointing"] == {"mode": "dynamic", "min_delay": 0.5, "max_delay": 3.0, "alpha": 0.9}
+    assert options["interruption"]["enabled"] is False
+
+
+def test_manual_turn_commit_requires_the_caller_and_control_topic():
+    payload = b'{"type":"commit_turn"}'
+    assert is_manual_turn_commit(payload, "box.voice.control", "caller-session")
+    assert not is_manual_turn_commit(payload, "box.voice.control", "agent-session")
+    assert not is_manual_turn_commit(payload, "wrong.topic", "caller-session")
+    assert not is_manual_turn_commit(b"commit", "box.voice.control", "caller-session")
