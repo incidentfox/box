@@ -287,7 +287,8 @@ return to the original OpenAI Realtime path. Adapter mode replaces Realtime's re
 persistent Box **Claude Code** or **Codex** session. The phone records one detected
 utterance, Box transcribes it through its existing Deepgram → ElevenLabs fallback,
 sends the text to that normal CLI session, then speaks the bounded response through
-OpenAI HTTP TTS. `VOICE_ADAPTER_AGENT=claude|codex` chooses the engine.
+OpenAI HTTP TTS. `VOICE_ADAPTER_AGENT=codex|claude` chooses the engine; Codex is the
+default for the lower-latency interactive path.
 
 The adapter deliberately reuses the normal Box session runners, so session context,
 tool visibility, Codex sandbox settings, Claude remote-control ownership, and existing
@@ -303,6 +304,12 @@ answers under `VOICE_ADAPTER_MAX_RESPONSE_CHARS` (default 1400) to avoid slow TT
 context bloat. The persistent CLI session still accumulates its full provider context;
 the response cap limits what is spoken, not the agent's context window. Start a new call
 when changing subjects after a long session, or before switching `VOICE_ADAPTER_AGENT`.
+
+The production adapter streams raw microphone PCM through Box's authenticated Deepgram
+relay, renders interim text as it arrives, and uses Deepgram end-of-speech to make one
+half-duplex handoff to the CLI session. It closes that capture stream while the session
+works and while TTS plays, then reopens it for the next turn. The browser's blob
+transcription path remains only as a fallback for browsers that cannot use streaming STT.
 
 Run `npm run test:voice-adapter` for the configuration/prompt/VAD helpers. The existing
 `smoke:voice` is Realtime-WebSocket specific; adapter integration should be exercised

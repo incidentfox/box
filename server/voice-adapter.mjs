@@ -6,9 +6,9 @@ export function voiceAssistantMode(value = 'adapter') {
   return String(value || 'adapter').trim().toLowerCase() === 'realtime' ? 'realtime' : 'adapter';
 }
 
-export function voiceAdapterAgent(value = 'claude') {
-  const agent = String(value || 'claude').trim().toLowerCase();
-  return agent === 'codex' ? 'codex' : 'claude';
+export function voiceAdapterAgent(value = 'codex') {
+  const agent = String(value || 'codex').trim().toLowerCase();
+  return agent === 'claude' ? 'claude' : 'codex';
 }
 
 export function voiceAdapterSessionKey(vsid) {
