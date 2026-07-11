@@ -37,6 +37,11 @@ let voSpeechStopAt = 0, voLatencies = [];   // end-of-user-speech → first spok
 let voStatsIv = null, voLastInboundStats = null, voLastStatsLogAt = 0;
 let voResponseDiag = null, voLastAudioTranscriptAt = 0;
 let voDropCurrentResponse = false; // empty/noise turn: cancel and suppress the model's accidental reply
+// Experimental adapter mode: browser VAD records one utterance, server STT routes it
+// through a persistent Claude/Codex session, then HTTP TTS plays the returned text.
+let voMode = 'realtime', voAdapterCfg = null, voAdapterAudioCtx = null, voAdapterAnalyser = null;
+let voAdapterRaf = 0, voAdapterRecorder = null, voAdapterChunks = [], voAdapterSpeechAt = 0;
+let voAdapterSilentAt = 0, voAdapterBusy = false, voAdapterSpeaking = false;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -347,7 +352,16 @@ async function voStart() {
   voResetAudioGate(); voRecentAsst = []; voIncidents = { selfInterrupt: 0, misattribution: 0 }; voDropCurrentResponse = false;
   voStartedAt = Date.now();
   voFeedEl().innerHTML = '';
-  await voConnect(false);
+  try {
+    const r = await api('/api/voice/status');
+    const st = await r.json();
+    if (!r.ok) throw new Error(st.error || 'voice status unavailable');
+    voMode = st.mode === 'adapter' ? 'adapter' : 'realtime';
+    if (voMode === 'adapter') await voStartAdapter(st.adapter || {});
+    else await voConnect(false);
+  } catch (e) {
+    voSetState('off'); toast(String((e && e.message) || e).slice(0, 120)); return;
+  }
   if (voClockIv) clearInterval(voClockIv);
   voClockIv = setInterval(voClockTick, 1000);
   if (voFlushIv) clearInterval(voFlushIv);
@@ -355,6 +369,117 @@ async function voStart() {
   if (voPollIv) clearInterval(voPollIv);
   voPollIv = setInterval(voPollUpdates, 5000);
   voKeepAwake();
+}
+
+function voAdapterId() {
+  try { return crypto.randomUUID(); } catch { return `adapter-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+}
+async function voStartAdapter(cfg) {
+  if (!cfg.enabled) throw new Error('adapter mode needs the box STT/TTS and selected CLI agent');
+  voSetState('connecting');
+  voAdapterCfg = cfg;
+  voVsid = voAdapterId();
+  voMicStream = await navigator.mediaDevices.getUserMedia({ audio: voMicConstraints() });
+  voApplyMic();
+  try {
+    voAdapterAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await voAdapterAudioCtx.resume();
+    const source = voAdapterAudioCtx.createMediaStreamSource(voMicStream);
+    voAdapterAnalyser = voAdapterAudioCtx.createAnalyser(); voAdapterAnalyser.fftSize = 1024;
+    source.connect(voAdapterAnalyser);
+    voAdapterWatch();
+  } catch (e) { throw new Error('microphone analysis unavailable: ' + String((e && e.message) || e)); }
+  voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready.`);
+}
+function voAdapterLevel() {
+  if (!voAdapterAnalyser) return 0;
+  const data = new Uint8Array(voAdapterAnalyser.fftSize);
+  voAdapterAnalyser.getByteTimeDomainData(data);
+  let sum = 0; for (const v of data) { const d = (v - 128) / 128; sum += d * d; }
+  return Math.sqrt(sum / data.length);
+}
+function voAdapterWatch() {
+  const tick = () => {
+    voAdapterRaf = requestAnimationFrame(tick);
+    if (voMode !== 'adapter' || voState !== 'live' || voMuted || voAdapterBusy || voAdapterSpeaking) return;
+    const now = Date.now(), vad = (voAdapterCfg && voAdapterCfg.vad) || {};
+    const loud = voAdapterLevel() >= (vad.threshold || 0.025);
+    if (loud) {
+      voAdapterSilentAt = 0;
+      if (!voAdapterRecorder) voAdapterBeginRecording();
+      voOrbMode('listening');
+    } else if (voAdapterRecorder) {
+      if (!voAdapterSilentAt) voAdapterSilentAt = now;
+      const enough = now - voAdapterSpeechAt >= (vad.minSpeechMs || 350);
+      if ((enough && now - voAdapterSilentAt >= (vad.silenceMs || 900)) || now - voAdapterSpeechAt >= 30000) voAdapterFinishRecording();
+    }
+  };
+  tick();
+}
+function voAdapterBeginRecording() {
+  if (!voMicStream || typeof MediaRecorder === 'undefined') return;
+  try {
+    const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
+    voAdapterChunks = []; voAdapterSpeechAt = Date.now(); voAdapterSilentAt = 0;
+    voAdapterRecorder = new MediaRecorder(voMicStream, mimeType ? { mimeType } : undefined);
+    voAdapterRecorder.ondataavailable = (e) => { if (e.data && e.data.size) voAdapterChunks.push(e.data); };
+    voAdapterRecorder.onstop = () => {
+      const recorder = voAdapterRecorder; voAdapterRecorder = null;
+      const blob = new Blob(voAdapterChunks, { type: recorder && recorder.mimeType || 'audio/webm' });
+      voAdapterChunks = [];
+      if (blob.size > 200) voAdapterSubmit(blob);
+    };
+    voAdapterRecorder.start();
+  } catch (e) { voNotice('Microphone recording failed.'); voDiag('adapter', 'record_failed', { message: String(e && e.message || e).slice(0, 160) }); }
+}
+function voAdapterFinishRecording() {
+  try { if (voAdapterRecorder && voAdapterRecorder.state !== 'inactive') voAdapterRecorder.stop(); } catch {}
+}
+async function voAdapterSubmit(blob) {
+  if (voAdapterBusy || voState !== 'live') return;
+  voAdapterBusy = true; voOrbMode('thinking'); const chip = voChip(`Asking ${(voAdapterCfg && voAdapterCfg.agent) || 'agent'}…`);
+  const started = Date.now();
+  try {
+    const fd = new FormData(); fd.append('audio', blob, 'voice-turn.webm'); fd.append('vsid', voVsid);
+    const r = await api('/api/voice/adapter/turn', { method: 'POST', body: fd });
+    const j = await r.json(); if (!r.ok && r.status !== 202) throw new Error(j.error || `adapter HTTP ${r.status}`);
+    if (j.transcript) voBubble('user', j.transcript);
+    if (j.text) { voAsstText = j.text; voBubble('asst', j.text); voRememberAsst(j.text); }
+    chip.classList.add('ok'); chip.querySelector('.voSpin').remove();
+    voDiag('adapter', 'turn_done', { ms: Date.now() - started, stt: j.stt_model || '', agent: j.agent || '', pending: !!j.pending });
+    if (j.audio) await voAdapterPlay(j.audio, j.mime || 'audio/mpeg');
+    else if (j.text) await voAdapterBrowserSpeak(j.text);
+  } catch (e) {
+    chip.classList.add('fail'); chip.querySelector('.voSpin').remove();
+    voNotice('Adapter error: ' + String((e && e.message) || e).slice(0, 180));
+    voDiag('adapter', 'turn_failed', { message: String((e && e.message) || e).slice(0, 180) });
+  } finally { voAdapterBusy = false; if (!voAdapterSpeaking) voOrbMode('listening'); }
+}
+async function voAdapterPlay(base64, mime) {
+  voAdapterSpeaking = true; voOrbMode('speaking');
+  const raw = atob(base64), bytes = new Uint8Array(raw.length); for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  try {
+    voAudioEl.srcObject = null; voAudioEl.src = url;
+    await new Promise((resolve) => { voAudioEl.onended = resolve; voAudioEl.onerror = resolve; voAudioEl.play().catch(resolve); });
+  } finally {
+    URL.revokeObjectURL(url); voAudioEl.onended = null; voAudioEl.onerror = null;
+    // Let the car-speaker tail drain before microphone VAD listens again.
+    setTimeout(() => { voAdapterSpeaking = false; if (!voAdapterBusy && voState === 'live') voOrbMode('listening'); }, 600);
+  }
+}
+async function voAdapterBrowserSpeak(text) {
+  if (!('speechSynthesis' in window)) return;
+  voAdapterSpeaking = true; voOrbMode('speaking');
+  try {
+    await new Promise((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 1; utterance.onend = resolve; utterance.onerror = resolve;
+      speechSynthesis.speak(utterance);
+    });
+  } finally {
+    setTimeout(() => { voAdapterSpeaking = false; if (!voAdapterBusy && voState === 'live') voOrbMode('listening'); }, 600);
+  }
 }
 
 async function voConnect(isReconnect) {
@@ -477,6 +602,12 @@ function voEnd(finalState) {
   voResetAudioGate(); voDropCurrentResponse = false;
   voStopStats();
   voStopAudioCapture();
+  if (voAdapterRaf) cancelAnimationFrame(voAdapterRaf);
+  voAdapterRaf = 0;
+  try { if (voAdapterRecorder && voAdapterRecorder.state !== 'inactive') voAdapterRecorder.stop(); } catch {}
+  voAdapterRecorder = null; voAdapterChunks = []; voAdapterBusy = false; voAdapterSpeaking = false;
+  try { if (voAdapterAudioCtx) voAdapterAudioCtx.close(); } catch {}
+  voAdapterAudioCtx = null; voAdapterAnalyser = null; voAdapterCfg = null;
   // Telemetry: one summary line per call so self-interruption / misattribution rates are
   // queryable from the persisted diagnostics without a live session (see AC #4).
   voDiag('pipeline', 'audio_incident_summary', {
