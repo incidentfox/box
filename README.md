@@ -300,7 +300,7 @@ read-only handling for status/explanation requests, and explicit confirmation be
 destructive, external, privacy-sensitive, financial, deployment, or irreversible work.
 
 This is a turn-based experiment, not a streaming duplex call. LiveKit begins the turn
-detector after roughly 350 ms of silence and caps waiting around 1.5 s; the remaining
+detector after roughly 650 ms of silence and caps waiting around 3 s; the remaining
 latency is Codex/tool work and then TTS, so a simple Codex response still takes several
 seconds and a tool-heavy turn can take much longer. One call has one in-flight turn;
 after `VOICE_ADAPTER_MAX_TURN_MS` (default 180s), it speaks a pending status while the

@@ -51,6 +51,19 @@ def deepgram_options() -> dict[str, Any]:
     }
 
 
+def turn_timing_options() -> tuple[float, float]:
+    """Natural pause window for hands-free speech; stays configurable at deploy time."""
+    def number(name: str, default: float) -> float:
+        try:
+            return float(os.getenv(name, default))
+        except ValueError:
+            return default
+
+    minimum = min(2.0, max(0.4, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 0.65)))
+    maximum = min(6.0, max(minimum + 0.25, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 3.0)))
+    return minimum, maximum
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     backend_url: str
@@ -95,7 +108,7 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.35, activation_threshold=0.42)
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.65, activation_threshold=0.5)
 
 
 server.setup_fnc = prewarm
@@ -124,13 +137,14 @@ async def entrypoint(ctx: JobContext) -> None:
         voice=os.getenv("VOICE_ADAPTER_TTS_VOICE", "marin"),
         instructions="Speak naturally, concise and calm for a hands-free phone conversation.",
     )
+    min_endpointing_delay, max_endpointing_delay = turn_timing_options()
     session = AgentSession(
         stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
         tts=tts.FallbackAdapter([primary_tts, fallback_tts], max_retry_per_tts=1),
         vad=ctx.proc.userdata["vad"],
         turn_detection=inference.TurnDetector(),
-        min_endpointing_delay=0.35,
-        max_endpointing_delay=1.5,
+        min_endpointing_delay=min_endpointing_delay,
+        max_endpointing_delay=max_endpointing_delay,
         allow_interruptions=False,
     )
     await session.start(agent=BoxCodexVoiceAgent(vsid, runtime), room=ctx.room)

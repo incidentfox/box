@@ -48,6 +48,7 @@ let voAdapterSttWs = null, voAdapterSttProc = null, voAdapterSttSource = null, v
 let voAdapterCommitted = '', voAdapterPartial = '', voAdapterEndpointT = null;
 let voAdapterTransport = 'legacy', voLivekitRoom = null, voLivekitTranscript = '', voLivekitBubble = null;
 let voLivekitAsstTranscript = '', voLivekitAsstBubble = null;
+let voLivekitUserSegments = new Map(), voLivekitAsstSegments = new Map();
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -399,22 +400,35 @@ async function voStartAdapter(cfg) {
   catch (e) { throw new Error('streaming transcription unavailable: ' + String((e && e.message) || e)); }
   voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready. Speak naturally; the turn hands off after end-of-speech. Tap End turn to hand off sooner.`);
 }
+function voLivekitMergeSegments(store, segments) {
+  for (const segment of (segments || [])) {
+    const id = String(segment && segment.id || '');
+    const text = String(segment && segment.text || '').trim();
+    if (!id || !text) continue;
+    // LiveKit updates the same segment as it grows and then marks it final.
+    // Keeping it by ID replaces that update instead of rendering a new message.
+    store.set(id, { id, text, final: !!segment.final, startTime: Number(segment.startTime) || 0 });
+  }
+  return [...store.values()].sort((a, b) => a.startTime - b.startTime).map((s) => s.text).join(' ').replace(/\s+/g, ' ').trim();
+}
 function voLivekitAppendTranscript(segments) {
-  const final = (segments || []).filter((s) => s && s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
-  const partial = (segments || []).filter((s) => s && !s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
-  if (final) voLivekitTranscript = `${voLivekitTranscript} ${final}`.replace(/\s+/g, ' ').trim();
+  // A new caller segment after an assistant reply starts the next visual turn.
+  // Do not use ActiveSpeakersChanged for this: it flickers at sentence pauses.
+  const startsNewTurn = (segments || []).some((s) => s && s.id && !voLivekitUserSegments.has(String(s.id)));
+  if (startsNewTurn && voLivekitAsstTranscript) {
+    voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; voLivekitAsstSegments = new Map();
+    voLivekitUserSegments = new Map(); voLivekitTranscript = ''; voLivekitBubble = null;
+  }
+  voLivekitTranscript = voLivekitMergeSegments(voLivekitUserSegments, segments);
   if (!voLivekitBubble) voLivekitBubble = voBubble('user', 'Listening…');
-  voLivekitBubble.textContent = [voLivekitTranscript, partial].filter(Boolean).join(' ') || 'Listening…';
+  voLivekitBubble.textContent = voLivekitTranscript || 'Listening…';
   voScroll();
 }
 function voLivekitAppendAssistantTranscript(segments) {
-  const final = (segments || []).filter((s) => s && s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
-  const partial = (segments || []).filter((s) => s && !s.final && s.text).map((s) => String(s.text).trim()).filter(Boolean).join(' ');
-  if (final) voLivekitAsstTranscript = `${voLivekitAsstTranscript} ${final}`.replace(/\s+/g, ' ').trim();
+  voLivekitAsstTranscript = voLivekitMergeSegments(voLivekitAsstSegments, segments);
   if (!voLivekitAsstBubble) voLivekitAsstBubble = voBubble('asst', '');
-  const text = [voLivekitAsstTranscript, partial].filter(Boolean).join(' ');
-  voLivekitAsstBubble.textContent = text;
-  if (final) { voAsstText = voLivekitAsstTranscript; voRememberAsst(voLivekitAsstTranscript); }
+  voLivekitAsstBubble.textContent = voLivekitAsstTranscript;
+  if (voLivekitAsstTranscript) { voAsstText = voLivekitAsstTranscript; voRememberAsst(voLivekitAsstTranscript); }
   voScroll();
 }
 async function voStartLivekitAdapter(cfg) {
@@ -424,8 +438,8 @@ async function voStartLivekitAdapter(cfg) {
   voVsid = join.vsid || voVsid;
   const LK = globalThis.LivekitClient;
   const room = new LK.Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: voMicConstraints() });
-  voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null;
-  voLivekitAsstTranscript = ''; voLivekitAsstBubble = null;
+  voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null; voLivekitUserSegments = new Map();
+  voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; voLivekitAsstSegments = new Map();
   room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => {
     if (!participant || participant.identity === room.localParticipant.identity) voLivekitAppendTranscript(segments);
     else voLivekitAppendAssistantTranscript(segments);
@@ -437,9 +451,6 @@ async function voStartLivekitAdapter(cfg) {
   });
   room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
     const agentSpeaking = (speakers || []).some((p) => p.identity !== room.localParticipant.identity);
-    const wasSpeaking = voAdapterSpeaking;
-    if (agentSpeaking && !wasSpeaking) { voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; }
-    if (!agentSpeaking && wasSpeaking) { voLivekitTranscript = ''; voLivekitBubble = null; }
     voAdapterSpeaking = agentSpeaking;
     voOrbMode(agentSpeaking ? 'speaking' : 'listening');
     // True half-duplex: the same long-lived LiveKit mic track is disabled while
