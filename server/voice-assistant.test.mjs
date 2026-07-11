@@ -32,6 +32,7 @@ import {
   voiceRealtimeModelUnavailable,
   voiceSessionOutputPreview,
   selfEchoMatch,
+  shouldResumeAfterBargeIn,
   summarizeSelfEchoDiagnostics,
 } from './voice-assistant.mjs';
 
@@ -523,6 +524,29 @@ assert.equal(voiceBool('off'), false);
   // A high threshold can be demanded; a near-miss then fails.
   const strict = selfEchoMatch('Spectrum submits about three thousand bills a year', asst, { threshold: 0.95 });
   assert.equal(strict.isEcho, false);
+
+  // THE FIX: the utterance being spoken at the instant of the barge-in must be in the
+  // compare set. A fragment of the IN-FLIGHT sentence (what echoes back into the hot mic)
+  // is then recognized as echo — before this it was absent, so the echo read as real user
+  // speech and the answer stopped mid-sentence.
+  const inflight = 'so the June invoice for Spectrum covers the first three hundred and thirty three bills';
+  assert.equal(selfEchoMatch('the June invoice for Spectrum covers the first', [inflight]).isEcho, true);
+}
+
+{
+  // Barge-in resolution policy (twin of public/voice.js): empty + self-echo → resume the
+  // cut-off answer; genuine user words → honor the interruption.
+  const spoken = ['so the June invoice for Spectrum covers the first three hundred and thirty three bills'];
+  assert.deepEqual(shouldResumeAfterBargeIn('', spoken), { resume: true, reason: 'empty' });
+  assert.deepEqual(shouldResumeAfterBargeIn('   ', spoken), { resume: true, reason: 'empty' });
+  assert.equal(shouldResumeAfterBargeIn('the June invoice for Spectrum covers the first', spoken).resume, true);
+  assert.equal(shouldResumeAfterBargeIn('the June invoice for Spectrum covers the first', spoken).reason, 'self_echo');
+  // A real question the assistant did NOT say → honor the barge-in (do not resume).
+  assert.deepEqual(shouldResumeAfterBargeIn('wait what about the Carisk clearinghouse', spoken), { resume: false, reason: 'real_words' });
+  // A short real command is never mistaken for echo (min-token gate) → honored.
+  assert.equal(shouldResumeAfterBargeIn('stop', spoken).resume, false);
+  // No prior assistant speech → any words are real.
+  assert.equal(shouldResumeAfterBargeIn('the June invoice for Spectrum', []).resume, false);
 }
 
 {

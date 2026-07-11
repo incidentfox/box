@@ -114,11 +114,25 @@ function voResetAudioGate() {
 function voNormTokens(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
 }
+// The self-echo comparison set is not just the assistant's COMPLETED utterances
+// (voRecentAsst, appended only at response.done) but also the one it is speaking RIGHT
+// NOW (voAsstText) and the one a barge-in just cut off (voFalseInt.text). In barge-in
+// mode the mic stays hot while the assistant talks, so the utterance most likely to
+// echo back and trip the VAD is the *current* sentence — which was absent from the set
+// until this fix, causing its echo to be misread as a genuine user interruption and the
+// answer to stop mid-sentence with no recovery (INC-1088 follow-up). Keep in sync with
+// server twin selfEchoMatch().
+function voEchoCompareSet() {
+  const set = voRecentAsst.slice();
+  if (voAsstText) set.push(voAsstText);
+  if (voFalseInt && voFalseInt.text) set.push(voFalseInt.text);
+  return set;
+}
 function voSelfEchoScore(userText) {
   const u = voNormTokens(userText);
   if (u.length < voAudioPolicy.echoMinTokens) return 0;
   let best = 0;
-  for (const a of voRecentAsst) {
+  for (const a of voEchoCompareSet()) {
     const at = voNormTokens(a);
     if (at.length < voAudioPolicy.echoMinTokens) continue;
     const aset = new Set(at);
@@ -560,6 +574,8 @@ function voHandleEvent(ev) {
         voSend({ type: 'response.cancel' });
         voDiag('pipeline', 'empty_turn_response_cancelled', {});
       }
+      // Confirmed noise — if a real answer was cut off and armed for recovery, resume it now.
+      voResumeSoon('empty_turn');
       return;
     }
     // Misattribution guard: if this "user" turn is really our own TTS echoed back into
@@ -572,6 +588,7 @@ function voHandleEvent(ev) {
       const eb = voUserItems.get(ev.item_id);
       if (eb) { try { eb.remove(); } catch {} voUserItems.delete(ev.item_id); }
       if (ev.item_id) voSend({ type: 'conversation.item.delete', item_id: ev.item_id });
+      voResumeSoon('self_echo');  // confirmed our own echo — resume the cut-off answer promptly
       return;   // do NOT log it as a user turn or clear a false-interrupt recovery
     }
     voClearFalseInterrupt();
@@ -632,6 +649,16 @@ function voHandleEvent(ev) {
     // drain) so we don't hear the last syllables of our own TTS as user speech.
     voHalfDuplexScheduleReopen();
     const turnCancelled = !!(globalThis.VoiceNotify && globalThis.VoiceNotify.isTurnDetectedCancellation(ev.response));
+    // Barge-in cut this response. If the speech_started arming missed it (the cut landed
+    // before >10 chars had streamed, or the events raced), arm recovery now from what we
+    // had already spoken — so a FALSE interrupt (self-echo / road noise) still resumes
+    // instead of the answer just stopping mid-sentence with nothing to resume from.
+    if (turnCancelled && !voDropCurrentResponse && !voFalseInt.text && voAsstText && voAsstText.length > 10) {
+      voFalseInt.text = voAsstText;
+      if (voFalseInt.timer) clearTimeout(voFalseInt.timer);
+      voFalseInt.timer = setTimeout(voResumeFalseInterrupt, 2800);
+      voDiag('pipeline', 'false_interrupt_armed', { assistantChars: voAsstText.length, at: 'cancel' });
+    }
     const suppressPartial = voDropCurrentResponse || (turnCancelled && !!voFalseInt.text);
     if (suppressPartial) {
       if (voAsstBubble) { try { voAsstBubble.remove(); } catch {} }
@@ -693,13 +720,33 @@ const VO_TOOL_LABELS = {
 /* ---------- false-interruption recovery (road noise cancels a reply → resume it) ---------- */
 
 const voFalseInt = { timer: null, text: '' };
+let voResumeTries = 0;
 function voClearFalseInterrupt() {
   if (voFalseInt.timer) { clearTimeout(voFalseInt.timer); voFalseInt.timer = null; }
-  voFalseInt.text = '';
+  voFalseInt.text = ''; voResumeTries = 0;
+}
+// Once we've POSITIVELY identified the interrupting turn as noise (empty transcript) or
+// our own echo, there's no reason to sit in dead air for the full arming window — bring
+// the resume forward so the answer picks back up quickly instead of feeling like it just
+// stopped. (The slow 2.8s window stays for the "no transcript ever arrived" case.)
+function voResumeSoon(reason) {
+  if (!voFalseInt.text) return;
+  if (voFalseInt.timer) clearTimeout(voFalseInt.timer);
+  voFalseInt.timer = setTimeout(voResumeFalseInterrupt, 700);
+  voDiag('pipeline', 'false_interrupt_resume_soon', { reason: reason || '' });
 }
 function voResumeFalseInterrupt() {
   voFalseInt.timer = null;
-  if (!voFalseInt.text || voActiveResponse || !voDc || voDc.readyState !== 'open') { voFalseInt.text = ''; return; }
+  if (!voFalseInt.text || !voDc || voDc.readyState !== 'open') { voFalseInt.text = ''; voResumeTries = 0; return; }
+  // A response is active right now (the model already resumed on its own, or events
+  // raced) — don't stack a second response; wait briefly and re-check, bounded so a
+  // wedged state can never loop forever. Crucially, KEEP the resume text meanwhile so a
+  // real cut-off answer isn't silently dropped just because the timing was tight.
+  if (voActiveResponse) {
+    if (voResumeTries++ < 6) { voFalseInt.timer = setTimeout(voResumeFalseInterrupt, 500); return; }
+    voFalseInt.text = ''; voResumeTries = 0; return;
+  }
+  voResumeTries = 0;
   const tail = voFalseInt.text.slice(-300);
   voFalseInt.text = '';
   voDiag('pipeline', 'false_interrupt_resume', { tailChars: tail.length });

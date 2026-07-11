@@ -54,6 +54,49 @@ is at the **mic**, in the browser (`public/voice.js`). Policy is minted by the s
 4. **Model instruction.** A persona line tells the model that its own words echoed back are
    loopback, not the user — belt-and-braces for barge-in mode.
 
+## Follow-up — "stops mid-sentence" in barge-in mode
+
+**Symptom:** with barge-in enabled (`VOICE_ASSISTANT_INTERRUPT_RESPONSE=1`, set 2026-07-06
+so a reply can be interrupted while driving), the assistant sometimes **stops mid-sentence
+even though the network is fine.**
+
+**Root cause (confirmed from `diagnostics/*.jsonl`):** barge-in flips two things at once —
+`interrupt_response: true` on OpenAI's VAD **and** half-duplex OFF (they're mutually
+exclusive), so the **mic stays hot while the assistant speaks.** OpenAI's server-side VAD
+then hears the assistant's own TTS (residual after browser AEC on a car speaker) or a burst
+of road noise, fires `turn_detected`, and **cancels the in-progress response** — the reply
+is cut mid-sentence. Across two days of real drives, **55 / 304 responses were cancelled;
+51 were `turn_detected`, 0 were token-truncation or server errors** (one answer was cut
+after 868 characters), and the cut that was traced had `packetsLost:0, jitter:3 ms` — the
+network was pristine. It is a false barge-in, not a drop.
+
+**Why the existing recovery didn't catch it:** the self-echo guard only compared a "user"
+turn against **completed** assistant utterances (`voRecentAsst`), but a barge-in cuts the
+utterance being spoken **right now** — which wasn't in the compare set yet, so its echo
+read as genuine user speech, cleared the recovery, and the answer stayed stopped.
+
+**The fix (client `public/voice.js`, all low-risk, env-reversible via the flag):**
+
+1. **In-flight echo matching.** The self-echo compare set now includes the currently
+   streaming utterance (`voAsstText`) and the one a barge-in just cut (`voFalseInt.text`),
+   not only completed ones — so the echo of the sentence being spoken is recognized and
+   the false interrupt recovers instead of stranding the answer. (Canonical policy:
+   `shouldResumeAfterBargeIn()` in `server/voice-assistant.mjs`, unit-tested.)
+2. **Arm recovery at the cut.** Recovery is now also armed at the `turn_detected`
+   cancellation (not only at `speech_started`), so a mid-sentence cut always has a resume
+   candidate even if the events raced.
+3. **Prompt resume.** Once a turn is positively identified as empty (noise) or self-echo,
+   the answer resumes after ~700 ms instead of sitting in the full 2.8 s dead-air window
+   (`false_interrupt_resume_soon`). The 2.8 s window stays for the "no transcript arrived"
+   case, and the resume keeps its text if a response is momentarily still active (bounded
+   re-check) rather than dropping it.
+
+**Operational note / recommendation.** These make barge-in *much* safer, but a hot mic next
+to a loud car speaker will always risk some self-interruption — AEC can't fully cancel it.
+For pure driving use, **half-duplex (`VOICE_ASSISTANT_INTERRUPT_RESPONSE=0`) is the mode
+that cannot stop mid-sentence at all**; barge-in trades that guarantee for the ability to
+cut the assistant off by talking. Which default to run is a product call (filed for Jimmy).
+
 ## Telemetry (AC #4)
 
 Every incident is a persisted diagnostic event (`~/.cc-mobile/voice-assistant/diagnostics/`):
@@ -62,7 +105,9 @@ Every incident is a persisted diagnostic event (`~/.cc-mobile/voice-assistant/di
 - `self_interrupt_candidate` — VAD fired during an active response (a self-interruption
   suspect; ideally ~0 with half-duplex on);
 - `self_echo_dropped` — the guard discarded a self-transcribed "user" turn;
-- `false_interrupt_armed` / `false_interrupt_resume` — the existing noise-recovery path;
+- `false_interrupt_armed` / `false_interrupt_resume` — the noise-recovery path
+  (`false_interrupt_armed` now also fires with `at:'cancel'` when armed at the barge-in cut;
+  `false_interrupt_resume_soon` marks a fast resume once noise/echo was confirmed);
 - `audio_incidents` — an end-of-call rollup (`{selfInterrupt, misattribution}`) also sent to
   the server on the end-of-call beacon.
 
