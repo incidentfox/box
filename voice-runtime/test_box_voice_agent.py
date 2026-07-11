@@ -22,14 +22,14 @@ def test_deepgram_utterance_end_satisfies_provider_minimum():
     assert deepgram_options()["endpointing_ms"] >= 500
 
 
-def test_turn_handling_uses_livekit_semantic_detector_and_documented_dynamic_bounds(monkeypatch):
+def test_turn_handling_uses_livekit_semantic_detector_and_conservative_dynamic_bounds(monkeypatch):
     monkeypatch.delenv("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", raising=False)
     monkeypatch.delenv("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", raising=False)
     monkeypatch.setenv("LIVEKIT_API_KEY", "test-key")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "test-secret")
     options = turn_handling_options()
     assert options["turn_detection"].model == "turn-detector-v1"
-    assert options["endpointing"] == {"mode": "dynamic", "min_delay": 0.5, "max_delay": 3.0, "alpha": 0.9}
+    assert options["endpointing"] == {"mode": "dynamic", "min_delay": 1.2, "max_delay": 4.5, "alpha": 0.9}
     assert options["interruption"]["enabled"] is False
 
 

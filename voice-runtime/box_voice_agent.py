@@ -61,11 +61,14 @@ def turn_handling_options() -> TurnHandlingOptions:
         except ValueError:
             return default
 
-    # LiveKit documents 0.5–3.0 seconds as the standard dynamic endpointing
-    # window. Keep the knobs bounded, but do not use the old, much longer
-    # custom window that allowed a completed turn to linger indefinitely.
-    minimum = min(2.0, max(0.5, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 0.5)))
-    maximum = min(5.0, max(minimum + 0.5, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 3.0)))
+    # The standard 0.5 s lower bound is too eager for a hands-free caller: a
+    # natural mid-sentence breath can be that long, and the live transcript
+    # showed turns such as "So let's" reaching Codex as completed requests.
+    # Keep dynamic semantic endpointing, but bias its default window toward
+    # finishing the caller's sentence. Operators can still lower these values
+    # explicitly when latency is more important than conversational tolerance.
+    minimum = min(2.0, max(0.5, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 1.2)))
+    maximum = min(5.0, max(minimum + 0.5, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 4.5)))
     return TurnHandlingOptions(
         # v1 is LiveKit's hosted audio+semantic detector. It avoids handing a
         # dangling phrase such as "if we..." to Codex as a completed request.
