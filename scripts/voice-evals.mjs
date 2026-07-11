@@ -29,7 +29,7 @@ const SCENARIOS = [
     turns: ['Hey, what are my agents up to right now?'],
     expect_tools: ['get_overview|list_sessions'],
     criteria: [
-      'Reports agent/session status grounded in the tool result (names or counts), not invented',
+      'Reports the actionable working/needs-input session from working_now, grounded in the tool result; it may intentionally omit passive live/idle sessions and must not invent work',
       'Spoken-style answer, no markdown or bullet lists; a count + top items is ideal — fail only if it recites a litany of 5+ items',
     ],
   },
@@ -72,6 +72,33 @@ const SCENARIOS = [
       if ((actualStarts[0].args && actualStarts[0].args.agent) !== 'codex') return 'start_agent did not use codex';
       return null;
     },
+  },
+  {
+    name: 'context-before-status',
+    turns: ['Explain the PDF merge pull request. I need to understand what it is trying to do, what was broken, why it matters, and what is still unknown.'],
+    expect_tools: ['check_session|read_session_output|linear_issue'],
+    forbid_tools: ['start_agent', 'send_to_session', 'linear_update', 'email_jimmy', 'archive_session', 'request_full_artifact'],
+    criteria: [
+      'Stays on the PDF merge work only and does not dump unrelated tickets, agents, reviews, or background status',
+      'Explains in plain language the intended behavior, the failure or risk, why that affects bill submission or attachments, and the next verification/unknown',
+      'Does not merely say a PR is ready, cite an issue code/title, narrate tool usage, or offer to email the answer instead of explaining it',
+      'Uses at most three spoken sentences and gives enough context for the answer to stand alone',
+    ],
+  },
+  {
+    name: 'frustrated-context-repair',
+    turns: [
+      'What is going on with the PDF merge work?',
+      'What the fuck does that mean? Start from the beginning. Tell me what was broken, why it matters, and what still needs to happen.',
+    ],
+    expect_tools: ['check_session|read_session_output|linear_issue'],
+    forbid_tools: ['get_overview', 'email_jimmy', 'request_full_artifact', 'start_agent', 'send_to_session', 'linear_update'],
+    criteria: [
+      'The second answer immediately addresses the exact question without defensiveness, apology speech, or an unrelated task update',
+      'Re-explains from first principles: purpose, concrete failure/user impact, and remaining next step or missing evidence',
+      'Keeps to one topic and does not overwhelm with a list of other PRs or statuses',
+      'Does not ask Jimmy to approve fetching details and does not substitute an email offer for the spoken explanation',
+    ],
   },
   {
     name: 'ambiguous-request',

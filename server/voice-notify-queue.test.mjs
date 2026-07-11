@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import '../public/voice-notify-queue.js';
 
-const { createNotifyQueue } = globalThis.VoiceNotify;
+const { createNotifyQueue, shouldSpeakUpdate, isEmptyTranscript, isTurnDetectedCancellation } = globalThis.VoiceNotify;
 assert.ok(typeof createNotifyQueue === 'function', 'createNotifyQueue is published');
 
 // ---- test harness --------------------------------------------------------------
@@ -201,6 +201,28 @@ function withFailingSend(settleMs = 1000) {
   f.q.onResponseDone();                      // triggers a retry
   assert.equal(f.q.pendingCount(), 0, 'delivered on retry once the channel works');
   assert.ok(f.sent.some((m) => m.type === 'conversation.item.create'), 'the notice eventually went out');
+}
+
+// ================================================================================
+// 8. SPEECH POLICY — routine completions stay visual-only; only explicit/urgent
+//    server events are allowed to create a new spoken turn.
+// ================================================================================
+{
+  assert.equal(shouldSpeakUpdate({ kind: 'task_done', audible: false }), false);
+  assert.equal(shouldSpeakUpdate({ kind: 'watch_pr_ready', audible: true }), true);
+  assert.equal(shouldSpeakUpdate({ kind: 'task_failed', audible: true }), true);
+  assert.equal(shouldSpeakUpdate({}), false);
+}
+
+// Empty/noise turns and turn-detected cancellations are the exact double-reply pattern
+// captured in the 2026-07-10 production transcript.
+{
+  assert.equal(isEmptyTranscript(''), true);
+  assert.equal(isEmptyTranscript('   '), true);
+  assert.equal(isEmptyTranscript('check the upgrade'), false);
+  assert.equal(isTurnDetectedCancellation({ status: 'cancelled', status_details: { type: 'cancelled', reason: 'turn_detected' } }), true);
+  assert.equal(isTurnDetectedCancellation({ status: 'completed' }), false);
+  assert.equal(isTurnDetectedCancellation({ status: 'cancelled', status_details: { reason: 'client_cancelled' } }), false);
 }
 
 console.log('voice-notify-queue ok');

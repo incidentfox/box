@@ -5,9 +5,9 @@
  * it mints the ephemeral token (with live-context instructions + tool schemas) and
  * executes every tool call the model makes (POST /api/voice/tool).
  *
- * Long-running work (deep research, delegated agents) completes in the background;
- * we poll /api/voice/updates and inject completions as system messages so the
- * assistant announces them mid-conversation.
+ * Long-running work (deep research, delegated agents) completes in the background.
+ * We show all updates in the UI, but only explicitly watched or urgent updates become
+ * spoken system messages; routine completions never hijack the active conversation.
  *
  * Realtime sessions hard-cap at 60 min and can't resume, so at ~52 min (or on any
  * drop — tunnels, dead zones) we mint a fresh token flagged as a reconnect: the
@@ -36,6 +36,7 @@ let voAnalyser = null, voOrbRaf = 0;
 let voSpeechStopAt = 0, voLatencies = [];   // end-of-user-speech → first spoken output, ms
 let voStatsIv = null, voLastInboundStats = null, voLastStatsLogAt = 0;
 let voResponseDiag = null, voLastAudioTranscriptAt = 0;
+let voDropCurrentResponse = false; // empty/noise turn: cancel and suppress the model's accidental reply
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -329,7 +330,7 @@ async function voStart() {
   voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
   voLatencies = []; voSpeechStopAt = 0; voClearFalseInterrupt();
   voStopStats(); voResponseDiag = null; voLastAudioTranscriptAt = 0;
-  voResetAudioGate(); voRecentAsst = []; voIncidents = { selfInterrupt: 0, misattribution: 0 };
+  voResetAudioGate(); voRecentAsst = []; voIncidents = { selfInterrupt: 0, misattribution: 0 }; voDropCurrentResponse = false;
   voStartedAt = Date.now();
   voFeedEl().innerHTML = '';
   await voConnect(false);
@@ -361,7 +362,7 @@ async function voConnect(isReconnect) {
       const track = voMicStream.getAudioTracks()[0];
       voDiag('playback', 'mic_track', voTrackSettings(track));
     }
-    voResetAudioGate();          // fresh connection → mic open (subject to mute)
+    voResetAudioGate(); voDropCurrentResponse = false; // fresh connection → mic open (subject to mute)
     voApplyMic();
     if (voMemAudio) voStartAudioCapture(); else voStopAudioCapture();  // opt-in audio storage
 
@@ -459,7 +460,7 @@ function voEnd(finalState) {
   for (const iv of [voClockIv, voPollIv, voFlushIv]) if (iv) clearInterval(iv);
   voReconnectT = voRotateT = voClockIv = voPollIv = voFlushIv = null;
   if (voNotifyQ) voNotifyQ.setChannelOpen(false);
-  voResetAudioGate();
+  voResetAudioGate(); voDropCurrentResponse = false;
   voStopStats();
   voStopAudioCapture();
   // Telemetry: one summary line per call so self-interruption / misattribution rates are
@@ -538,7 +539,7 @@ function voHandleEvent(ev) {
 
   // user speech transcription (streams in after each utterance)
   if (t === 'conversation.item.input_audio_transcription.delta') {
-    voClearFalseInterrupt(); // real words — the interruption was genuine
+    if (String(ev.delta || '').trim()) { voClearFalseInterrupt(); voDropCurrentResponse = false; } // real words — genuine interruption
     let b = voUserItems.get(ev.item_id);
     if (!b) { b = voBubble('user', ''); voUserItems.set(ev.item_id, b); }
     b.textContent += ev.delta || '';
@@ -546,23 +547,39 @@ function voHandleEvent(ev) {
     return;
   }
   if (t === 'conversation.item.input_audio_transcription.completed') {
+    const transcript = String(ev.transcript || '').trim();
+    if (globalThis.VoiceNotify && globalThis.VoiceNotify.isEmptyTranscript(transcript)) {
+      const eb = voUserItems.get(ev.item_id);
+      if (eb) { try { eb.remove(); } catch {} voUserItems.delete(ev.item_id); }
+      if (ev.item_id) voSend({ type: 'conversation.item.delete', item_id: ev.item_id });
+      voDiag('pipeline', 'empty_transcript_dropped', { itemId: ev.item_id || '', activeResponse: !!voActiveResponse });
+      // Semantic VAD may already have auto-created a response to road noise. Cancel it;
+      // the false-interrupt timer will resume any real answer that the noise cut off.
+      if (voActiveResponse) {
+        voDropCurrentResponse = true;
+        voSend({ type: 'response.cancel' });
+        voDiag('pipeline', 'empty_turn_response_cancelled', {});
+      }
+      return;
+    }
     // Misattribution guard: if this "user" turn is really our own TTS echoed back into
     // the mic, drop it and purge it from the model's context so it can't respond to
     // itself. Half-duplex normally prevents the echo reaching OpenAI at all; this catches
     // the onset window and covers barge-in mode where the mic stays hot.
-    if (voIsSelfEcho(ev.transcript)) {
+    if (voIsSelfEcho(transcript)) {
       voIncidents.misattribution++;
-      voDiag('pipeline', 'self_echo_dropped', { score: Math.round(voSelfEchoScore(ev.transcript) * 100) / 100, chars: (ev.transcript || '').length });
+      voDiag('pipeline', 'self_echo_dropped', { score: Math.round(voSelfEchoScore(transcript) * 100) / 100, chars: transcript.length });
       const eb = voUserItems.get(ev.item_id);
       if (eb) { try { eb.remove(); } catch {} voUserItems.delete(ev.item_id); }
       if (ev.item_id) voSend({ type: 'conversation.item.delete', item_id: ev.item_id });
       return;   // do NOT log it as a user turn or clear a false-interrupt recovery
     }
     voClearFalseInterrupt();
+    voDropCurrentResponse = false;
     let b = voUserItems.get(ev.item_id);
     if (!b) { b = voBubble('user', ''); voUserItems.set(ev.item_id, b); }
-    if (ev.transcript) b.textContent = ev.transcript;
-    voEventBuf.push({ ts: Date.now(), kind: 'user', text: ev.transcript || b.textContent });
+    b.textContent = transcript;
+    voEventBuf.push({ ts: Date.now(), kind: 'user', text: transcript });
     voScroll();
     return;
   }
@@ -599,7 +616,6 @@ function voHandleEvent(ev) {
   }
   if (t === 'response.output_audio_transcript.done' || t === 'response.audio_transcript.done') {
     if (ev.transcript && voAsstBubble) { voAsstText = ev.transcript; voAsstBubble.textContent = ev.transcript; }
-    voRememberAsst(ev.transcript || voAsstText);   // for the self-echo comparison
     return;
   }
 
@@ -615,7 +631,18 @@ function voHandleEvent(ev) {
     // Playback is winding down: re-open the mic after the tail hangover (jitter-buffer
     // drain) so we don't hear the last syllables of our own TTS as user speech.
     voHalfDuplexScheduleReopen();
-    if (voAsstText) { voRememberAsst(voAsstText); voEventBuf.push({ ts: Date.now(), kind: 'assistant', text: voAsstText }); voAsstText = ''; voAsstBubble = null; }
+    const turnCancelled = !!(globalThis.VoiceNotify && globalThis.VoiceNotify.isTurnDetectedCancellation(ev.response));
+    const suppressPartial = voDropCurrentResponse || (turnCancelled && !!voFalseInt.text);
+    if (suppressPartial) {
+      if (voAsstBubble) { try { voAsstBubble.remove(); } catch {} }
+      voDiag('pipeline', 'partial_response_suppressed', { emptyTurn: !!voDropCurrentResponse, turnCancelled, chars: voAsstText.length });
+      voAsstText = ''; voAsstBubble = null;
+    } else if (voAsstText) {
+      voRememberAsst(voAsstText);
+      voEventBuf.push({ ts: Date.now(), kind: 'assistant', text: voAsstText });
+      voAsstText = ''; voAsstBubble = null;
+    }
+    voDropCurrentResponse = false;
     const u = ev.response && ev.response.usage;
     if (u) {
       const ind = u.input_token_details || {}, outd = u.output_token_details || {};
@@ -655,6 +682,7 @@ const VO_TOOL_LABELS = {
   get_overview: 'Checking the box…', list_sessions: 'Listing sessions…', check_session: 'Checking session…',
   send_to_session: 'Messaging agent…', start_agent: 'Starting agent…', delegate_ticket: 'Delegating ticket…',
   linear_board: 'Reading board…', linear_create: 'Creating issue…', linear_update: 'Updating issue…',
+  linear_issue: 'Reading issue details…',
   needs_jimmy: 'Checking decisions…', web_search: 'Searching the web…', deep_research: 'Launching research…',
   check_tasks: 'Checking tasks…', brain_search: 'Searching the brain…', brain_read: 'Reading the brain…',
   get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
@@ -720,12 +748,16 @@ async function voPollUpdates() {
     for (const e of (j.events || [])) {
       voCursor = Math.max(voCursor, e.seq);
       voNotice('📣 ' + (e.title || e.kind));
+      if (!(globalThis.VoiceNotify && globalThis.VoiceNotify.shouldSpeakUpdate(e))) {
+        voDiag('pipeline', 'notify_silent', { kind: e.kind || '', title: String(e.title || '').slice(0, 80) });
+        continue;
+      }
       // Queue as an explicit SYSTEM event. The queue guarantees it is never delivered
       // mid-utterance and never fired as a user turn; the framing tells the model to
       // treat it as a system event, wait for a pause, summarize, and ask for his take.
       if (voNotifyQ) voNotifyQ.enqueue(
-        `[TASK UPDATE — system event, NOT the user speaking] Background work finished: ${e.speak} `
-        + `At the next natural pause, mention it in one short sentence and ask if he wants you to act on it. Never treat this as something he said.`,
+        `[TASK UPDATE — system event, NOT the user speaking] ${e.speak} `
+        + `This was explicitly watched or is urgent. Mention it once with purpose, impact, and next step; do not ask a generic follow-up and do not switch to unrelated items.`,
         { kind: 'task_update' });
     }
   } catch {}

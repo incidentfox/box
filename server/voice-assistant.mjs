@@ -100,10 +100,23 @@ export function voiceResponseStyle(style = 'brief') {
   }
   return [
     '# Response Style',
-    '- Default to ONE short spoken sentence, usually under twelve words.',
-    '- Use two sentences only for a tool result plus the next action. Three sentences is the hard cap.',
-    '- For lists, say the count and the top one or two items; offer the rest instead of reading them.',
+    '- Default to one or two compact spoken sentences. For work/status explanations, use roughly 25-45 words so the answer has enough context to stand alone.',
+    '- Cover ONE topic at a time and never exceed three spoken sentences. Use the third sentence only for the concrete next step or missing evidence.',
+    '- For lists, say the count and the single most important item. Mention that more exists without reading or offering the whole list.',
     '- After tool calls, answer the user directly. Do not recap every tool step.',
+  ].join('\n');
+}
+
+export function voiceContextPolicy() {
+  return [
+    '- Every work-status answer must stand alone: say WHAT the work is trying to accomplish, WHY it matters or what was broken, and WHAT is happening next or what evidence is still missing.',
+    '- Never say only "a PR is ready", "the ticket is active", or a code/title. Translate it into plain product behavior and user impact.',
+    '- Stay on the one item Jimmy asked about. For a broad overview, cover at most two important topics and say how many lower-priority items you are intentionally leaving out.',
+    '- When he asks "what does that mean?", restart from first principles in plain language. Do not stack more statuses, acronyms, or unrelated work onto the answer.',
+    '- If the available preview cannot explain purpose, failure, impact, and next step, fetch the complete session output before answering. Do not guess from a title.',
+    '- When Jimmy is frustrated, answer his exact last question in the first sentence. No apology speech, process narration, generic offer, or unrelated update.',
+    '- A request to explain, review, inspect, summarize, or check status is READ-ONLY. Use read tools only; never start an agent, update Linear, message a session, email, archive, or mutate anything unless Jimmy explicitly asks for that action.',
+    '- A live read-tool result overrides the startup context snapshot. Do not add sessions, tickets, PRs, or jobs that are absent from the latest tool result, even if they appeared in earlier context.',
   ].join('\n');
 }
 
@@ -551,6 +564,11 @@ export function voiceAgentStartKey({ scope = '', agent = 'claude', project = '',
   return `${String(scope || 'global').toLowerCase()}|${String(agent || 'claude').toLowerCase()}|${String(project || '').toLowerCase()}|${topic}`;
 }
 
+export function voiceEventAudible(kind = '') {
+  const k = String(kind || '').toLowerCase();
+  return k.startsWith('watch_') || /(?:failed|error|needs_input|blocked)/.test(k);
+}
+
 // ---- plain-language work labels (INC-1087) ----------------------------------
 // Driving-safety problem: the voice assistant kept referring to work by bare code
 // ("INC nine fifty finished") which is meaningless at the wheel. These pure helpers
@@ -829,12 +847,12 @@ export function registerVoiceAssistant(app, ctx) {
   // ---- background tasks + proactive updates ---------------------------------
 
   let seq = 1;
-  const EVENTS = [];       // { seq, ts, kind, title, speak } — polled by the client
+  const EVENTS = [];       // { seq, ts, kind, title, speak, audible } — polled by the client
   const TASKS = new Map(); // id -> { id, kind, title, status, startedAt, doneAt, summary, file, runId }
   const RECENT_AGENT_STARTS = new Map(); // short idempotency window for frustrated/repeated voice turns
 
-  function pushEvent(kind, title, speak) {
-    EVENTS.push({ seq: seq++, ts: Date.now(), kind, title, speak: short(speak, 2400) });
+  function pushEvent(kind, title, speak, { audible = voiceEventAudible(kind) } = {}) {
+    EVENTS.push({ seq: seq++, ts: Date.now(), kind, title, speak: short(speak, 2400), audible: !!audible });
     if (EVENTS.length > 200) EVENTS.splice(0, EVENTS.length - 200);
   }
   function saveTasks() {
@@ -955,7 +973,7 @@ export function registerVoiceAssistant(app, ctx) {
 
   function emitWatchEvent(w, ev, snapshot) {
     const speak = short(ev.summary || `${ev.type}: ${w.label}`, 1600);
-    pushEvent(`watch_${ev.type}`, w.label, speak);
+    pushEvent(`watch_${ev.type}`, w.label, speak, { audible: true });
     watchAudit('notify', { watcherId: w.id, type: ev.type, key: ev.key, targetType: w.targetType, targetId: w.targetId, status: snapshot && snapshot.status });
   }
 
@@ -1308,7 +1326,7 @@ export function registerVoiceAssistant(app, ctx) {
       parameters: { type: 'object', properties: {} },
       handler: async () => {
         const { sessions } = (() => { try { return listSessions({ limit: 30, filter: 'all' }); } catch { return { sessions: [] }; } })();
-        const active = sessions.filter((s) => s.status === 'working' || s.status === 'needs_input').slice(0, 8);
+        const active = sessions.filter((s) => s.status === 'working' || s.status === 'needs_input').slice(0, 4);
         let board = null, needs = null;
         try { board = await selfFetch('/api/linear-board'); } catch {}
         try { needs = await selfFetch('/api/needs-attention'); } catch {}
@@ -1316,10 +1334,14 @@ export function registerVoiceAssistant(app, ctx) {
         for (const c of (board && board.columns) || []) cols[c.name] = (c.issues || []).length;
         return {
           working_now: active.map(sessBrief),
-          recent_sessions: sessions.slice(0, 8).map(sessBrief),
+          // Never mix old idle chats into a spoken "what is running" answer — that was
+          // the source of the irrelevant daily-job/PR status dump in the bad drive.
+          recent_sessions: sessions.filter((s) => ['working', 'needs_input', 'live'].includes(s.status)).slice(0, 5).map(sessBrief),
+          passive_live_count: sessions.filter((s) => s.status === 'live').length,
           board_counts: cols,
-          needs_jimmy: ((needs && needs.items) || []).slice(0, 6).map((i) => `${i.status} ${i.title}`),
+          needs_jimmy: ((needs && needs.items) || []).slice(0, 3).map((i) => `${i.status} ${i.title}`),
           background_tasks: [...TASKS.values()].filter((t) => t.status === 'running').map((t) => `${t.kind}: ${t.what || t.title} (${ago(t.startedAt)})${t.lastActivity ? ' — ' + short(t.lastActivity, 80) : ''}`),
+          answer_shape: 'For agent status, name working_now plus at most one background task. You may give passive_live_count as context without naming those sessions. Never say "nothing else is running" when passive_live_count is nonzero. Do not mention board or needs_jimmy unless Jimmy asked for them.',
         };
       },
     },
@@ -1470,7 +1492,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'send_to_session',
-      description: 'Send a message/instruction into an existing non-archived agent session (it resumes and works in the background; you will be told when it finishes its turn). Identify the session by query words. Archived sessions are protected unless resume_archived is explicitly true.',
+      description: 'Send a message/instruction into an existing non-archived agent session only when Jimmy explicitly asks to tell/correct/steer that agent. Never use for a status, review, or explanation request. It resumes and works in the background; identify the session by query words. Archived sessions are protected unless resume_archived is explicitly true.',
       parameters: { type: 'object', properties: { query: { type: 'string' }, message: { type: 'string' }, resume_archived: { type: 'boolean', description: 'Only true when the user explicitly asked to resume an archived chat.' } }, required: ['query', 'message'] },
       handler: async ({ query, message, resume_archived = false }) => {
         const { hits, all } = matchSession(query, { includeArchived: true });
@@ -1592,7 +1614,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'start_agent',
-      description: 'Start a NEW agent session on the box with a task. agent: claude (default, full harness), codex (good for mechanical coding), or mac (Computer Use on the paired laptop/browser). The task is auto-wrapped in a standard brief (autonomy, deliverable) so it runs to completion without needing a handoff back — just describe the work plainly. Runs in the background; you are told when the first turn completes. Give a descriptive short title. Never call this again for a task already started in the current conversation; "keep going" means the existing agent continues.',
+      description: 'Start a NEW agent session only when Jimmy asks to do/implement/investigate new work, not when he asks to explain, inspect, review, or check existing work. agent: claude (default, full harness), codex (mechanical coding), or mac (Computer Use). The task is auto-wrapped and runs in the background. Give a descriptive title. Never call this again for a task already started in the current conversation; "keep going" means the existing agent continues.',
       parameters: {
         type: 'object',
         properties: {
@@ -1719,7 +1741,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'linear_board',
-      description: 'Current Linear board: columns with their issues (In Progress and Todo first). Preamble: "Checking the board."',
+      description: 'Current Linear board: columns with their issues (In Progress and Todo first). Use only to locate a specific issue id or answer a genuinely broad board question. Never speak the board dump; for one issue/PR, follow with linear_issue.',
       parameters: { type: 'object', properties: {} },
       handler: async () => {
         const b = await selfFetch('/api/linear-board');
@@ -1727,6 +1749,51 @@ export function registerVoiceAssistant(app, ctx) {
         for (const c of (b.columns || [])) {
           out[c.name] = (c.issues || []).slice(0, 10).map((i) => `${i.id} ${short(i.title, 70)}${i.labels && i.labels.length ? ' [' + i.labels.join(',') + ']' : ''}`);
         }
+        return out;
+      },
+    },
+    {
+      name: 'linear_issue',
+      description: 'Read one Linear ticket AND its linked GitHub pull request details (actual PR title/body/files/checks). Use for "what is this ticket/PR actually doing", purpose, impact, evidence, or remaining risk. Read-only; ticket id like INC-1125. Answer from this result, not from the ticket title alone.',
+      parameters: { type: 'object', properties: { ticket: { type: 'string', description: 'Issue id like INC-1125' } }, required: ['ticket'] },
+      handler: async ({ ticket }) => {
+        const id = String(ticket || '').toUpperCase().replace(/[^A-Z0-9-]/g, '');
+        if (!id) return { error: 'ticket id required' };
+        let detail;
+        try { detail = await selfFetch(`/api/linear/${id}`); }
+        catch (e) { return { error: short((e && e.message) || e, 240) }; }
+        const out = {
+          ticket: {
+            id: detail.identifier || id,
+            title: detail.title || '',
+            state: detail.state && detail.state.name || '',
+            url: detail.url || '',
+          },
+        };
+        const link = detail.pr;
+        if (!link || !link.owner || !link.repo || !link.number) {
+          return { ...out, pull_request: null, note: 'No linked pull request found. Explain the ticket from its title/state and say that PR evidence is unavailable.' };
+        }
+        const repo = `${link.owner}/${link.repo}`;
+        const pr = await run('gh', [
+          'pr', 'view', String(link.number), '--repo', repo,
+          '--json', 'title,body,state,isDraft,mergeable,url,files,statusCheckRollup',
+        ], { timeoutMs: 20000 });
+        if (pr.code !== 0) return { ...out, pull_request: { repo, number: link.number, url: link.url || '' }, error: short(pr.out, 300) };
+        let j = {};
+        for (const line of String(pr.out || '').trim().split('\n').reverse()) {
+          try { j = JSON.parse(line); break; } catch {}
+        }
+        out.pull_request = {
+          repo, number: link.number, title: j.title || '', state: j.state || '', draft: !!j.isDraft,
+          mergeable: j.mergeable || '', url: j.url || link.url || '',
+          body: clip(j.body || '', 6000),
+          files: (j.files || []).slice(0, 20).map((f) => ({ path: f.path, additions: f.additions || 0, deletions: f.deletions || 0 })),
+          checks: (j.statusCheckRollup || []).slice(0, 12).map((c) => ({
+            name: c.name || c.context || '', status: c.status || c.state || '', conclusion: c.conclusion || '',
+          })),
+        };
+        out.answer_shape = 'Explain only this item: intended behavior, concrete failure/user impact, what the PR changes, and remaining evidence/next step. Max three spoken sentences.';
         return out;
       },
     },
@@ -1760,7 +1827,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'linear_update',
-      description: 'Comment on a Linear issue and/or move its state (todo | in_progress | in_review | done | canceled).',
+      description: 'Comment on a Linear issue and/or move its state only when Jimmy explicitly asks to change/comment/update it. Never use during a read-only status, review, or explanation request.',
       parameters: { type: 'object', properties: { ticket: { type: 'string' }, comment: { type: 'string' }, state: { type: 'string', enum: ['todo', 'in_progress', 'in_review', 'done', 'canceled'] } }, required: ['ticket'] },
       handler: async ({ ticket, comment, state }) => {
         const id = String(ticket).toUpperCase().replace(/[^A-Z0-9-]/g, '');
@@ -1871,7 +1938,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'request_full_artifact',
-      description: 'Get the COMPLETE, untruncated output of a background task or agent session and email it to Jimmy — voice can only speak a short summary, so this is how he gets the whole thing (a full report, a long write-up, a PR link + details). Use when he says "send me the full report / the whole thing / the full artifact", or right after you told him an output was truncated. Identify it by task id (like "agent-1a2b3c"), a Linear ticket, or words from the session/topic. Preamble: "Sending you the full version."',
+      description: 'Email the COMPLETE artifact to Jimmy only when he explicitly asks to send/email it. Never call because output is long, truncated, or because he asked for a spoken explanation; use read_session_output or linear_issue instead. Identify by task id, ticket, or session/topic.',
       parameters: { type: 'object', properties: { ref: { type: 'string', description: 'Task id, Linear ticket id, or words identifying the session/task/topic' } }, required: ['ref'] },
       handler: async ({ ref }) => {
         const raw = String(ref || '').trim();
@@ -2071,20 +2138,24 @@ Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: M
 - Name work by WHAT IT IS, not its code. When you mention a ticket or session, lead with a short plain-language descriptor of the work — "the clearinghouse-rejections ticket", "the voice-file-access session" — drawn from its title or the tool's "what" field. Say the code only if he asks for it or needs it to act. One short descriptor is enough; don't also recite the full title.
 - Ask only one question at a time.
 
+${voiceContextPolicy()}
+
 ${voiceResponseStyle(RESPONSE_STYLE)}
 
 # Reference pronunciations
 daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · Jopari = "joh-PAR-ee" · Carisk = "CARE-isk" · Spravato = "sprah-VAH-toh".
 
 # Tools
-- Before a tool call, say one short line NAMING the action ("Checking the board.", "Kicking off that research."), then call it immediately. Never "hmm" or "let me think". Skip the preamble when you're directly answering or after unclear audio.
-- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission.
-- Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): narrate briefly as you act. Do not repeat back or ask for confirmation when the intended safe next step is clear.
+- Call read tools silently; the UI already shows an activity chip. Never say "checking", "one sec", or another tool preamble before a quick read.
+- For action tools, report the concrete result AFTER the tool succeeds. Do not speak both a before-action preamble and an after-action confirmation for the same action.
+- Narrate before a tool only when it will take noticeable time (deep research, a new background agent, think_hard), using at most five words. Never repeat a preamble after an interruption.
+- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, linear_issue, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission. If Jimmy named one topic, use a targeted tool; never answer it with a broad board/overview dump. For a specific Linear ticket or PR, call linear_issue so you read the actual PR purpose/body/files instead of guessing from its title.
+- Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): do not repeat back or ask for confirmation when the intended safe next step is clear.
 - Session cleanup: when Jimmy asks to archive, clean up, or hide sessions, call archive_session. It only archives idle or finished sessions and refuses working, live, or needs-input sessions; tell him plainly which sessions were archived and which were left alone. Do not use send_to_session on an archived session unless he explicitly asks to resume that archived chat.
 - Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
-- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND — kick it off and keep talking. [TASK UPDATE] system messages carry both progress heads-ups (still working, N minutes in) and completions — weave them in naturally: the one-line status or result, then offer detail. A [TASK UPDATE] is a SYSTEM event, never something Jimmy said — never answer it as if it were his words, and never let it cut him off mid-sentence; it only ever reaches you at a pause, so just fold it in. When the obvious safe follow-up is to inspect a finished result, do that instead of asking whether to act. To check on running work yourself: check_tasks lists every task with elapsed time + latest activity; check_session includes a full-output summary when a preview is truncated.
+- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND. Normal progress/completion events stay silent in the UI; do not switch topics to announce them. Only an explicit watcher or urgent failure is spoken as [TASK UPDATE]. If one arrives, give one self-contained sentence with purpose + impact + next step, then return to the active topic without asking a generic follow-up question.
 - Watchers — when Jimmy says "tell me when that finishes / when the PR is ready / if it needs me", call watch_session. It registers a server-side watcher; status changes arrive later as [TASK UPDATE] system messages through the normal notification queue.
 - Full lists & long outputs — when check_session flags output_truncated, it has already fetched the complete output and included full_summary. Use that summary immediately; do not announce truncation or ask Jimmy whether to fetch more. If his question needs exact wording or every item, call read_session_output mode:full immediately and page through next_page as needed. Never read a long artifact aloud. To put the WHOLE thing in Jimmy's inbox, call request_full_artifact (it emails him the complete artifact with the PR link).
 - think_hard: for strategy, pricing, prioritization, or anything that deserves real analysis — say you're thinking it through, call it, then discuss its output in your own words a few sentences at a time. Do not read it verbatim.

@@ -29,6 +29,20 @@
 ;(function () {
   const DEFAULT_SETTLE_MS = 1000;
 
+  function shouldSpeakUpdate(event) {
+    return !!(event && event.audible === true);
+  }
+
+  function isEmptyTranscript(text) {
+    return !String(text == null ? '' : text).trim();
+  }
+
+  function isTurnDetectedCancellation(response) {
+    if (!response || response.status !== 'cancelled') return false;
+    const details = response.status_details || {};
+    return details.reason === 'turn_detected' || (details.type === 'cancelled' && details.reason === 'turn_detected');
+  }
+
   function createNotifyQueue(opts) {
     opts = opts || {};
     const send = opts.send || (() => false);
@@ -151,6 +165,6 @@
     };
   }
 
-  const api = { createNotifyQueue };
+  const api = { createNotifyQueue, shouldSpeakUpdate, isEmptyTranscript, isTurnDetectedCancellation };
   if (typeof globalThis !== 'undefined') globalThis.VoiceNotify = api;
 })();
