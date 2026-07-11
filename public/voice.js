@@ -49,6 +49,7 @@ let voAdapterCommitted = '', voAdapterPartial = '', voAdapterEndpointT = null;
 let voAdapterTransport = 'legacy', voLivekitRoom = null, voLivekitTranscript = '', voLivekitBubble = null;
 let voLivekitAsstTranscript = '', voLivekitAsstBubble = null;
 let voLivekitUserSegments = new Map(), voLivekitAsstSegments = new Map();
+let voLivekitCommitBusy = false;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -453,9 +454,11 @@ async function voStartLivekitAdapter(cfg) {
     const agentSpeaking = (speakers || []).some((p) => p.identity !== room.localParticipant.identity);
     voAdapterSpeaking = agentSpeaking;
     voOrbMode(agentSpeaking ? 'speaking' : 'listening');
-    // True half-duplex: the same long-lived LiveKit mic track is disabled while
-    // Cartesia speaks, then re-enabled without rebuilding the capture pipeline.
-    voApplyMic();
+    // True half-duplex: disable the same long-lived LiveKit mic track while
+    // Cartesia plays. Previously this only called voApplyMic(), without ever
+    // closing the gate, so TTS/road noise could keep the server VAD "speaking".
+    if (agentSpeaking) voHalfDuplexClose();
+    else voHalfDuplexScheduleReopen();
   });
   room.on(LK.RoomEvent.Reconnecting, () => { voSetState('reconnecting'); voDiag('livekit', 'reconnecting', {}); });
   room.on(LK.RoomEvent.Reconnected, () => { voSetState('live'); voDiag('livekit', 'reconnected', {}); });
@@ -592,7 +595,20 @@ function voAdapterWatch() {
   tick();
 }
 function voAdapterManualRecord() {
-  if (voAdapterTransport === 'livekit') { voNotice('LiveKit is listening continuously; pause briefly to hand off your turn.'); return; }
+  if (voAdapterTransport === 'livekit') {
+    if (!voLivekitRoom || voLivekitCommitBusy || voMuted) return;
+    voLivekitCommitBusy = true;
+    voLivekitRoom.localParticipant.publishData(
+      new TextEncoder().encode('{"type":"commit_turn"}'),
+      { reliable: true, topic: 'box.voice.control' },
+    ).then(() => {
+      voNotice('Turn sent — finalizing the transcript for Codex.');
+      voDiag('livekit', 'manual_turn_commit', {});
+    }).catch(() => {
+      voNotice('Could not send End turn. Keep speaking or tap once more.');
+    }).finally(() => { setTimeout(() => { voLivekitCommitBusy = false; }, 1200); });
+    return;
+  }
   if (voAdapterBusy || voAdapterSpeaking || voMuted) return;
   // A deliberate tap means "end this turn now". Deepgram finalizes the buffered PCM
   // and returns the same endpoint event as natural end-of-speech.
