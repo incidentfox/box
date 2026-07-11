@@ -847,7 +847,7 @@ export function registerVoiceAssistant(app, ctx) {
   const FALLBACK_MODEL = cfg('VOICE_ASSISTANT_FALLBACK_MODEL', MODEL === 'gpt-realtime-2.1' ? 'gpt-realtime-2' : '');
   const VOICE = cfg('VOICE_ASSISTANT_VOICE', 'marin');
   const RESPONSE_STYLE = cfg('VOICE_ASSISTANT_RESPONSE_STYLE', 'brief');
-  const MODE = voiceAssistantMode(cfg('VOICE_ASSISTANT_MODE', 'realtime'));
+  const MODE = voiceAssistantMode(cfg('VOICE_ASSISTANT_MODE', 'adapter'));
   // Adapter mode keeps speech providers separate from the reasoning/tool engine:
   // audio is transcribed by the existing box STT fallback, the normal Claude/Codex
   // session runner owns context and tools, then OpenAI's HTTP TTS speaks its text.
