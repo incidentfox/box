@@ -851,7 +851,7 @@ export function registerVoiceAssistant(app, ctx) {
   // Adapter mode keeps speech providers separate from the reasoning/tool engine:
   // audio is transcribed by the existing box STT fallback, the normal Claude/Codex
   // session runner owns context and tools, then OpenAI's HTTP TTS speaks its text.
-  const ADAPTER_AGENT = voiceAdapterAgent(cfg('VOICE_ADAPTER_AGENT', 'claude'));
+  const ADAPTER_AGENT = voiceAdapterAgent(cfg('VOICE_ADAPTER_AGENT', 'codex'));
   const ADAPTER_TTS_MODEL = cfg('VOICE_ADAPTER_TTS_MODEL', 'gpt-4o-mini-tts');
   const ADAPTER_TTS_VOICE = cfg('VOICE_ADAPTER_TTS_VOICE', VOICE);
   const ADAPTER_MAX_RESPONSE_CHARS = Math.max(200, Math.min(6000, Number(cfg('VOICE_ADAPTER_MAX_RESPONSE_CHARS', 1400)) || 1400));
@@ -2656,10 +2656,38 @@ ${voiceAutonomyPolicy()}
     try { return await synthesizeAdapterSpeech(text); }
     catch (e) { return { tts_error: String((e && e.message) || e).slice(0, 240) }; }
   }
+  async function runAdapterTranscript({ vsid, transcript, sttModel = '' }) {
+    const key = voiceAdapterSessionKey(vsid);
+    if (!key) throw new Error('invalid voice session id');
+    const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key) : { sessionId: '', busy: false };
+    if (prior.busy) {
+      const text = 'That voice turn is still running in the same session. Give it a moment, then ask me for the result.';
+      return { status: 202, body: { text, pending: true, ...(await adapterSpeechPayload(text)) } };
+    }
+    const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId });
+    const turn = runAdapterTurn({ key, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})` });
+    let timeout;
+    const result = await Promise.race([
+      turn,
+      new Promise((resolve) => { timeout = setTimeout(() => resolve({ timeout: true }), ADAPTER_MAX_TURN_MS); }),
+    ]);
+    clearTimeout(timeout);
+    if (result && result.timeout) {
+      const text = 'I am still working on that. I will keep the same session context, so ask again in a moment for the result.';
+      return { status: 202, body: { transcript, stt_model: sttModel, text, pending: true, ...(await adapterSpeechPayload(text)) } };
+    }
+    if (result && result.error) throw new Error(result.error);
+    if (result && result.canceled) throw new Error('voice adapter turn was cancelled');
+    const text = spokenAdapterText(result && result.text, ADAPTER_MAX_RESPONSE_CHARS) || 'I completed that turn, but the session did not return speakable text.';
+    try {
+      appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'user', text: transcript, source: 'adapter', stt_model: sttModel }) + '\n');
+      appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'assistant', text, source: 'adapter', agent: ADAPTER_AGENT, session_id: result && result.sessionId || '' }) + '\n');
+    } catch {}
+    return { status: 200, body: { transcript, stt_model: sttModel, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', ...(await adapterSpeechPayload(text)) } };
+  }
   // Low-latency transcript preview for adapter mode. It intentionally DOES NOT touch
   // a CLI session: a partial utterance may change, and Codex/Claude turns are atomic.
-  // The browser sends a rolling MediaRecorder blob about once a second, paints this
-  // response immediately, then submits the settled final transcript to the agent.
+  // This is retained as a fallback for browsers that cannot use the streaming STT relay.
   app.post('/api/voice/adapter/transcribe', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
     if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
@@ -2668,41 +2696,26 @@ ${voiceAutonomyPolicy()}
       res.json({ text: String(stt && stt.text || '').trim(), stt_model: stt && stt.model || '' });
     } catch (e) { res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) }); }
   });
+  app.post('/api/voice/adapter/text', requireAuth, async (req, res) => {
+    if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
+    const vsid = String(req.body && req.body.vsid || '').trim();
+    const transcript = String(req.body && req.body.text || '').trim().slice(0, 6000);
+    if (!transcript) return res.status(422).json({ error: 'no speech detected' });
+    try {
+      const out = await runAdapterTranscript({ vsid, transcript, sttModel: String(req.body && req.body.stt_model || 'streaming') });
+      res.status(out.status).json(out.body);
+    } catch (e) { res.status(502).json({ error: String((e && e.message) || e).slice(0, 400) }); }
+  });
   app.post('/api/voice/adapter/turn', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
     if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
     if (!req.file) return res.status(400).json({ error: 'audio is required' });
     const vsid = String(req.body && req.body.vsid || '').trim();
-    const key = voiceAdapterSessionKey(vsid);
-    if (!key) return res.status(400).json({ error: 'invalid voice session id' });
-    const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key) : { sessionId: '', busy: false };
-    if (prior.busy) {
-      const text = 'That voice turn is still running in the same session. Give it a moment, then ask me for the result.';
-      return res.status(202).json({ text, pending: true, ...(await adapterSpeechPayload(text)) });
-    }
     try {
       const stt = await transcribe(req.file.buffer, req.file.mimetype, req.file.originalname);
       const transcript = String(stt && stt.text || '').trim();
       if (!transcript) return res.status(422).json({ error: 'no speech detected', stt_model: stt && stt.model || '' });
-      const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId });
-      const turn = runAdapterTurn({ key, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})` });
-      let timeout;
-      const result = await Promise.race([
-        turn,
-        new Promise((resolve) => { timeout = setTimeout(() => resolve({ timeout: true }), ADAPTER_MAX_TURN_MS); }),
-      ]);
-      clearTimeout(timeout);
-      if (result && result.timeout) {
-        const text = 'I am still working on that. I will keep the same session context, so ask again in a moment for the result.';
-        return res.status(202).json({ transcript, stt_model: stt.model, text, pending: true, ...(await adapterSpeechPayload(text)) });
-      }
-      if (result && result.error) throw new Error(result.error);
-      if (result && result.canceled) throw new Error('voice adapter turn was cancelled');
-      const text = spokenAdapterText(result && result.text, ADAPTER_MAX_RESPONSE_CHARS) || 'I completed that turn, but the session did not return speakable text.';
-      try {
-        appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'user', text: transcript, source: 'adapter', stt_model: stt.model }) + '\n');
-        appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'assistant', text, source: 'adapter', agent: ADAPTER_AGENT, session_id: result && result.sessionId || '' }) + '\n');
-      } catch {}
-      res.json({ transcript, stt_model: stt.model, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', ...(await adapterSpeechPayload(text)) });
+      const out = await runAdapterTranscript({ vsid, transcript, sttModel: stt.model });
+      res.status(out.status).json(out.body);
     } catch (e) {
       res.status(502).json({ error: String((e && e.message) || e).slice(0, 400) });
     }

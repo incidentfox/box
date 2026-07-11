@@ -4249,11 +4249,13 @@ const wss = new WebSocketServer({ noServer: true });
 const sttWss = new WebSocketServer({ noServer: true });
 
 // Deepgram realtime: raw PCM frames go straight onto the socket (binary), JSON control
-// messages flush/close. Maps interim→partial, is_final→committed for the client, which
-// has its own seal/dedup logic (sealCommitted/isSameUtterance) over those segments.
+// messages flush/close. `is_final` seals an STT segment; `speech_final` is Deepgram's
+// actual end-of-speech signal, forwarded separately so voice-adapter can hand one
+// complete transcript to a CLI agent instead of guessing from browser volume.
 function sttDeepgram(client, rate) {
   const dgUrl = `wss://api.deepgram.com/v1/listen?model=${encodeURIComponent(DG_MODEL)}&language=multi`
-    + `&encoding=linear16&sample_rate=${rate}&channels=1&interim_results=true&smart_format=true&punctuate=true`;
+    + `&encoding=linear16&sample_rate=${rate}&channels=1&interim_results=true&smart_format=true&punctuate=true`
+    + `&endpointing=500&utterance_end_ms=1000`;
   const dg = new WSClient(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_KEY}` } });
   let dgOpen = false; const queue = [];
   // keep the stream alive across short pauses (Deepgram closes after ~10s of silence)
@@ -4261,10 +4263,11 @@ function sttDeepgram(client, rate) {
   dg.on('open', () => { dgOpen = true; for (const b of queue) { try { dg.send(b); } catch {} } queue.length = 0; try { client.send(JSON.stringify({ type: 'ready' })); } catch {} });
   dg.on('message', (data) => {
     let o; try { o = JSON.parse(data.toString()); } catch { return; }
+    if (o.type === 'UtteranceEnd') { try { client.send(JSON.stringify({ type: 'endpoint' })); } catch {} return; }
     if (o.type !== 'Results') return;
     const text = (o.channel && o.channel.alternatives && o.channel.alternatives[0] && o.channel.alternatives[0].transcript || '').trim();
-    if (!text) return;
-    try { client.send(JSON.stringify({ type: o.is_final ? 'committed' : 'partial', text })); } catch {}
+    if (text) { try { client.send(JSON.stringify({ type: o.is_final ? 'committed' : 'partial', text })); } catch {} }
+    if (o.speech_final) { try { client.send(JSON.stringify({ type: 'endpoint', text })); } catch {} }
   });
   dg.on('error', (e) => { try { client.send(JSON.stringify({ type: 'error', msg: String(e.message || e) })); } catch {} });
   dg.on('close', () => { clearInterval(keepAlive); try { client.close(); } catch {} });

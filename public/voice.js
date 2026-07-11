@@ -44,6 +44,8 @@ let voAdapterRaf = 0, voAdapterRecorder = null, voAdapterChunks = [], voAdapterS
 let voAdapterSilentAt = 0, voAdapterBusy = false, voAdapterSpeaking = false;
 let voAdapterManualGraceUntil = 0, voAdapterLastVadDiagAt = 0;
 let voAdapterPreviewAt = 0, voAdapterPreviewInFlight = false, voAdapterPreviewSeq = 0, voAdapterUserBubble = null;
+let voAdapterSttWs = null, voAdapterSttProc = null, voAdapterSttSource = null, voAdapterSttSink = null;
+let voAdapterCommitted = '', voAdapterPartial = '', voAdapterEndpointT = null;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -222,7 +224,7 @@ function voSetState(st) {
   pill.className = 'voStatus ' + st + (voMuted && st === 'live' ? ' muted' : '');
   const orb = $('voOrb');
   orb.className = 'voOrb ' + (st === 'live' ? 'listening' : st);
-  $('voOrbLabel').textContent = st === 'off' ? 'Start' : st === 'ended' ? 'Restart' : st === 'connecting' ? '…' : st === 'reconnecting' ? '…' : (st === 'live' && voMode === 'adapter' ? 'Tap to talk' : '');
+  $('voOrbLabel').textContent = st === 'off' ? 'Start' : st === 'ended' ? 'Restart' : st === 'connecting' ? '…' : st === 'reconnecting' ? '…' : (st === 'live' && voMode === 'adapter' ? 'End turn' : '');
   $('voEnd').disabled = !(st === 'live' || st === 'connecting' || st === 'reconnecting');
   $('voMain').classList.toggle('clickable', st === 'off' || st === 'ended');
 }
@@ -387,15 +389,96 @@ async function voStartAdapter(cfg) {
   voVsid = voAdapterId();
   voMicStream = await navigator.mediaDevices.getUserMedia({ audio: voMicConstraints() });
   voApplyMic();
-  try {
-    voAdapterAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    await voAdapterAudioCtx.resume();
-    const source = voAdapterAudioCtx.createMediaStreamSource(voMicStream);
-    voAdapterAnalyser = voAdapterAudioCtx.createAnalyser(); voAdapterAnalyser.fftSize = 1024;
-    source.connect(voAdapterAnalyser);
-    voAdapterWatch();
-  } catch (e) { throw new Error('microphone analysis unavailable: ' + String((e && e.message) || e)); }
-  voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready and listening. Tap the orb to force a turn if needed.`);
+  try { await voAdapterStartStreamingStt(); }
+  catch (e) { throw new Error('streaming transcription unavailable: ' + String((e && e.message) || e)); }
+  voSetState('live'); voConnectedAt = Date.now(); voBanner(''); voNotice(`Adapter mode — ${cfg.agent || 'agent'} is ready. Speak naturally; the turn hands off after end-of-speech. Tap End turn to hand off sooner.`);
+}
+function voAdapterPcm16(f32, fromRate, toRate) {
+  let data = f32;
+  if (fromRate !== toRate) {
+    const ratio = fromRate / toRate, len = Math.floor(f32.length / ratio), out = new Float32Array(len);
+    for (let i = 0; i < len; i++) out[i] = f32[Math.floor(i * ratio)] || 0;
+    data = out;
+  }
+  const pcm = new Int16Array(data.length);
+  for (let i = 0; i < data.length; i++) { const s = Math.max(-1, Math.min(1, data[i])); pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+  return pcm.buffer;
+}
+function voAdapterNormText(s) { return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim(); }
+function voAdapterSeal(text) {
+  const seg = String(text || '').trim(); if (!seg) return;
+  const prev = voAdapterCommitted.trim(), a = voAdapterNormText(prev), b = voAdapterNormText(seg);
+  if (prev && b.startsWith(a)) voAdapterCommitted = seg;
+  else if (!prev || !a.endsWith(b)) voAdapterCommitted = prev + (prev ? ' ' : '') + seg;
+}
+function voAdapterLiveTranscript() { return `${voAdapterCommitted} ${voAdapterPartial}`.replace(/\s+/g, ' ').trim(); }
+function voAdapterPaintTranscript() {
+  const text = voAdapterLiveTranscript();
+  if (!voAdapterUserBubble) voAdapterUserBubble = voBubble('user', 'Listening…');
+  voAdapterUserBubble.textContent = text || 'Listening…'; voScroll();
+}
+async function voAdapterStartStreamingStt() {
+  if (!voMicStream || voAdapterSttWs || voAdapterBusy || voAdapterSpeaking) return;
+  voAdapterCommitted = ''; voAdapterPartial = ''; voAdapterUserBubble = null;
+  voAdapterAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  try { await voAdapterAudioCtx.resume(); } catch {}
+  const native = voAdapterAudioCtx.sampleRate;
+  const rate = [8000, 16000, 22050, 24000, 44100, 48000].includes(native) ? native : 16000;
+  voAdapterSttSource = voAdapterAudioCtx.createMediaStreamSource(voMicStream);
+  voAdapterAnalyser = voAdapterAudioCtx.createAnalyser(); voAdapterAnalyser.fftSize = 1024;
+  voAdapterSttSource.connect(voAdapterAnalyser);
+  voAdapterSttProc = voAdapterAudioCtx.createScriptProcessor(4096, 1, 1);
+  voAdapterSttSink = voAdapterAudioCtx.createGain(); voAdapterSttSink.gain.value = 0;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/stt?token=${encodeURIComponent(TOKEN)}&rate=${rate}`);
+  const pendingPcm = [];
+  voAdapterSttWs = ws;
+  ws.onopen = () => { while (pendingPcm.length && ws.readyState === WebSocket.OPEN) ws.send(pendingPcm.shift()); };
+  ws.onmessage = (e) => {
+    let o; try { o = JSON.parse(e.data); } catch { return; }
+    if (o.type === 'partial') { voAdapterPartial = o.text || ''; voAdapterPaintTranscript(); return; }
+    if (o.type === 'committed') { voAdapterSeal(o.text); voAdapterPartial = ''; voAdapterPaintTranscript(); return; }
+    if (o.type === 'endpoint') {
+      if (o.text) voAdapterSeal(o.text);
+      voAdapterPartial = ''; voAdapterPaintTranscript();
+      if (voAdapterEndpointT) clearTimeout(voAdapterEndpointT);
+      voAdapterEndpointT = setTimeout(() => { voAdapterEndpointT = null; voAdapterSubmitText(voAdapterLiveTranscript()); }, 80);
+      return;
+    }
+    if (o.type === 'error') voNotice('Streaming transcription error: ' + String(o.msg || '').slice(0, 120));
+  };
+  ws.onerror = () => voDiag('adapter', 'stream_stt_error', {});
+  ws.onclose = () => {
+    if (voAdapterSttWs !== ws) return;
+    voAdapterSttWs = null;
+    try { if (voAdapterSttProc) voAdapterSttProc.disconnect(); } catch {}
+    try { if (voAdapterSttSource) voAdapterSttSource.disconnect(); } catch {}
+    try { if (voAdapterSttSink) voAdapterSttSink.disconnect(); } catch {}
+    voAdapterSttProc = voAdapterSttSource = voAdapterSttSink = null;
+    try { if (voAdapterAudioCtx) voAdapterAudioCtx.close(); } catch {}
+    voAdapterAudioCtx = null; voAdapterAnalyser = null;
+    // Cellular tunnels can drop an idle socket; reconnect the STT side quietly while
+    // the call is still in its listening half, never while a CLI turn/TTS is active.
+    if (voState === 'live' && !voAdapterBusy && !voAdapterSpeaking) setTimeout(() => voAdapterStartStreamingStt().catch(() => {}), 500);
+  };
+  voAdapterSttProc.onaudioprocess = (ev) => {
+    if (voAdapterBusy || voAdapterSpeaking) return;
+    const pcm = voAdapterPcm16(ev.inputBuffer.getChannelData(0), native, rate);
+    if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+    else if (ws.readyState === WebSocket.CONNECTING && pendingPcm.length < 25) pendingPcm.push(pcm);
+  };
+  voAdapterSttSource.connect(voAdapterSttProc); voAdapterSttProc.connect(voAdapterSttSink); voAdapterSttSink.connect(voAdapterAudioCtx.destination);
+}
+function voAdapterStopStreamingStt() {
+  if (voAdapterEndpointT) { clearTimeout(voAdapterEndpointT); voAdapterEndpointT = null; }
+  try { if (voAdapterSttWs && voAdapterSttWs.readyState <= WebSocket.OPEN) voAdapterSttWs.close(); } catch {}
+  voAdapterSttWs = null;
+  try { if (voAdapterSttProc) voAdapterSttProc.disconnect(); } catch {}
+  try { if (voAdapterSttSource) voAdapterSttSource.disconnect(); } catch {}
+  try { if (voAdapterSttSink) voAdapterSttSink.disconnect(); } catch {}
+  voAdapterSttProc = voAdapterSttSource = voAdapterSttSink = null;
+  try { if (voAdapterAudioCtx) voAdapterAudioCtx.close(); } catch {}
+  voAdapterAudioCtx = null; voAdapterAnalyser = null;
 }
 function voAdapterLevel() {
   if (!voAdapterAnalyser) return 0;
@@ -433,10 +516,9 @@ function voAdapterWatch() {
 }
 function voAdapterManualRecord() {
   if (voAdapterBusy || voAdapterSpeaking || voMuted) return;
-  if (voAdapterRecorder) { voAdapterManualGraceUntil = 0; voAdapterFinishRecording(); return; }
-  voAdapterManualGraceUntil = Date.now() + 3000;
-  voAdapterBeginRecording();
-  voNotice('Listening for your turn…');
+  // A deliberate tap means "end this turn now". Deepgram finalizes the buffered PCM
+  // and returns the same endpoint event as natural end-of-speech.
+  try { if (voAdapterSttWs && voAdapterSttWs.readyState === WebSocket.OPEN) voAdapterSttWs.send(JSON.stringify({ type: 'commit' })); } catch {}
 }
 function voAdapterBeginRecording() {
   if (!voMicStream || typeof MediaRecorder === 'undefined') return;
@@ -510,6 +592,25 @@ async function voAdapterSubmit(blob) {
     voDiag('adapter', 'turn_failed', { message: String((e && e.message) || e).slice(0, 180) });
   } finally { voAdapterBusy = false; if (!voAdapterSpeaking) voOrbMode('listening'); }
 }
+async function voAdapterSubmitText(transcript) {
+  const text = String(transcript || '').trim();
+  if (!text || voAdapterBusy || voState !== 'live') return;
+  voAdapterBusy = true; voAdapterStopStreamingStt(); voOrbMode('thinking'); const chip = voChip(`Asking ${(voAdapterCfg && voAdapterCfg.agent) || 'agent'}…`);
+  const started = Date.now();
+  try {
+    const r = await api('/api/voice/adapter/text', { method: 'POST', body: JSON.stringify({ vsid: voVsid, text, stt_model: 'deepgram:streaming' }) });
+    const j = await r.json(); if (!r.ok && r.status !== 202) throw new Error(j.error || `adapter HTTP ${r.status}`);
+    if (voAdapterUserBubble) voAdapterUserBubble.textContent = j.transcript || text;
+    if (j.text) { voAsstText = j.text; voBubble('asst', j.text); voRememberAsst(j.text); }
+    chip.classList.add('ok'); chip.querySelector('.voSpin').remove();
+    voDiag('adapter', 'stream_turn_done', { ms: Date.now() - started, agent: j.agent || '', pending: !!j.pending });
+    if (j.audio) await voAdapterPlay(j.audio, j.mime || 'audio/mpeg');
+    else if (j.text) await voAdapterBrowserSpeak(j.text);
+  } catch (e) {
+    chip.classList.add('fail'); chip.querySelector('.voSpin').remove();
+    voNotice('Adapter error: ' + String((e && e.message) || e).slice(0, 180));
+  } finally { voAdapterBusy = false; if (!voAdapterSpeaking) { voOrbMode('listening'); voAdapterStartStreamingStt().catch(() => {}); } }
+}
 async function voAdapterPlay(base64, mime) {
   voAdapterSpeaking = true; voOrbMode('speaking');
   const raw = atob(base64), bytes = new Uint8Array(raw.length); for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
@@ -520,7 +621,7 @@ async function voAdapterPlay(base64, mime) {
   } finally {
     URL.revokeObjectURL(url); voAudioEl.onended = null; voAudioEl.onerror = null;
     // Let the car-speaker tail drain before microphone VAD listens again.
-    setTimeout(() => { voAdapterSpeaking = false; if (!voAdapterBusy && voState === 'live') voOrbMode('listening'); }, 600);
+    setTimeout(() => { voAdapterSpeaking = false; if (!voAdapterBusy && voState === 'live') { voOrbMode('listening'); voAdapterStartStreamingStt().catch(() => {}); } }, 600);
   }
 }
 async function voAdapterBrowserSpeak(text) {
@@ -533,7 +634,7 @@ async function voAdapterBrowserSpeak(text) {
       speechSynthesis.speak(utterance);
     });
   } finally {
-    setTimeout(() => { voAdapterSpeaking = false; if (!voAdapterBusy && voState === 'live') voOrbMode('listening'); }, 600);
+    setTimeout(() => { voAdapterSpeaking = false; if (!voAdapterBusy && voState === 'live') { voOrbMode('listening'); voAdapterStartStreamingStt().catch(() => {}); } }, 600);
   }
 }
 
@@ -661,8 +762,7 @@ function voEnd(finalState) {
   voAdapterRaf = 0;
   try { if (voAdapterRecorder && voAdapterRecorder.state !== 'inactive') voAdapterRecorder.stop(); } catch {}
   voAdapterRecorder = null; voAdapterChunks = []; voAdapterBusy = false; voAdapterSpeaking = false;
-  try { if (voAdapterAudioCtx) voAdapterAudioCtx.close(); } catch {}
-  voAdapterAudioCtx = null; voAdapterAnalyser = null; voAdapterCfg = null;
+  voAdapterStopStreamingStt(); voAdapterCfg = null;
   // Telemetry: one summary line per call so self-interruption / misattribution rates are
   // queryable from the persisted diagnostics without a live session (see AC #4).
   voDiag('pipeline', 'audio_incident_summary', {
