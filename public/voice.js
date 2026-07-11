@@ -43,6 +43,7 @@ let voMode = 'realtime', voAdapterCfg = null, voAdapterAudioCtx = null, voAdapte
 let voAdapterRaf = 0, voAdapterRecorder = null, voAdapterChunks = [], voAdapterSpeechAt = 0;
 let voAdapterSilentAt = 0, voAdapterBusy = false, voAdapterSpeaking = false;
 let voAdapterManualGraceUntil = 0, voAdapterLastVadDiagAt = 0;
+let voAdapterPreviewAt = 0, voAdapterPreviewInFlight = false, voAdapterPreviewSeq = 0, voAdapterUserBubble = null;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -442,29 +443,62 @@ function voAdapterBeginRecording() {
   try {
     const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
     voAdapterChunks = []; voAdapterSpeechAt = Date.now(); voAdapterSilentAt = 0;
+    voAdapterPreviewAt = 0; voAdapterPreviewInFlight = false; voAdapterPreviewSeq = 0;
+    voAdapterUserBubble = voBubble('user', 'Listening…');
     voAdapterRecorder = new MediaRecorder(voMicStream, mimeType ? { mimeType } : undefined);
-    voAdapterRecorder.ondataavailable = (e) => { if (e.data && e.data.size) voAdapterChunks.push(e.data); };
+    voAdapterRecorder.ondataavailable = (e) => {
+      if (!e.data || !e.data.size) return;
+      voAdapterChunks.push(e.data);
+      voAdapterPreview();
+    };
     voAdapterRecorder.onstop = () => {
       const recorder = voAdapterRecorder; voAdapterRecorder = null; voAdapterManualGraceUntil = 0;
       const blob = new Blob(voAdapterChunks, { type: recorder && recorder.mimeType || 'audio/webm' });
       voAdapterChunks = [];
       if (blob.size > 200) voAdapterSubmit(blob);
     };
-    voAdapterRecorder.start();
+    // Timeslices let us transcribe the growing utterance and show an interim bubble;
+    // they do not create CLI turns until VAD says the user has finished speaking.
+    voAdapterRecorder.start(750);
   } catch (e) { voNotice('Microphone recording failed.'); voDiag('adapter', 'record_failed', { message: String(e && e.message || e).slice(0, 160) }); }
+}
+async function voAdapterPreview() {
+  if (!voAdapterRecorder || voAdapterPreviewInFlight || voAdapterBusy) return;
+  const now = Date.now();
+  if (now - voAdapterPreviewAt < 900 || !voAdapterChunks.length) return;
+  voAdapterPreviewAt = now; voAdapterPreviewInFlight = true;
+  const seq = ++voAdapterPreviewSeq;
+  try {
+    const recorder = voAdapterRecorder;
+    const blob = new Blob(voAdapterChunks, { type: recorder && recorder.mimeType || 'audio/webm' });
+    const fd = new FormData(); fd.append('audio', blob, 'voice-preview.webm');
+    const r = await api('/api/voice/adapter/transcribe', { method: 'POST', body: fd });
+    const j = await r.json();
+    // Ignore an older HTTP response after a later preview or the final turn started.
+    if (seq !== voAdapterPreviewSeq || voAdapterBusy) return;
+    if (j.text && voAdapterUserBubble) { voAdapterUserBubble.textContent = j.text; voScroll(); }
+    voDiag('adapter', 'transcript_preview', { chars: String(j.text || '').length, stt: j.stt_model || '' });
+  } catch (e) {
+    // Preview is additive UX only; a failed preview must never prevent the final turn.
+    voDiag('adapter', 'transcript_preview_failed', { message: String((e && e.message) || e).slice(0, 120) });
+  } finally { voAdapterPreviewInFlight = false; }
 }
 function voAdapterFinishRecording() {
   try { if (voAdapterRecorder && voAdapterRecorder.state !== 'inactive') voAdapterRecorder.stop(); } catch {}
 }
 async function voAdapterSubmit(blob) {
   if (voAdapterBusy || voState !== 'live') return;
-  voAdapterBusy = true; voOrbMode('thinking'); const chip = voChip(`Asking ${(voAdapterCfg && voAdapterCfg.agent) || 'agent'}…`);
+  voAdapterBusy = true; voAdapterPreviewSeq++; voOrbMode('thinking'); const chip = voChip(`Asking ${(voAdapterCfg && voAdapterCfg.agent) || 'agent'}…`);
   const started = Date.now();
   try {
     const fd = new FormData(); fd.append('audio', blob, 'voice-turn.webm'); fd.append('vsid', voVsid);
     const r = await api('/api/voice/adapter/turn', { method: 'POST', body: fd });
     const j = await r.json(); if (!r.ok && r.status !== 202) throw new Error(j.error || `adapter HTTP ${r.status}`);
-    if (j.transcript) voBubble('user', j.transcript);
+    if (j.transcript) {
+      if (voAdapterUserBubble) voAdapterUserBubble.textContent = j.transcript;
+      else voAdapterUserBubble = voBubble('user', j.transcript);
+      voScroll();
+    }
     if (j.text) { voAsstText = j.text; voBubble('asst', j.text); voRememberAsst(j.text); }
     chip.classList.add('ok'); chip.querySelector('.voSpin').remove();
     voDiag('adapter', 'turn_done', { ms: Date.now() - started, stt: j.stt_model || '', agent: j.agent || '', pending: !!j.pending });
