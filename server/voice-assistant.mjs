@@ -34,6 +34,7 @@ import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from '.
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
+import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -852,6 +853,14 @@ export function registerVoiceAssistant(app, ctx) {
   // audio is transcribed by the existing box STT fallback, the normal Claude/Codex
   // session runner owns context and tools, then OpenAI's HTTP TTS speaks its text.
   const ADAPTER_AGENT = voiceAdapterAgent(cfg('VOICE_ADAPTER_AGENT', 'codex'));
+  const ADAPTER_TRANSPORT = voiceAdapterTransport(cfg('VOICE_ADAPTER_TRANSPORT', 'livekit'));
+  const LIVEKIT = livekitAdapterConfig({
+    transport: ADAPTER_TRANSPORT,
+    url: cfg('LIVEKIT_URL'),
+    apiKey: cfg('LIVEKIT_API_KEY'),
+    apiSecret: cfg('LIVEKIT_API_SECRET'),
+    agentName: cfg('VOICE_ADAPTER_LIVEKIT_AGENT', 'box-codex-voice'),
+  });
   const ADAPTER_TTS_MODEL = cfg('VOICE_ADAPTER_TTS_MODEL', 'gpt-4o-mini-tts');
   const ADAPTER_TTS_VOICE = cfg('VOICE_ADAPTER_TTS_VOICE', VOICE);
   const ADAPTER_MAX_RESPONSE_CHARS = Math.max(200, Math.min(6000, Number(cfg('VOICE_ADAPTER_MAX_RESPONSE_CHARS', 1400)) || 1400));
@@ -900,7 +909,9 @@ export function registerVoiceAssistant(app, ctx) {
   const uploadAudio = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
   const enabled = () => !!OPENAI_KEY;
-  const adapterEnabled = () => MODE === 'adapter' && enabled() && !!voiceSttEnabled && typeof transcribe === 'function' && typeof runAdapterTurn === 'function';
+  const legacyAdapterEnabled = () => enabled() && !!voiceSttEnabled && typeof transcribe === 'function';
+  const adapterEnabled = () => MODE === 'adapter' && typeof runAdapterTurn === 'function'
+    && (ADAPTER_TRANSPORT === 'livekit' ? livekitConfigured(LIVEKIT) : legacyAdapterEnabled());
   let resolvedModel = MODEL;
   let modelFallback = null;
   // Eval mode: action tools simulate success instead of mutating anything (used by
@@ -2635,6 +2646,21 @@ ${voiceAutonomyPolicy()}
   // persistent Claude/Codex Box session -> OpenAI HTTP TTS. Unlike Realtime mode, the
   // LLM never receives the audio stream; all tool access stays in the normal CLI engine.
   const uploadAdapterAudio = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+  // LiveKit owns the persistent WebRTC media room and dispatches the local agent worker.
+  // The worker calls the regular authenticated /adapter/text route below, so Codex's
+  // session queue, tools, sandbox, confirmations, and audit trail remain unchanged.
+  app.post('/api/voice/livekit/token', requireAuth, async (req, res) => {
+    if (MODE !== 'adapter' || ADAPTER_TRANSPORT !== 'livekit' || !livekitConfigured(LIVEKIT)) {
+      return res.status(409).json({ error: 'LiveKit adapter mode is not configured; use VOICE_ADAPTER_TRANSPORT=legacy for the old browser STT path' });
+    }
+    try {
+      const vsid = String(req.body && req.body.vsid || `${new Date().toISOString().slice(0, 10)}-${randomBytes(6).toString('hex')}`).trim();
+      const join = await createLivekitVoiceJoin({ config: LIVEKIT, vsid, metadata: { agent: ADAPTER_AGENT } });
+      res.json({ ...join, vsid, agent: ADAPTER_AGENT, transport: 'livekit' });
+    } catch (e) {
+      res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
+    }
+  });
   async function synthesizeAdapterSpeech(text) {
     const r = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
@@ -2836,8 +2862,12 @@ ${voiceAutonomyPolicy()}
       eagerness: cfg('VOICE_ASSISTANT_EAGERNESS', 'low'),
       adapter: {
         enabled: adapterEnabled(), agent: ADAPTER_AGENT,
-        stt: 'box transcribe (Deepgram primary, ElevenLabs fallback)',
-        tts: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE },
+        transport: ADAPTER_TRANSPORT,
+        stt: ADAPTER_TRANSPORT === 'livekit' ? 'LiveKit worker: Deepgram nova-3 streaming' : 'box transcribe (Deepgram primary, ElevenLabs fallback)',
+        tts: ADAPTER_TRANSPORT === 'livekit'
+          ? { provider: 'cartesia', model: 'sonic-3', voice: cfg('VOICE_ADAPTER_CARTESIA_VOICE', '9626c31c-bec5-4cca-baa8-f8ba9e84c8bc'), fallback: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE } }
+          : { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE },
+        livekit: { configured: livekitConfigured(LIVEKIT), agentName: LIVEKIT.agentName },
         vad: ADAPTER_VAD, maxTurnMs: ADAPTER_MAX_TURN_MS, maxResponseChars: ADAPTER_MAX_RESPONSE_CHARS,
       },
       briefing: existsSync(BRIEFING_FILE),
@@ -2848,6 +2878,6 @@ ${voiceAutonomyPolicy()}
     });
   });
 
-  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODE}${MODE === 'realtime' ? `; ${MODEL}${FALLBACK_MODEL ? ` fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}` : `; ${ADAPTER_AGENT} adapter, ${ADAPTER_TTS_MODEL}`}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
+  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODE}${MODE === 'realtime' ? `; ${MODEL}${FALLBACK_MODEL ? ` fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}` : `; ${ADAPTER_AGENT} adapter via ${ADAPTER_TRANSPORT}`}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
   return { enabled };
 }

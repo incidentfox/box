@@ -3365,6 +3365,13 @@ app.get('/api/retranscribe', requireAuth, async (req, res) => {
   } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
 
+// LiveKit's browser SDK is served from the pinned npm dependency rather than a CDN so
+// voice mode keeps working through poor cellular coverage and has a reproducible build.
+app.get('/vendor/livekit-client.umd.js', (_req, res) => {
+  res.sendFile(join(ROOT, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js'), {
+    maxAge: '7d', immutable: true,
+  });
+});
 app.use(express.static(PUBLIC));
 
 // ---- per-session queue workers --------------------------------------------
