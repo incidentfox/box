@@ -1,4 +1,4 @@
-from box_voice_agent import DEFAULT_CARTESIA_VOICE, RuntimeConfig, safe_vsid, text_from_message, vsid_from_room
+from box_voice_agent import DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, safe_vsid, text_from_message, vsid_from_room
 
 
 class FakeMessage:
@@ -15,3 +15,7 @@ def test_text_and_default_voice_are_available(monkeypatch):
     monkeypatch.delenv("VOICE_ADAPTER_CARTESIA_VOICE", raising=False)
     assert text_from_message(FakeMessage()) == "hello there"
     assert RuntimeConfig.from_env().cartesia_voice == DEFAULT_CARTESIA_VOICE
+
+
+def test_deepgram_utterance_end_satisfies_provider_minimum():
+    assert deepgram_options()["utterance_end_ms"] >= 1000

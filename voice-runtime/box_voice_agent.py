@@ -38,6 +38,19 @@ def text_from_message(message: Any) -> str:
     return str(value or "").strip()
 
 
+def deepgram_options() -> dict[str, Any]:
+    # Deepgram requires utterance_end_ms >= 1000. LiveKit's semantic detector,
+    # not this provider hint, controls our 350 ms–1.5 s handoff target.
+    return {
+        "model": "nova-3",
+        "language": "multi",
+        "interim_results": True,
+        "smart_format": True,
+        "endpointing_ms": 100,
+        "utterance_end_ms": 1000,
+    }
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     backend_url: str
@@ -112,10 +125,7 @@ async def entrypoint(ctx: JobContext) -> None:
         instructions="Speak naturally, concise and calm for a hands-free phone conversation.",
     )
     session = AgentSession(
-        stt=deepgram.STT(
-            api_key=os.getenv("DEEPGRAM_API_KEY"), model="nova-3", language="multi", interim_results=True,
-            smart_format=True, endpointing_ms=100, utterance_end_ms=800,
-        ),
+        stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
         tts=tts.FallbackAdapter([primary_tts, fallback_tts], max_retry_per_tts=1),
         vad=ctx.proc.userdata["vad"],
         turn_detection=inference.TurnDetector(),
