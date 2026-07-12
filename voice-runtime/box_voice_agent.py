@@ -57,6 +57,12 @@ def speakable_text(value: Any) -> str:
     return text.strip()
 
 
+def voice_bool(value: str | None, default: bool = False) -> bool:
+    if value is None or not str(value).strip():
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def deepgram_options() -> dict[str, Any]:
     # Deepgram requires utterance_end_ms >= 1000. It is the sole turn commit
     # signal in this adapter, while VAD remains activity-only.
@@ -72,7 +78,7 @@ def deepgram_options() -> dict[str, Any]:
     }
 
 
-def turn_handling_options() -> TurnHandlingOptions:
+def turn_handling_options(*, allow_interruptions: bool = False) -> TurnHandlingOptions:
     """Commit on Deepgram's own finalized utterance event, never VAD silence."""
     return TurnHandlingOptions(
         # The hosted detector starts an inference request from a VAD pause. In
@@ -84,9 +90,11 @@ def turn_handling_options() -> TurnHandlingOptions:
         # Deepgram waits one second of silence before UtteranceEnd. Do not add
         # a second human-noticeable delay after that provider signal.
         endpointing={"mode": "fixed", "min_delay": 0.15, "max_delay": 0.15},
-        # Box is deliberately half-duplex while TTS plays. The browser gates
-        # its mic, so a live interruption would otherwise be inconsistent.
-        interruption={"enabled": False},
+        # Adaptive interruption is enabled only when the browser has also been
+        # told to keep its microphone open during TTS. It rejects short
+        # backchannels better than raw VAD while letting a real barge-in stop
+        # an in-flight spoken response.
+        interruption={"enabled": allow_interruptions, "mode": "adaptive"} if allow_interruptions else {"enabled": False},
         preemptive_generation={"enabled": False},
     )
 
@@ -106,6 +114,7 @@ class RuntimeConfig:
     auth_token: str
     cartesia_voice: str
     cartesia_model: str
+    allow_interruptions: bool
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -114,6 +123,7 @@ class RuntimeConfig:
             auth_token=os.getenv("CC_AUTH_TOKEN", ""),
             cartesia_voice=os.getenv("VOICE_ADAPTER_CARTESIA_VOICE", DEFAULT_CARTESIA_VOICE),
             cartesia_model=os.getenv("VOICE_ADAPTER_CARTESIA_MODEL", DEFAULT_CARTESIA_MODEL),
+            allow_interruptions=voice_bool(os.getenv("VOICE_ASSISTANT_INTERRUPT_RESPONSE")),
         )
 
 
@@ -138,7 +148,7 @@ class BoxCodexVoiceAgent(Agent):
             answer = "I could not reach the Box session just now. Please try that once more."
         if not answer:
             answer = "The Box session finished without a speakable answer. Please ask me to check its text response."
-        speech = self.session.say(answer, allow_interruptions=False)
+        speech = self.session.say(answer, allow_interruptions=self.runtime.allow_interruptions)
         await speech.wait_for_playout()
 
 
@@ -179,7 +189,7 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
         tts=tts.FallbackAdapter([primary_tts, fallback_tts], max_retry_per_tts=1),
         vad=ctx.proc.userdata["vad"],
-        turn_handling=turn_handling_options(),
+        turn_handling=turn_handling_options(allow_interruptions=runtime.allow_interruptions),
     )
     # Semantic endpointing is the normal path. This packet makes the visible
     # End turn button real: it flushes Deepgram and commits the buffered turn

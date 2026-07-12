@@ -2865,10 +2865,10 @@ ${voiceAutonomyPolicy()}
         transport: ADAPTER_TRANSPORT,
         stt: ADAPTER_TRANSPORT === 'livekit' ? 'LiveKit worker: Deepgram nova-3 streaming' : 'box transcribe (Deepgram primary, ElevenLabs fallback)',
         tts: ADAPTER_TRANSPORT === 'livekit'
-          ? { provider: 'cartesia', model: 'sonic-3', voice: cfg('VOICE_ADAPTER_CARTESIA_VOICE', '9626c31c-bec5-4cca-baa8-f8ba9e84c8bc'), fallback: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE } }
+          ? { provider: 'cartesia', model: cfg('VOICE_ADAPTER_CARTESIA_MODEL', 'sonic-3.5'), voice: cfg('VOICE_ADAPTER_CARTESIA_VOICE', 'a5136bf9-224c-4d76-b823-52bd5efcffcc'), fallback: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE } }
           : { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE },
         livekit: { configured: livekitConfigured(LIVEKIT), agentName: LIVEKIT.agentName },
-        vad: ADAPTER_VAD, maxTurnMs: ADAPTER_MAX_TURN_MS, maxResponseChars: ADAPTER_MAX_RESPONSE_CHARS,
+        vad: ADAPTER_VAD, interruptResponse: INTERRUPT_RESPONSE, maxTurnMs: ADAPTER_MAX_TURN_MS, maxResponseChars: ADAPTER_MAX_RESPONSE_CHARS,
       },
       briefing: existsSync(BRIEFING_FILE),
       slack: slackConfigured(cfg),

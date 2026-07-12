@@ -1,4 +1,4 @@
-from box_voice_agent import DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, vsid_from_room
+from box_voice_agent import DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, voice_bool, vsid_from_room
 
 
 class FakeMessage:
@@ -29,6 +29,13 @@ def test_turn_handling_commits_only_on_deepgram_finalized_speech():
     assert options["turn_detection"] == "stt"
     assert options["endpointing"] == {"mode": "fixed", "min_delay": 0.15, "max_delay": 0.15}
     assert options["interruption"]["enabled"] is False
+
+
+def test_adaptive_barge_in_requires_explicit_runtime_flag():
+    assert voice_bool("1") is True
+    assert voice_bool("false") is False
+    options = turn_handling_options(allow_interruptions=True)
+    assert options["interruption"] == {"enabled": True, "mode": "adaptive"}
 
 
 def test_speakable_text_removes_markdown_ellipses_and_joined_chunks():
