@@ -29,6 +29,7 @@ let voActiveResponse = false;
 let voNotifyQ = null;           // notification queue: buffers proactive announcements so they
                                 // never interrupt the user or read as user speech (INC-1084)
 let voEventBuf = [];            // transcript + diagnostic events → POST /api/voice/event
+let voFlushInFlight = false;
 let voUserItems = new Map();    // item_id -> bubble el (streaming user transcription)
 let voAsstBubble = null, voAsstText = '';
 let voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
@@ -271,7 +272,15 @@ function voNotice(text) { voBubble('notice', text); }
 function voDiag(source, event, data) {
   if (!voVsid) return;
   voEventBuf.push({ ts: Date.now(), kind: 'diag', source, event, data: data || {} });
-  if (voEventBuf.length >= 40) voFlushEvents();
+  // Timing events are useful only if the agent can see them on its next turn.
+  // Push those boundaries immediately; routine diagnostics still batch normally.
+  const liveBoundary = new Set([
+    'caller_speech_detected', 'caller_final_transcript', 'caller_speech_to_final_transcript',
+    'endpoint_to_first_assistant_text', 'endpoint_to_playback',
+    'assistant_playback_started', 'assistant_playback_stopped',
+    'barge_in_detected', 'barge_in_playback_stopped',
+  ]);
+  if (liveBoundary.has(event) || voEventBuf.length >= 40) voFlushEvents();
 }
 
 function voTrackSettings(track) {
@@ -1258,10 +1267,20 @@ async function voPollUpdates() {
 
 /* ---------- transcript persistence (powers reconnect context) ---------- */
 
-function voFlushEvents() {
-  if (!voVsid || !voEventBuf.length) return;
+async function voFlushEvents() {
+  if (!voVsid || !voEventBuf.length || voFlushInFlight) return;
   const events = voEventBuf.splice(0, 50);
-  api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, events }) }).catch(() => {});
+  voFlushInFlight = true;
+  try {
+    const response = await api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: voVsid, events }) });
+    if (!response.ok) throw new Error('voice event upload failed');
+  } catch {
+    // Keep measurement ordering and retry on the next scheduled/boundary flush.
+    voEventBuf.unshift(...events);
+  } finally {
+    voFlushInFlight = false;
+    if (voEventBuf.length >= 40) voFlushEvents();
+  }
 }
 
 /* ---------- opt-in audio capture (voice memory) ----------

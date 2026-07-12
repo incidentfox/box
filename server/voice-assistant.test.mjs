@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   agentFinishedLine,
+  adapterSessionIdFromRows,
   agentProgressLine,
   archiveSessionPolicy,
   buildTranscriptView,
@@ -41,6 +42,12 @@ assert.equal(voiceBool('1'), true);
 assert.equal(voiceBool('yes'), true);
 assert.equal(voiceBool('0'), false);
 assert.equal(voiceBool('off'), false);
+
+assert.equal(adapterSessionIdFromRows([
+  { kind: 'assistant', source: 'adapter', agent: 'codex', session_id: 'old-thread' },
+  { kind: 'adapter_session', source: 'adapter', agent: 'codex', session_id: 'current-thread' },
+], 'codex'), 'current-thread');
+assert.equal(adapterSessionIdFromRows([{ kind: 'assistant', source: 'adapter', agent: 'claude', session_id: 'wrong-agent' }], 'codex'), '');
 
 {
   const policy = voiceAutonomyPolicy();
