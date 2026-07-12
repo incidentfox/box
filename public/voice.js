@@ -369,6 +369,9 @@ async function voStart() {
     const r = await api('/api/voice/status');
     const st = await r.json();
     if (!r.ok) throw new Error(st.error || 'voice status unavailable');
+    // The adapter shares the realtime audio policy. In particular, barge-in
+    // requires an open mic while TTS plays; leave echo protection enabled.
+    voAudioPolicy = { ...VO_AUDIO_POLICY_DEFAULT, ...(st.audioPolicy || {}) };
     voMode = st.mode === 'adapter' ? 'adapter' : 'realtime';
     if (voMode === 'adapter') await voStartAdapter(st.adapter || {});
     else await voConnect(false);
