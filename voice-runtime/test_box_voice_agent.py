@@ -1,4 +1,4 @@
-from box_voice_agent import DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, final_text_to_speak, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, voice_bool, vsid_from_room
+from box_voice_agent import BoxCodexVoiceAgent, DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, final_text_to_speak, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, voice_bool, vsid_from_room
 
 
 class FakeMessage:
@@ -60,3 +60,22 @@ def test_manual_turn_commit_requires_the_caller_and_control_topic():
     assert not is_manual_turn_commit(payload, "box.voice.control", "agent-session")
     assert not is_manual_turn_commit(payload, "wrong.topic", "caller-session")
     assert not is_manual_turn_commit(b"commit", "box.voice.control", "caller-session")
+
+
+def test_interruption_stops_the_live_speech_handle():
+    class FakeSpeech:
+        def __init__(self):
+            self.forced = False
+
+        def done(self):
+            return False
+
+        def interrupt(self, *, force=False):
+            self.forced = force
+
+    agent = object.__new__(BoxCodexVoiceAgent)
+    speech = FakeSpeech()
+    agent._speech = speech
+    agent._interrupt_playback()
+    assert speech.forced is True
+    assert agent._speech is None

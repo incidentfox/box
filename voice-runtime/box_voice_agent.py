@@ -163,14 +163,35 @@ class BoxCodexVoiceAgent(Agent):
         self.vsid = safe_vsid(vsid)
         self.runtime = runtime
         self._adapter_turn: asyncio.Task[None] | None = None
+        self._speech: Any | None = None
+
+    def _interrupt_playback(self) -> None:
+        """Stop the actual LiveKit speech handle, not just its awaiting task."""
+        speech = self._speech
+        self._speech = None
+        if speech is None or speech.done():
+            return
+        try:
+            speech.interrupt(force=True)
+        except RuntimeError:
+            pass
 
     async def _say(self, text: str) -> bool:
+        speech = None
         try:
             speech = self.session.say(text, allow_interruptions=self.runtime.allow_interruptions)
+            self._speech = speech
             await speech.wait_for_playout()
             return True
+        except asyncio.CancelledError:
+            if speech is not None and not speech.done():
+                speech.interrupt(force=True)
+            raise
         except RuntimeError:
             return False
+        finally:
+            if self._speech is speech:
+                self._speech = None
 
     async def on_user_turn_completed(self, _turn_ctx: Any, new_message: Any) -> None:
         transcript = text_from_message(new_message)
@@ -182,6 +203,10 @@ class BoxCodexVoiceAgent(Agent):
         # persisted Codex thread, and continue from there.
         interrupt = self._adapter_turn is not None and not self._adapter_turn.done()
         if interrupt:
+            # Cancelling the coroutine waiting on speech does not cancel the
+            # SpeechHandle. Without this explicit interruption, orphaned audio
+            # keeps playing and every later response queues behind it.
+            self._interrupt_playback()
             self._adapter_turn.cancel()
         self._adapter_turn = asyncio.create_task(self._run_adapter_turn(transcript, interrupt=interrupt))
 
