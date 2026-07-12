@@ -49,6 +49,9 @@ def test_final_text_is_not_spoken_twice_after_matching_progress():
     assert final_text_to_speak("The fix is deployed.", "I found the issue.") == "The fix is deployed."
     assert final_text_to_speak("The fix is deployed.", "The fix is deployed!") == ""
     assert final_text_to_speak("I found the issue. The fix is deployed.", "I found the issue.") == "The fix is deployed."
+    full = "The slowdown is in the Codex response path, not your microphone or transcription. The backend is slow."
+    assert final_text_to_speak(full, "The slowdown is in the Codex response path, not your microphone or transcription.") == "The backend is slow."
+    assert final_text_to_speak(full, "The slowdown is in the Codex response path, not your microph…") != full
 
 
 def test_manual_turn_commit_requires_the_caller_and_control_topic():

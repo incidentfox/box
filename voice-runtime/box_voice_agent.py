@@ -63,10 +63,11 @@ def final_text_to_speak(answer: Any, spoken_progress: Any) -> str:
 
     Codex can emit its complete final answer as both the first streamed text event
     and the terminal event.  The media bridge must not make the caller hear that
-    same answer twice.  This deliberately handles only an exact normalized match;
-    a distinct final result still gets spoken after a genuine progress update.
+    same answer twice. It also removes a matching progress prefix from a longer
+    final answer, while preserving any genuinely new suffix.
     """
     final = speakable_text(answer)
+    raw_progress = str(spoken_progress or "").rstrip()
     progress = speakable_text(spoken_progress)
     normalize = lambda text: re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
     final_normalized = normalize(final)
@@ -77,6 +78,9 @@ def final_text_to_speak(answer: Any, spoken_progress: Any) -> str:
     # status verbatim before appending its actual answer.  Speak only the new
     # suffix; otherwise the caller hears the same thought twice in succession.
     progress_words = re.findall(r"[a-z0-9]+", progress.lower())
+    if raw_progress.endswith(("…", "...")) and progress_words:
+        progress_words = progress_words[:-1]
+        progress_normalized = " ".join(progress_words)
     final_words = list(re.finditer(r"[a-z0-9]+", final.lower()))
     if progress_words and len(final_words) > len(progress_words) and final_normalized.startswith(progress_normalized + " "):
         return final[final_words[len(progress_words) - 1].end() :].lstrip(" ,;:-.")
