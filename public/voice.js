@@ -483,10 +483,28 @@ function voLivekitAppendAssistantTranscript(segments) {
 }
 async function voStartLivekitAdapter(cfg) {
   if (!globalThis.LivekitClient) throw new Error('LiveKit client library did not load; refresh once to update the app shell');
-  const r = await api('/api/voice/livekit/token', { method: 'POST', body: JSON.stringify({ vsid: voVsid }) });
-  const join = await r.json(); if (!r.ok) throw new Error(join.error || 'LiveKit voice token failed');
-  voVsid = join.vsid || voVsid;
   const LK = globalThis.LivekitClient;
+  const startupAt = Date.now();
+  voDiag('livekit', 'startup_started', {});
+  // iOS intermittently spends about seven seconds opening the microphone. Start
+  // that permission/capture work immediately and in parallel with the Box token
+  // request + LiveKit signaling instead of serializing all three operations.
+  const micPromise = LK.createLocalAudioTrack(voMicConstraints()).then((track) => {
+    voDiag('livekit', 'startup_microphone_captured', { ms: Date.now() - startupAt });
+    return track;
+  });
+  const stopPendingMic = () => micPromise.then((track) => { try { track.stop(); } catch {} }).catch(() => {});
+  let r;
+  try {
+    r = await api('/api/voice/livekit/token', { method: 'POST', body: JSON.stringify({ vsid: voVsid }) });
+  } catch (error) {
+    stopPendingMic();
+    throw error;
+  }
+  const join = await r.json();
+  if (!r.ok) { stopPendingMic(); throw new Error(join.error || 'LiveKit voice token failed'); }
+  voDiag('livekit', 'startup_token_ready', { ms: Date.now() - startupAt });
+  voVsid = join.vsid || voVsid;
   const room = new LK.Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: voMicConstraints() });
   voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null; voLivekitUserSegments = new Map();
   voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; voLivekitAsstSegments = new Map();
@@ -562,14 +580,28 @@ async function voStartLivekitAdapter(cfg) {
     voLivekitRoom = null;
     if (voState === 'live' || voState === 'reconnecting') voNotice('Voice connection ended. Tap Restart to reconnect.');
   });
-  await room.connect(join.url, join.token);
-  await room.localParticipant.setMicrophoneEnabled(!voMuted);
-  const micPublication = room.localParticipant.getTrackPublication && room.localParticipant.getTrackPublication(LK.Track.Source.Microphone);
-  const micTrack = micPublication && micPublication.track && micPublication.track.mediaStreamTrack;
+  let localMicTrack = null;
+  try {
+    await room.connect(join.url, join.token);
+    voDiag('livekit', 'startup_room_connected', { ms: Date.now() - startupAt });
+    localMicTrack = await micPromise;
+    await room.localParticipant.publishTrack(localMicTrack, { source: LK.Track.Source.Microphone });
+    voDiag('livekit', 'startup_microphone_published', { ms: Date.now() - startupAt });
+  } catch (error) {
+    if (localMicTrack) { try { localMicTrack.stop(); } catch {} }
+    else stopPendingMic();
+    try { room.disconnect(); } catch {}
+    throw error;
+  }
+  const micTrack = localMicTrack && localMicTrack.mediaStreamTrack;
+  if (micTrack) {
+    micTrack.enabled = !voMuted;
+    voMicStream = new MediaStream([micTrack]);
+  }
   if (micTrack) voStartAudioCapture(new MediaStream([micTrack]), 'caller');
   voSetState('live'); voConnectedAt = Date.now(); voBanner('');
   voNotice(`LiveKit adapter — ${cfg.agent || 'agent'} is ready. Deepgram transcribes live; pause naturally and it will hand off to Codex.`);
-  voDiag('livekit', 'connected', { room: join.room || '', agent: join.agent || '' });
+  voDiag('livekit', 'connected', { room: join.room || '', agent: join.agent || '', startup_ms: Date.now() - startupAt });
 }
 function voAdapterPcm16(f32, fromRate, toRate) {
   let data = f32;
