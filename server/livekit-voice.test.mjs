@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { livekitAdapterConfig, livekitConfigured, livekitHttpUrl, livekitParticipantIdentity, livekitRoomName, livekitRoomOptions, voiceAdapterTransport } from './livekit-voice.mjs';
+import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, livekitHttpUrl, livekitParticipantIdentity, livekitRoomName, livekitRoomOptions, voiceAdapterTransport } from './livekit-voice.mjs';
 
 assert.equal(voiceAdapterTransport(), 'livekit');
 assert.equal(voiceAdapterTransport('legacy'), 'legacy');
@@ -15,4 +15,11 @@ const options = livekitRoomOptions({ config, vsid: 'call-123', metadata: { agent
 assert.equal(options.maxParticipants, 2);
 assert.equal(options.agents.length, 1);
 assert.equal(options.agents[0].agentName, 'box-codex-voice');
+const join = await createLivekitVoiceJoin({ config, vsid: 'call-123', metadata: { agent: 'codex' } });
+assert.equal(join.room, 'box-voice-call-123');
+assert.equal(join.roomSid, '');
+const claims = JSON.parse(Buffer.from(join.token.split('.')[1], 'base64url').toString('utf8'));
+assert.equal(claims.roomConfig.name, 'box-voice-call-123');
+assert.equal(claims.roomConfig.maxParticipants, 2);
+assert.equal(claims.roomConfig.agents[0].agentName, 'box-codex-voice');
 console.log('livekit voice helpers: ok');

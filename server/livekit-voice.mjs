@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, RoomConfiguration } from 'livekit-server-sdk';
 
 export function voiceAdapterTransport(value = 'livekit') {
   return String(value || 'livekit').trim().toLowerCase() === 'legacy' ? 'legacy' : 'livekit';
@@ -60,11 +60,14 @@ export async function createLivekitVoiceJoin({ config, vsid, metadata = {} } = {
     metadata: JSON.stringify({ vsid: String(vsid), source: 'box-voice' }),
   });
   token.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true, canPublishData: true });
-  // Create the room before the caller joins, with exactly the Box worker dispatched.
-  // This LiveKit project also contains unrelated voice deployments; reserving the two
-  // available participant slots (caller + our worker) prevents an auto-dispatched
-  // agent from entering a Box voice conversation.
-  const rooms = new RoomServiceClient(config.apiUrl, config.apiKey, config.apiSecret);
-  const roomInfo = await rooms.createRoom(livekitRoomOptions({ config, vsid, metadata }));
-  return { url: config.url, room, identity, token: await token.toJwt(), roomSid: roomInfo.sid || '' };
+  // Put room creation and the named-agent dispatch in the join token. LiveKit applies
+  // this configuration atomically when the caller creates the room. The previous path
+  // made a separate RoomService request and waited for it before returning
+  // the token, adding 1-2.5 seconds to every call even though the browser still had to
+  // perform its own WebRTC connection afterward.
+  //
+  // This project contains unrelated deployments, so keep the explicit named dispatch
+  // and two-participant limit instead of relying on automatic agent dispatch.
+  token.roomConfig = new RoomConfiguration(livekitRoomOptions({ config, vsid, metadata }));
+  return { url: config.url, room, identity, token: await token.toJwt(), roomSid: '' };
 }

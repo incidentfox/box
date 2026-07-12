@@ -12,16 +12,19 @@ def test_voice_room_id_is_strict_and_safe():
 
 
 def test_text_and_default_voice_are_available(monkeypatch):
+    monkeypatch.delenv("VOICE_ADAPTER_TTS_PROVIDER", raising=False)
     monkeypatch.delenv("VOICE_ADAPTER_CARTESIA_VOICE", raising=False)
     monkeypatch.delenv("VOICE_ADAPTER_CARTESIA_MODEL", raising=False)
     assert text_from_message(FakeMessage()) == "hello there"
+    assert RuntimeConfig.from_env().tts_provider == "openai"
     assert RuntimeConfig.from_env().cartesia_voice == DEFAULT_CARTESIA_VOICE
     assert RuntimeConfig.from_env().cartesia_model == DEFAULT_CARTESIA_MODEL
 
 
 def test_deepgram_utterance_end_satisfies_provider_minimum():
     assert deepgram_options()["utterance_end_ms"] >= 1000
-    assert deepgram_options()["endpointing_ms"] == 300
+    assert deepgram_options()["endpointing_ms"] == 0
+    assert deepgram_options()["language"] == "en-US"
 
 
 def test_turn_handling_commits_only_on_deepgram_finalized_speech():
