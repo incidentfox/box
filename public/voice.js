@@ -51,6 +51,11 @@ let voLivekitAsstTranscript = '', voLivekitAsstBubble = null;
 let voLivekitUserSegments = new Map(), voLivekitAsstSegments = new Map();
 let voLivekitCommitBusy = false;
 let voLivekitEndpointAt = 0, voLivekitEndpointText = '', voLivekitPlaybackLogged = false;
+// Barge-in telemetry is deliberately measured at the caller-visible boundary: the
+// first LiveKit event that says the caller is speaking, through the first event
+// that says the assistant is no longer audible. This avoids claiming microphone
+// onset timing that the browser cannot observe accurately.
+let voLivekitBargeAt = 0;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -457,6 +462,7 @@ async function voStartLivekitAdapter(cfg) {
   const room = new LK.Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: voMicConstraints() });
   voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null; voLivekitUserSegments = new Map();
   voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; voLivekitAsstSegments = new Map();
+  voLivekitBargeAt = 0;
   room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => {
     if (!participant || participant.identity === room.localParticipant.identity) voLivekitAppendTranscript(segments);
     else voLivekitAppendAssistantTranscript(segments);
@@ -470,7 +476,22 @@ async function voStartLivekitAdapter(cfg) {
     if (track.mediaStreamTrack) voStartAudioCapture(new MediaStream([track.mediaStreamTrack]), 'assistant');
   });
   room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
-    const agentSpeaking = (speakers || []).some((p) => p.identity !== room.localParticipant.identity);
+    const active = speakers || [];
+    const agentSpeaking = active.some((p) => p.identity !== room.localParticipant.identity);
+    const callerSpeaking = active.some((p) => p.identity === room.localParticipant.identity);
+    // This is a real barge-in candidate only if the assistant was already
+    // speaking. The next no-agent event marks the audible cut-off. Keep the
+    // pair even if the candidate later turns out to be a backchannel; that is
+    // useful when tuning sensitivity and false-interrupt rates together.
+    if (callerSpeaking && voAdapterSpeaking && !voLivekitBargeAt) {
+      voLivekitBargeAt = Date.now();
+      voDiag('livekit', 'barge_in_detected', {});
+    }
+    if (!agentSpeaking && voLivekitBargeAt) {
+      const ms = Date.now() - voLivekitBargeAt;
+      voDiag('livekit', 'barge_in_playback_stopped', { ms });
+      voLivekitBargeAt = 0;
+    }
     voAdapterSpeaking = agentSpeaking;
     voOrbMode(agentSpeaking ? 'speaking' : 'listening');
     if (agentSpeaking && voLivekitEndpointAt && !voLivekitPlaybackLogged) {
