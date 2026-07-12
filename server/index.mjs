@@ -3699,7 +3699,10 @@ function runVoiceAdapterTurn({ key, text, agent = 'claude', cwd = DEFAULT_CWD, t
   if (s.sessionId && s.agent && s.agent !== agent) return Promise.reject(new Error(`voice adapter session belongs to ${s.agent}; start a new call before switching agents`));
   return new Promise((resolve) => {
     enqueue(key, {
-      text, displayText: text, mode: 'normal', agent, cwd, title,
+      text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true,
+      // A Codex turn can emit a progress note followed by its final answer.
+      // The Box chat retains both, but the voice bridge must speak only the
+      // final substantive agent message.
       onComplete: (result) => resolve(result),
     });
   });
@@ -3771,14 +3774,15 @@ async function runWorker(s) {
     if (msg.parentId) s.parentId = msg.parentId;
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
-    s.curText = ''; s.curTools = []; s.curParts = []; s.canceled = false; s.lastTurnError = ''; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
+    s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
     if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
     await runTurn(s, msg);
     if (typeof msg.onComplete === 'function') {
-      const text = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
+      const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
+      const text = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
       try { msg.onComplete({ text, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
     }
     persist(s);
@@ -3962,6 +3966,7 @@ function runCodexTurn(s, msg, resolve) {
         // being text — right after a tool the client opens a fresh text element, so a
         // leading separator there would render a stray empty paragraph.
         const raw = ev.delta || '';
+        if (msg.voiceOnly && raw.trim()) s.voiceFinalText = raw;
         const last = s.curParts[s.curParts.length - 1];
         const delta = ((last && last.t === 'text' && last.text) ? '\n\n' : '') + raw;
         pushTextPart(s, delta);
