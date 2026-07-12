@@ -6,6 +6,7 @@ the authority for Codex sessions, tools, permissions, and the voice safety promp
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -132,13 +133,39 @@ class BoxCodexVoiceAgent(Agent):
         super().__init__(instructions="You are only the media bridge for Box's persistent Codex session.")
         self.vsid = safe_vsid(vsid)
         self.runtime = runtime
+        self._adapter_turn: asyncio.Task[None] | None = None
+
+    async def _say(self, text: str) -> bool:
+        try:
+            speech = self.session.say(text, allow_interruptions=self.runtime.allow_interruptions)
+            await speech.wait_for_playout()
+            return True
+        except RuntimeError:
+            return False
 
     async def on_user_turn_completed(self, _turn_ctx: Any, new_message: Any) -> None:
         transcript = text_from_message(new_message)
         if not transcript or not self.vsid:
             return
+        # Do not await a long Codex tool turn here.  LiveKit must remain free to
+        # recognize a real caller barge-in.  A replacement request tells Box to
+        # interrupt the active CLI process, queue this instruction on the same
+        # persisted Codex thread, and continue from there.
+        interrupt = self._adapter_turn is not None and not self._adapter_turn.done()
+        if interrupt:
+            self._adapter_turn.cancel()
+        self._adapter_turn = asyncio.create_task(self._run_adapter_turn(transcript, interrupt=interrupt))
+
+    async def _run_adapter_turn(self, transcript: str, *, interrupt: bool) -> None:
         headers = {"Authorization": f"Bearer {self.runtime.auth_token}"}
-        payload = {"vsid": self.vsid, "text": transcript, "stt_model": "livekit:deepgram/nova-3"}
+        payload = {
+            "vsid": self.vsid,
+            "text": transcript,
+            "stt_model": "livekit:deepgram/nova-3",
+            # Server-side state is authoritative, but retaining this marker makes
+            # the caller-visible interruption explicit in diagnostics.
+            "interrupt": interrupt,
+        }
         spoken_progress = ""
         try:
             async with httpx.AsyncClient(timeout=190) as client:
@@ -160,8 +187,8 @@ class BoxCodexVoiceAgent(Agent):
                             if event == "progress":
                                 progress = speakable_text(body.get("text"))
                                 if progress:
-                                    speech = self.session.say(progress, allow_interruptions=self.runtime.allow_interruptions)
-                                    await speech.wait_for_playout()
+                                    if not await self._say(progress):
+                                        return
                                     spoken_progress = progress
                             elif event == "final":
                                 answer = speakable_text(body.get("text"))
@@ -169,14 +196,17 @@ class BoxCodexVoiceAgent(Agent):
                                 raise RuntimeError(str(body.get("error") or "adapter stream failed"))
                             event = ""
                             data_lines = []
+        except asyncio.CancelledError:
+            # The user started another complete utterance.  Its replacement task
+            # owns the reply; never speak a misleading network-error apology.
+            return
         except Exception:
             answer = "I could not reach the Box session just now. Please try that once more."
         if not answer:
             answer = "The Box session finished without a speakable answer. Please ask me to check its text response."
         if answer == spoken_progress:
             return
-        speech = self.session.say(answer, allow_interruptions=self.runtime.allow_interruptions)
-        await speech.wait_for_playout()
+        await self._say(answer)
 
 
 server = AgentServer()

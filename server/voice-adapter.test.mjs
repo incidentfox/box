@@ -17,6 +17,8 @@ assert.deepEqual(voiceAdapterVAD({ threshold: 9, silenceMs: 1, minSpeechMs: 9999
 assert.match(buildVoiceAdapterPrompt('check the current status', { agent: 'codex', firstTurn: true }), /persistent codex Code session/);
 assert.match(buildVoiceAdapterPrompt('check the current status', { agent: 'codex', firstTurn: true }), /one final answer for each voice turn/);
 assert.match(buildVoiceAdapterPrompt('next question', { firstTurn: false }), /^USER VOICE TRANSCRIPT/);
+assert.match(buildVoiceAdapterPrompt('new direction', { firstTurn: false, interrupted: true }), /interrupted work already under way/);
+assert.match(buildVoiceAdapterPrompt('new direction', { firstTurn: false, interrupted: true }), /background or parallel work/);
 assert.equal(spokenAdapterText('One. Two.', 20), 'One. Two.');
 assert.match(spokenAdapterText('word '.repeat(500), 300), /^word/);
 console.log('voice-adapter helpers ok');

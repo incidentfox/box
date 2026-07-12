@@ -2501,6 +2501,72 @@ ${voiceAutonomyPolicy()}
       }).filter(Boolean);
     } catch { return []; }
   }
+  // A LiveKit room/call has its own `vsid`, while Codex has a durable thread id.
+  // The app server can restart while a caller remains connected.  Recovering this
+  // binding from the append-only transcript avoids accidentally starting a second
+  // Codex conversation after that restart.
+  function adapterSessionIdFromTranscript(vsid) {
+    const turns = readTurns(vsid);
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const row = turns[i] || {};
+      if ((row.kind === 'assistant' || row.kind === 'adapter_session') && row.source === 'adapter' && row.agent === ADAPTER_AGENT && row.session_id) {
+        return String(row.session_id).trim();
+      }
+    }
+    return '';
+  }
+  function appendAdapterDiagnostic(vsid, event, data = {}) {
+    try {
+      appendFileSync(diagnosticPath(vsid), JSON.stringify({
+        ts: Date.now(), kind: 'diag', source: 'adapter', event, data,
+      }) + '\n');
+    } catch {}
+  }
+  function rememberAdapterSession(vsid, sessionId) {
+    const id = String(sessionId || '').trim();
+    if (!id) return;
+    try {
+      appendFileSync(transcriptPath(vsid), JSON.stringify({
+        ts: Date.now(), kind: 'adapter_session', source: 'adapter', agent: ADAPTER_AGENT, session_id: id,
+      }) + '\n');
+    } catch {}
+  }
+  const ADAPTER_LATENCY_TARGETS_MS = Object.freeze({
+    // Operational UX budgets, not claims about a provider SLA. They make a slow
+    // stage visible in the call record and can be overridden later only after
+    // measured real-call data supports a different target.
+    caller_speech_to_final_transcript: 1500,
+    adapter_queue: 250,
+    final_transcript_to_first_codex_text: 3000,
+    final_transcript_to_audible_playback: 4500,
+    barge_in_to_playback_stopped: 800,
+  });
+  function voicePipelineSummary(vsid) {
+    let rows = [];
+    try {
+      rows = readFileSync(diagnosticPath(vsid), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    } catch {}
+    const events = rows.filter((row) => row && row.kind === 'diag').slice(-240);
+    const samples = {};
+    const collect = (event, key) => {
+      samples[key] = events.filter((row) => row.event === event && Number.isFinite(Number(row.data && row.data.ms)))
+        .map((row) => Number(row.data.ms));
+    };
+    collect('caller_speech_to_final_transcript', 'caller_speech_to_final_transcript');
+    collect('adapter_turn_started', 'adapter_queue');
+    samples.adapter_queue = events.filter((row) => row.event === 'adapter_turn_started' && Number.isFinite(Number(row.data && row.data.queue_ms)))
+      .map((row) => Number(row.data.queue_ms));
+    collect('endpoint_to_first_assistant_text', 'final_transcript_to_first_codex_text');
+    collect('endpoint_to_playback', 'final_transcript_to_audible_playback');
+    collect('barge_in_playback_stopped', 'barge_in_to_playback_stopped');
+    const stage = (key) => {
+      const values = samples[key] || [];
+      const latest_ms = values.length ? values[values.length - 1] : null;
+      const target_ms = ADAPTER_LATENCY_TARGETS_MS[key];
+      return { target_ms, latest_ms, samples: values.length, meets_target: latest_ms == null ? null : latest_ms <= target_ms };
+    };
+    return { vsid, targets_ms: ADAPTER_LATENCY_TARGETS_MS, stages: Object.fromEntries(Object.keys(ADAPTER_LATENCY_TARGETS_MS).map((key) => [key, stage(key)])) };
+  }
 
   // Index any settled sessions that changed since we last indexed them. "Settled" =
   // untouched for a few minutes (so we don't index a live/mid-drive conversation), and
@@ -2686,24 +2752,35 @@ ${voiceAutonomyPolicy()}
     const key = voiceAdapterSessionKey(vsid);
     if (!key) throw new Error('invalid voice session id');
     const startedAt = Date.now();
+    const recoveredSessionId = adapterSessionIdFromTranscript(vsid);
     let firstCodexTextAt = 0;
+    let turnStartedAt = 0;
     let sentProgress = false;
+    appendAdapterDiagnostic(vsid, 'adapter_request_received', { recovered_session: !!recoveredSessionId, stt_model: sttModel || 'unknown' });
     const emitProgress = (text) => {
       if (sentProgress || typeof onProgress !== 'function') return;
       const clean = spokenAdapterText(text, 360);
       if (!clean) return;
       sentProgress = true;
       firstCodexTextAt = Date.now();
-      onProgress(clean, { codex_ms: firstCodexTextAt - startedAt });
+      const data = { from_request_ms: firstCodexTextAt - startedAt, from_turn_start_ms: turnStartedAt ? firstCodexTextAt - turnStartedAt : null };
+      appendAdapterDiagnostic(vsid, 'first_codex_text', data);
+      onProgress(clean, data);
     };
     const speech = async (text) => withTts ? adapterSpeechPayload(text) : {};
-    const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key) : { sessionId: '', busy: false };
-    if (prior.busy) {
-      const text = 'That voice turn is still running in the same session. Give it a moment, then ask me for the result.';
-      return { status: 202, body: { text, pending: true, timings: { backend_ms: Date.now() - startedAt }, ...(await speech(text)) } };
-    }
-    const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId });
-    const turn = runAdapterTurn({ key, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})`, onText: emitProgress });
+    const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key, recoveredSessionId) : { sessionId: recoveredSessionId, busy: false };
+    const interrupted = !!prior.busy;
+    appendAdapterDiagnostic(vsid, 'adapter_session_resolved', { resumed_session: !!prior.sessionId, interrupted });
+    const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId, interrupted });
+    const turn = runAdapterTurn({
+      key, sessionId: prior.sessionId, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})`, interrupt: interrupted,
+      onStart: () => {
+        turnStartedAt = Date.now();
+        appendAdapterDiagnostic(vsid, 'adapter_turn_started', { queue_ms: turnStartedAt - startedAt, interrupted });
+      },
+      onSession: ({ sessionId }) => rememberAdapterSession(vsid, sessionId),
+      onText: emitProgress,
+    });
     let timeout;
     const result = await Promise.race([
       turn,
@@ -2712,6 +2789,7 @@ ${voiceAutonomyPolicy()}
     clearTimeout(timeout);
     if (result && result.timeout) {
       const text = 'I am still working on that. I will keep the same session context, so ask again in a moment for the result.';
+      appendAdapterDiagnostic(vsid, 'adapter_turn_timeout', { backend_ms: Date.now() - startedAt });
       return { status: 202, body: { transcript, stt_model: sttModel, text, pending: true, timings: { backend_ms: Date.now() - startedAt, first_codex_ms: firstCodexTextAt ? firstCodexTextAt - startedAt : null }, ...(await speech(text)) } };
     }
     if (result && result.error) throw new Error(result.error);
@@ -2721,9 +2799,14 @@ ${voiceAutonomyPolicy()}
       appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'user', text: transcript, source: 'adapter', stt_model: sttModel }) + '\n');
       appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'assistant', text, source: 'adapter', agent: ADAPTER_AGENT, session_id: result && result.sessionId || '' }) + '\n');
     } catch {}
-    const timings = { backend_ms: Date.now() - startedAt, first_codex_ms: firstCodexTextAt ? firstCodexTextAt - startedAt : null };
-    try { appendFileSync(diagnosticPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'diag', source: 'adapter', event: 'turn_timing', data: timings }) + '\n'); } catch {}
-    return { status: 200, body: { transcript, stt_model: sttModel, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', timings, ...(await speech(text)) } };
+    const timings = {
+      queue_ms: turnStartedAt ? turnStartedAt - startedAt : null,
+      first_codex_ms: firstCodexTextAt ? firstCodexTextAt - startedAt : null,
+      codex_run_ms: turnStartedAt ? Date.now() - turnStartedAt : null,
+      backend_ms: Date.now() - startedAt,
+    };
+    appendAdapterDiagnostic(vsid, 'adapter_turn_completed', { ...timings, interrupted, session_id: result && result.sessionId || '' });
+    return { status: 200, body: { transcript, stt_model: sttModel, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', interrupted, timings, ...(await speech(text)) } };
   }
   // Low-latency transcript preview for adapter mode. It intentionally DOES NOT touch
   // a CLI session: a partial utterance may change, and Codex/Claude turns are atomic.
@@ -2772,6 +2855,14 @@ ${voiceAutonomyPolicy()}
     } finally {
       res.end();
     }
+  });
+  // Content-free timing view for diagnosing a real call.  It exposes durations
+  // and target evaluation only; the transcript itself remains in its protected
+  // local session log.
+  app.get('/api/voice/adapter/diagnostics/:vsid', requireAuth, (req, res) => {
+    const vsid = String(req.params.vsid || '').replace(/[^\w.-]/g, '').slice(0, 120);
+    if (!vsid) return res.status(400).json({ error: 'vsid required' });
+    res.json(voicePipelineSummary(vsid));
   });
   app.post('/api/voice/adapter/turn', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
     if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
