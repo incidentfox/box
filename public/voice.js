@@ -19,7 +19,7 @@
 
 let voState = 'off';            // off | connecting | live | reconnecting | ended
 let voPc = null, voDc = null, voMicStream = null, voAudioEl = null;
-let voMemAudio = false, voRecorder = null, voRecSeq = 0;  // opt-in audio capture (voice memory)
+let voMemAudio = false, voRecorder = null, voRecSeq = 0, voAudioRecorders = [];  // opt-in audio capture (voice memory)
 let voVsid = null, voCursor = 0;
 let voStartedAt = 0, voConnectedAt = 0, voMuted = false;
 let voWakeLock = null;
@@ -50,6 +50,7 @@ let voAdapterTransport = 'legacy', voLivekitRoom = null, voLivekitTranscript = '
 let voLivekitAsstTranscript = '', voLivekitAsstBubble = null;
 let voLivekitUserSegments = new Map(), voLivekitAsstSegments = new Map();
 let voLivekitCommitBusy = false;
+let voLivekitEndpointAt = 0, voLivekitEndpointText = '', voLivekitPlaybackLogged = false;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -358,7 +359,10 @@ async function voStart() {
   voNotifyQ = (globalThis.VoiceNotify && globalThis.VoiceNotify.createNotifyQueue)
     ? globalThis.VoiceNotify.createNotifyQueue({ send: voSend, diag: voDiag })
     : null;
-  voVsid = null; voCursor = 0; voReconnectAttempt = 0;
+  // Stop any stale recorder before clearing its session id, so a final buffered
+  // chunk can still be uploaded to the call it belongs to.
+  voStopAudioCapture();
+  voVsid = null; voCursor = 0; voReconnectAttempt = 0; voRecSeq = 0; voMemAudio = false;
   voUsage = { atIn: 0, atInCached: 0, txIn: 0, txInCached: 0, atOut: 0, txOut: 0 };
   voLatencies = []; voSpeechStopAt = 0; voClearFalseInterrupt();
   voStopStats(); voResponseDiag = null; voLastAudioTranscriptAt = 0;
@@ -372,6 +376,7 @@ async function voStart() {
     // The adapter shares the realtime audio policy. In particular, barge-in
     // requires an open mic while TTS plays; leave echo protection enabled.
     voAudioPolicy = { ...VO_AUDIO_POLICY_DEFAULT, ...(st.audioPolicy || {}) };
+    voMemAudio = !!(st.memory && st.memory.storeAudio);
     voMode = st.mode === 'adapter' ? 'adapter' : 'realtime';
     if (voMode === 'adapter') await voStartAdapter(st.adapter || {});
     else await voConnect(false);
@@ -424,6 +429,14 @@ function voLivekitAppendTranscript(segments) {
     voLivekitUserSegments = new Map(); voLivekitTranscript = ''; voLivekitBubble = null;
   }
   voLivekitTranscript = voLivekitMergeSegments(voLivekitUserSegments, segments);
+  const finals = (segments || []).filter((s) => s && s.final && String(s.text || '').trim());
+  const final = finals[finals.length - 1];
+  if (final) {
+    voLivekitEndpointAt = Date.now();
+    voLivekitEndpointText = String(final.text || '').slice(0, 160);
+    voLivekitPlaybackLogged = false;
+    voDiag('livekit', 'caller_final_transcript', { chars: voLivekitEndpointText.length });
+  }
   if (!voLivekitBubble) voLivekitBubble = voBubble('user', 'Listening…');
   voLivekitBubble.textContent = voLivekitTranscript || 'Listening…';
   voScroll();
@@ -452,11 +465,20 @@ async function voStartLivekitAdapter(cfg) {
     if (track.kind !== LK.Track.Kind.Audio) return;
     track.attach(voAudioEl);
     voAudioEl.play().catch(() => {});
+    // Keep caller and assistant audio as separately timestamped clips. This is
+    // more reliable on iOS than trying to mix two MediaStreams in the browser.
+    if (track.mediaStreamTrack) voStartAudioCapture(new MediaStream([track.mediaStreamTrack]), 'assistant');
   });
   room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
     const agentSpeaking = (speakers || []).some((p) => p.identity !== room.localParticipant.identity);
     voAdapterSpeaking = agentSpeaking;
     voOrbMode(agentSpeaking ? 'speaking' : 'listening');
+    if (agentSpeaking && voLivekitEndpointAt && !voLivekitPlaybackLogged) {
+      const ms = Date.now() - voLivekitEndpointAt;
+      voLivekitPlaybackLogged = true;
+      voLatencies.push(ms);
+      voDiag('livekit', 'endpoint_to_playback', { ms, transcriptChars: voLivekitEndpointText.length });
+    }
     // True half-duplex: disable the same long-lived LiveKit mic track while
     // Cartesia plays. Previously this only called voApplyMic(), without ever
     // closing the gate, so TTS/road noise could keep the server VAD "speaking".
@@ -472,6 +494,9 @@ async function voStartLivekitAdapter(cfg) {
   });
   await room.connect(join.url, join.token);
   await room.localParticipant.setMicrophoneEnabled(!voMuted);
+  const micPublication = room.localParticipant.getTrackPublication && room.localParticipant.getTrackPublication(LK.Track.Source.Microphone);
+  const micTrack = micPublication && micPublication.track && micPublication.track.mediaStreamTrack;
+  if (micTrack) voStartAudioCapture(new MediaStream([micTrack]), 'caller');
   voSetState('live'); voConnectedAt = Date.now(); voBanner('');
   voNotice(`LiveKit adapter — ${cfg.agent || 'agent'} is ready. Deepgram transcribes live; pause naturally and it will hand off to Codex.`);
   voDiag('livekit', 'connected', { room: join.room || '', agent: join.agent || '' });
@@ -1207,25 +1232,43 @@ function voFlushEvents() {
  * owner has opted into audio storage, WE record the mic locally (MediaRecorder over the
  * same mic track) and POST timeslices to /api/voice/audio, letting a garbled transcript
  * be recovered from audio later. Gated on tok.memory.storeAudio — off by default. */
-function voStartAudioCapture() {
-  if (!voMemAudio || !voMicStream || voRecorder) return;
-  if (typeof MediaRecorder === 'undefined') return;
+function voStartAudioCapture(stream = voMicStream, role = 'caller') {
+  if (!voMemAudio || !stream || typeof MediaRecorder === 'undefined') return;
+  const track = stream.getAudioTracks && stream.getAudioTracks()[0];
+  if (!track || voAudioRecorders.some((r) => r.track === track)) return;
   try {
     const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) || '';
-    voRecorder = new MediaRecorder(voMicStream, mimeType ? { mimeType } : undefined);
-    voRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) voUploadAudio(e.data); };
-    voRecorder.start(20000); // 20s chunks — bounded upload size, resilient to drops
-  } catch (e) { console.warn('[voice] audio capture unavailable', e); voRecorder = null; }
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    const recording = { recorder, track, role, startedAt: Date.now() };
+    voAudioRecorders.push(recording);
+    if (role === 'caller' && !voRecorder) voRecorder = recorder;
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) voUploadAudio(e.data, recording); };
+    recorder.onstop = () => {
+      voAudioRecorders = voAudioRecorders.filter((r) => r !== recording);
+      if (voRecorder === recorder) voRecorder = null;
+    };
+    recorder.start(20000); // 20s chunks — bounded upload size, resilient to drops
+    voDiag('recording', 'stream_started', { role });
+  } catch (e) { console.warn('[voice] audio capture unavailable', e); }
 }
 function voStopAudioCapture() {
-  if (voRecorder) { try { if (voRecorder.state !== 'inactive') voRecorder.stop(); } catch {} voRecorder = null; }
+  for (const recording of voAudioRecorders) {
+    try { if (recording.recorder.state !== 'inactive') recording.recorder.stop(); } catch {}
+  }
+  voAudioRecorders = []; voRecorder = null;
 }
-function voUploadAudio(blob) {
+function voUploadAudio(blob, recording = null) {
   if (!voVsid) return;
   try {
     const fd = new FormData();
     fd.append('audio', blob, `chunk-${voRecSeq}.webm`);
-    api(`/api/voice/audio?vsid=${encodeURIComponent(voVsid)}&seq=${voRecSeq++}`, { method: 'POST', body: fd }).catch(() => {});
+    const qs = new URLSearchParams({ vsid: voVsid, seq: String(voRecSeq++) });
+    if (recording) {
+      qs.set('role', recording.role || 'caller');
+      qs.set('started_at', String(recording.startedAt || Date.now()));
+      qs.set('captured_at', String(Date.now()));
+    }
+    api(`/api/voice/audio?${qs}`, { method: 'POST', body: fd }).catch(() => {});
   } catch {}
 }
 

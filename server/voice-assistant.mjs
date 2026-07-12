@@ -2822,7 +2822,10 @@ ${voiceAutonomyPolicy()}
     const vsid = String((req.query.vsid || req.body.vsid || '')).trim();
     if (!vsid) return res.status(400).json({ error: 'vsid required' });
     const seq = req.query.seq != null ? Number(req.query.seq) : undefined;
-    const r = memory.storeAudioClip(vsid, req.file.buffer, req.file.mimetype, { seq });
+    const role = ['caller', 'assistant'].includes(String(req.query.role || '')) ? String(req.query.role) : undefined;
+    const capturedAt = req.query.captured_at != null ? Number(req.query.captured_at) : undefined;
+    const startedAt = req.query.started_at != null ? Number(req.query.started_at) : undefined;
+    const r = memory.storeAudioClip(vsid, req.file.buffer, req.file.mimetype, { seq, role, capturedAt, startedAt });
     res.json(r);
   });
 
