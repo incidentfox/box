@@ -157,10 +157,10 @@ class RuntimeConfig:
         return cls(
             backend_url=os.getenv("BOX_VOICE_BACKEND_URL", "http://127.0.0.1:7321").rstrip("/"),
             auth_token=os.getenv("CC_AUTH_TOKEN", ""),
-            # Cartesia is optional. Default to the OpenAI stream directly so an
-            # exhausted Cartesia account cannot add a failed request and provider
-            # recovery cycle to every spoken response.
-            tts_provider=os.getenv("VOICE_ADAPTER_TTS_PROVIDER", "openai").strip().lower(),
+            # Deepgram is already warm for STT and its measured TTS first byte is
+            # substantially faster than OpenAI. Cartesia remains opt-in because an
+            # exhausted account must not add a failed recovery cycle to every reply.
+            tts_provider=os.getenv("VOICE_ADAPTER_TTS_PROVIDER", "deepgram").strip().lower(),
             cartesia_voice=os.getenv("VOICE_ADAPTER_CARTESIA_VOICE", DEFAULT_CARTESIA_VOICE),
             cartesia_model=os.getenv("VOICE_ADAPTER_CARTESIA_MODEL", DEFAULT_CARTESIA_MODEL),
             allow_interruptions=voice_bool(os.getenv("VOICE_ASSISTANT_INTERRUPT_RESPONSE")),
@@ -313,8 +313,16 @@ async def entrypoint(ctx: JobContext) -> None:
             language="en", sample_rate=24000,
         )
         session_tts = tts.FallbackAdapter([cartesia_tts, openai_tts], max_retry_per_tts=1)
-    else:
+    elif runtime.tts_provider == "openai":
         session_tts = openai_tts
+    else:
+        deepgram_tts = deepgram.TTS(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            model=os.getenv("VOICE_ADAPTER_DEEPGRAM_TTS_MODEL", "aura-2-thalia-en"),
+            encoding="linear16",
+            sample_rate=24000,
+        )
+        session_tts = tts.FallbackAdapter([deepgram_tts, openai_tts], max_retry_per_tts=1)
     session = AgentSession(
         stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
         tts=session_tts,
