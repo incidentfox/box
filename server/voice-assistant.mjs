@@ -41,6 +41,19 @@ const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').tr
 // Like short() but preserves newlines/formatting — for artifacts we email verbatim.
 const clip = (s, n) => { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n) + '\n\n…[truncated]' : s; };
 
+// The durable Codex thread is stored in an append-only voice transcript. Keep
+// this separate from the normalized user/assistant view used for memory: that
+// view intentionally omits metadata such as `session_id`.
+export function adapterSessionIdFromRows(rows, agent = 'codex') {
+  for (let i = (rows || []).length - 1; i >= 0; i--) {
+    const row = rows[i] || {};
+    if ((row.kind === 'assistant' || row.kind === 'adapter_session') && row.source === 'adapter' && row.agent === agent && row.session_id) {
+      return String(row.session_id).trim();
+    }
+  }
+  return '';
+}
+
 // Standard agent-request template. Delegation friction (INC-1082) came from ad-hoc,
 // under-specified voice asks that forced handoffs — the agent stalls to ask a question, or
 // returns something unusable that has to be re-driven. This wraps ONE spoken sentence into a
@@ -2488,32 +2501,27 @@ ${voiceAutonomyPolicy()}
     } catch { return ''; }
   }
 
-  // Parse a full session transcript into role/text turns for memory indexing.
-  function readTurns(vsid) {
+  function readTranscriptRows(vsid) {
     try {
       return readFileSync(transcriptPath(vsid), 'utf8').trim().split('\n').map((l) => {
-        try {
-          const o = JSON.parse(l);
-          if (o.kind === 'user') return { role: 'user', text: o.text, ts: o.ts };
-          if (o.kind === 'assistant') return { role: 'assistant', text: o.text, ts: o.ts };
-          return null;
-        } catch { return null; }
+        try { return JSON.parse(l); } catch { return null; }
       }).filter(Boolean);
     } catch { return []; }
+  }
+  // Parse a full session transcript into role/text turns for memory indexing.
+  function readTurns(vsid) {
+    return readTranscriptRows(vsid).map((o) => {
+      if (o.kind === 'user') return { role: 'user', text: o.text, ts: o.ts };
+      if (o.kind === 'assistant') return { role: 'assistant', text: o.text, ts: o.ts };
+      return null;
+    }).filter(Boolean);
   }
   // A LiveKit room/call has its own `vsid`, while Codex has a durable thread id.
   // The app server can restart while a caller remains connected.  Recovering this
   // binding from the append-only transcript avoids accidentally starting a second
   // Codex conversation after that restart.
   function adapterSessionIdFromTranscript(vsid) {
-    const turns = readTurns(vsid);
-    for (let i = turns.length - 1; i >= 0; i--) {
-      const row = turns[i] || {};
-      if ((row.kind === 'assistant' || row.kind === 'adapter_session') && row.source === 'adapter' && row.agent === ADAPTER_AGENT && row.session_id) {
-        return String(row.session_id).trim();
-      }
-    }
-    return '';
+    return adapterSessionIdFromRows(readTranscriptRows(vsid), ADAPTER_AGENT);
   }
   function appendAdapterDiagnostic(vsid, event, data = {}) {
     try {
@@ -2566,6 +2574,15 @@ ${voiceAutonomyPolicy()}
       return { target_ms, latest_ms, samples: values.length, meets_target: latest_ms == null ? null : latest_ms <= target_ms };
     };
     return { vsid, targets_ms: ADAPTER_LATENCY_TARGETS_MS, stages: Object.fromEntries(Object.keys(ADAPTER_LATENCY_TARGETS_MS).map((key) => [key, stage(key)])) };
+  }
+  function voicePipelinePrompt(vsid) {
+    const summary = voicePipelineSummary(vsid);
+    const stages = Object.entries(summary.stages).map(([name, value]) => {
+      const latest = value.latest_ms == null ? 'not measured yet' : `${Math.round(value.latest_ms)}ms`;
+      const verdict = value.meets_target == null ? 'no verdict yet' : value.meets_target ? 'within target' : 'above target';
+      return `${name}: ${latest}; target ${value.target_ms}ms; ${verdict}`;
+    });
+    return `\nLIVE VOICE PIPELINE METRICS (refreshes while the call is active; timing only, no hidden transcript):\n${stages.join('\n')}\nThe detailed live log is ${diagnosticPath(vsid)}. Use these measurements when Jimmy asks to diagnose voice quality. You may inspect and explain them, but do not change runtime configuration, restart services, deploy, or make any external change from metrics alone without his explicit confirmation.\n`;
   }
 
   // Index any settled sessions that changed since we last indexed them. "Settled" =
@@ -2771,7 +2788,7 @@ ${voiceAutonomyPolicy()}
     const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key, recoveredSessionId) : { sessionId: recoveredSessionId, busy: false };
     const interrupted = !!prior.busy;
     appendAdapterDiagnostic(vsid, 'adapter_session_resolved', { resumed_session: !!prior.sessionId, interrupted });
-    const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId, interrupted });
+    const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId, interrupted }) + voicePipelinePrompt(vsid);
     const turn = runAdapterTurn({
       key, sessionId: prior.sessionId, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})`, interrupt: interrupted,
       onStart: () => {
