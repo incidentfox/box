@@ -56,5 +56,10 @@ export function spokenAdapterText(value, maxChars = 1400) {
   // Prefer a sentence boundary so truncation does not sound abruptly cut off.
   const cut = text.slice(0, limit);
   const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
-  return (end > Math.floor(limit * 0.55) ? cut.slice(0, end + 1) : cut.trimEnd() + '…').trim();
+  if (end >= Math.min(80, Math.floor(limit * 0.2))) return cut.slice(0, end + 1).trim();
+  // A response with no usable sentence boundary may still be streamed as a
+  // progress update. Never clip it inside a word: the final-answer deduper
+  // relies on this text being a real prefix of the later complete response.
+  const wordEnd = cut.lastIndexOf(' ');
+  return ((wordEnd > 0 ? cut.slice(0, wordEnd) : cut).trimEnd() + '…').trim();
 }
