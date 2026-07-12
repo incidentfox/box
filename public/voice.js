@@ -19,6 +19,7 @@
 
 let voState = 'off';            // off | connecting | live | reconnecting | ended
 let voPc = null, voDc = null, voMicStream = null, voAudioEl = null;
+let voLivekitMicWarmup = null;
 let voMemAudio = false, voRecorder = null, voRecSeq = 0, voAudioRecorders = [];  // opt-in audio capture (voice memory)
 let voVsid = null, voCursor = 0;
 let voStartedAt = 0, voConnectedAt = 0, voMuted = false;
@@ -78,23 +79,55 @@ let voIncidents = { selfInterrupt: 0, misattribution: 0 };
 
 const VO_PRICES = { atIn: 32, atInCached: 0.4, txIn: 4, txInCached: 0.4, atOut: 64, txOut: 24 }; // $/1M tok (gpt-realtime-2.1)
 
-// Stronger mic capture constraints. echoCancellation/noiseSuppression/autoGainControl are
-// portable + always honored; the `advanced` block is best-effort — browsers silently drop
-// any hint they don't support, so it never throws OverconstrainedError.
+// Keep capture negotiation intentionally small. iOS sometimes spends several seconds
+// resolving a larger constraint set before it opens the audio session. These three
+// standard processing flags retain the echo protection we need without Chrome-only
+// `advanced` hints or a redundant channel-count negotiation.
 function voMicConstraints() {
   return {
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
-    channelCount: 1,
-    advanced: [
-      { echoCancellationType: 'system' },
-      { googEchoCancellation: true },
-      { googAutoGainControl: true },
-      { googNoiseSuppression: true },
-      { googHighpassFilter: true },
-    ],
   };
+}
+
+// Start iOS microphone activation while the navigation/call button still owns a
+// user gesture. Waiting for /voice/status first loses that activation and Safari
+// has repeatedly taken 2.5-6.2 seconds to open the exact same microphone track.
+// The resolved track is held briefly and then published by voStartLivekitAdapter.
+function voBeginLivekitMicWarmup() {
+  if (voLivekitMicWarmup) return voLivekitMicWarmup;
+  const LK = globalThis.LivekitClient;
+  if (!LK || typeof LK.createLocalAudioTrack !== 'function') return null;
+  const warmup = { startedAt: Date.now(), promise: null, timer: null };
+  let capture;
+  try { capture = LK.createLocalAudioTrack(voMicConstraints()); }
+  catch (error) { capture = Promise.reject(error); }
+  // Convert rejection into data immediately so a slow status request can never
+  // produce an unhandled-rejection event before the adapter awaits the result.
+  warmup.promise = Promise.resolve(capture).then((track) => ({ track }), (error) => ({ error }));
+  warmup.timer = setTimeout(() => {
+    if (voLivekitMicWarmup !== warmup) return;
+    voLivekitMicWarmup = null;
+    warmup.promise.then(({ track }) => { try { if (track) track.stop(); } catch {} });
+  }, 30000);
+  voLivekitMicWarmup = warmup;
+  return warmup;
+}
+function voTakeLivekitMicWarmup() {
+  const warmup = voLivekitMicWarmup || voBeginLivekitMicWarmup();
+  if (!warmup) return null;
+  voLivekitMicWarmup = null;
+  if (warmup.timer) clearTimeout(warmup.timer);
+  warmup.timer = null;
+  return warmup;
+}
+function voStopLivekitMicWarmup(warmup = voLivekitMicWarmup) {
+  if (!warmup) return;
+  if (voLivekitMicWarmup === warmup) voLivekitMicWarmup = null;
+  if (warmup.timer) clearTimeout(warmup.timer);
+  warmup.timer = null;
+  warmup.promise.then(({ track }) => { try { if (track) track.stop(); } catch {} });
 }
 
 // Effective mic state = user hasn't muted AND the half-duplex gate isn't holding it closed.
@@ -200,7 +233,10 @@ function voBuild() {
     <button id="voEnd" class="voCtl voEndBtn" title="end" disabled><span data-icon="close"></span></button>
   </div>`;
   paintIcons(root);
-  $('voBack').onclick = () => history.back();
+  $('voBack').onclick = () => {
+    if (voState === 'off' || voState === 'ended') voStopLivekitMicWarmup();
+    history.back();
+  };
   $('voMain').onclick = () => {
     if (voState === 'off' || voState === 'ended') voStart();
     else if (voState === 'live' && voMode === 'adapter') voAdapterManualRecord();
@@ -228,6 +264,10 @@ function openVoice() {
   voBuild();
   show('voice');
   paintIcons($('voice'));
+  // Opening Voice is itself a user gesture and is the earliest safe point to
+  // activate the iPhone microphone. If Start follows immediately, voStart also
+  // calls this synchronously before its first network await.
+  if (voState === 'off' || voState === 'ended') voBeginLivekitMicWarmup();
 }
 
 /* ---------- UI helpers ---------- */
@@ -373,6 +413,9 @@ function voClockTick() {
 
 async function voStart() {
   voBuild();
+  // Take (or synchronously begin) microphone capture before /voice/status. This
+  // preserves the user gesture on iOS and overlaps capture with all setup I/O.
+  const livekitMicWarmup = voTakeLivekitMicWarmup();
   voNotifyQ = (globalThis.VoiceNotify && globalThis.VoiceNotify.createNotifyQueue)
     ? globalThis.VoiceNotify.createNotifyQueue({ send: voSend, diag: voDiag })
     : null;
@@ -395,9 +438,13 @@ async function voStart() {
     voAudioPolicy = { ...VO_AUDIO_POLICY_DEFAULT, ...(st.audioPolicy || {}) };
     voMemAudio = !!(st.memory && st.memory.storeAudio);
     voMode = st.mode === 'adapter' ? 'adapter' : 'realtime';
-    if (voMode === 'adapter') await voStartAdapter(st.adapter || {});
-    else await voConnect(false);
+    if (voMode === 'adapter') await voStartAdapter(st.adapter || {}, livekitMicWarmup);
+    else {
+      voStopLivekitMicWarmup(livekitMicWarmup);
+      await voConnect(false);
+    }
   } catch (e) {
+    voStopLivekitMicWarmup(livekitMicWarmup);
     voSetState('off'); toast(String((e && e.message) || e).slice(0, 120)); return;
   }
   if (voClockIv) clearInterval(voClockIv);
@@ -412,13 +459,14 @@ async function voStart() {
 function voAdapterId() {
   try { return crypto.randomUUID(); } catch { return `adapter-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 }
-async function voStartAdapter(cfg) {
+async function voStartAdapter(cfg, livekitMicWarmup = null) {
   if (!cfg.enabled) throw new Error('adapter mode needs the box STT/TTS and selected CLI agent');
   voSetState('connecting');
   voAdapterCfg = cfg;
   voAdapterTransport = cfg.transport === 'livekit' ? 'livekit' : 'legacy';
   voVsid = voAdapterId();
-  if (voAdapterTransport === 'livekit') return voStartLivekitAdapter(cfg);
+  if (voAdapterTransport === 'livekit') return voStartLivekitAdapter(cfg, livekitMicWarmup);
+  voStopLivekitMicWarmup(livekitMicWarmup);
   if (typeof MediaRecorder === 'undefined') throw new Error('this browser cannot record microphone audio for adapter mode');
   voMicStream = await navigator.mediaDevices.getUserMedia({ audio: voMicConstraints() });
   voApplyMic();
@@ -481,15 +529,15 @@ function voLivekitAppendAssistantTranscript(segments) {
   if (voLivekitAsstTranscript) { voAsstText = voLivekitAsstTranscript; voRememberAsst(voLivekitAsstTranscript); }
   voScroll();
 }
-async function voStartLivekitAdapter(cfg) {
+async function voStartLivekitAdapter(cfg, livekitMicWarmup = null) {
   if (!globalThis.LivekitClient) throw new Error('LiveKit client library did not load; refresh once to update the app shell');
   const LK = globalThis.LivekitClient;
-  const startupAt = Date.now();
-  voDiag('livekit', 'startup_started', {});
-  // iOS intermittently spends about seven seconds opening the microphone. Start
-  // that permission/capture work immediately and in parallel with the Box token
-  // request + LiveKit signaling instead of serializing all three operations.
-  const micPromise = LK.createLocalAudioTrack(voMicConstraints()).then((track) => {
+  const warmup = livekitMicWarmup || voTakeLivekitMicWarmup();
+  if (!warmup) throw new Error('this browser cannot open a LiveKit microphone track');
+  const startupAt = warmup.startedAt;
+  voDiag('livekit', 'startup_started', { prewarmed_ms: Date.now() - startupAt });
+  const micPromise = warmup.promise.then(({ track, error }) => {
+    if (error) throw error;
     voDiag('livekit', 'startup_microphone_captured', { ms: Date.now() - startupAt });
     return track;
   });
@@ -982,6 +1030,7 @@ function voEnd(finalState) {
   voResetAudioGate(); voDropCurrentResponse = false;
   voStopStats();
   voStopAudioCapture();
+  voStopLivekitMicWarmup();
   if (voAdapterRaf) cancelAnimationFrame(voAdapterRaf);
   voAdapterRaf = 0;
   try { if (voAdapterRecorder && voAdapterRecorder.state !== 'inactive') voAdapterRecorder.stop(); } catch {}

@@ -98,12 +98,17 @@ def deepgram_options() -> dict[str, Any]:
     # signal in this adapter, while VAD remains activity-only.
     return {
         "model": "nova-3",
-        "language": "multi",
+        # This assistant is English-only. Avoid multilingual language detection on
+        # every stream; it adds work and has no benefit for the owner's calls.
+        "language": "en-US",
         "interim_results": True,
         "smart_format": True,
-        # Finalize words promptly, then let UtteranceEnd decide that the caller
-        # really stopped. This avoids a VAD breath becoming an agent handoff.
-        "endpointing_ms": 300,
+        # Disable Deepgram speech_final endpointing. It was firing on 300 ms
+        # in-sentence pauses (the worker logged STT end-of-speech while VAD still
+        # heard speech), creating fragmented turns and apparent stop/start cycles.
+        # UtteranceEnd is now the one predictable commit signal: one second of
+        # silence, followed by LiveKit's 50 ms handoff below.
+        "endpointing_ms": 0,
         "utterance_end_ms": 1000,
     }
 
@@ -142,6 +147,7 @@ def is_manual_turn_commit(data: bytes, topic: str, participant_identity: str) ->
 class RuntimeConfig:
     backend_url: str
     auth_token: str
+    tts_provider: str
     cartesia_voice: str
     cartesia_model: str
     allow_interruptions: bool
@@ -151,6 +157,10 @@ class RuntimeConfig:
         return cls(
             backend_url=os.getenv("BOX_VOICE_BACKEND_URL", "http://127.0.0.1:7321").rstrip("/"),
             auth_token=os.getenv("CC_AUTH_TOKEN", ""),
+            # Cartesia is optional. Default to the OpenAI stream directly so an
+            # exhausted Cartesia account cannot add a failed request and provider
+            # recovery cycle to every spoken response.
+            tts_provider=os.getenv("VOICE_ADAPTER_TTS_PROVIDER", "openai").strip().lower(),
             cartesia_voice=os.getenv("VOICE_ADAPTER_CARTESIA_VOICE", DEFAULT_CARTESIA_VOICE),
             cartesia_model=os.getenv("VOICE_ADAPTER_CARTESIA_MODEL", DEFAULT_CARTESIA_MODEL),
             allow_interruptions=voice_bool(os.getenv("VOICE_ASSISTANT_INTERRUPT_RESPONSE")),
@@ -292,18 +302,22 @@ async def entrypoint(ctx: JobContext) -> None:
     if not vsid:
         raise RuntimeError("voice room is missing its session id")
 
-    primary_tts = cartesia.TTS(
-        api_key=os.getenv("CARTESIA_API_KEY"), model=runtime.cartesia_model, voice=runtime.cartesia_voice,
-        language="en", sample_rate=24000,
-    )
-    fallback_tts = openai.TTS(
+    openai_tts = openai.TTS(
         api_key=os.getenv("OPENAI_API_KEY"), model=os.getenv("VOICE_ADAPTER_TTS_MODEL", "gpt-4o-mini-tts"),
         voice=os.getenv("VOICE_ADAPTER_TTS_VOICE", "marin"),
         instructions="Speak naturally, concise and calm for a hands-free phone conversation.",
     )
+    if runtime.tts_provider == "cartesia" and os.getenv("CARTESIA_API_KEY"):
+        cartesia_tts = cartesia.TTS(
+            api_key=os.getenv("CARTESIA_API_KEY"), model=runtime.cartesia_model, voice=runtime.cartesia_voice,
+            language="en", sample_rate=24000,
+        )
+        session_tts = tts.FallbackAdapter([cartesia_tts, openai_tts], max_retry_per_tts=1)
+    else:
+        session_tts = openai_tts
     session = AgentSession(
         stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
-        tts=tts.FallbackAdapter([primary_tts, fallback_tts], max_retry_per_tts=1),
+        tts=session_tts,
         vad=ctx.proc.userdata["vad"],
         turn_handling=turn_handling_options(allow_interruptions=runtime.allow_interruptions),
     )

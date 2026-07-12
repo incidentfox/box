@@ -876,6 +876,7 @@ export function registerVoiceAssistant(app, ctx) {
   });
   const ADAPTER_TTS_MODEL = cfg('VOICE_ADAPTER_TTS_MODEL', 'gpt-4o-mini-tts');
   const ADAPTER_TTS_VOICE = cfg('VOICE_ADAPTER_TTS_VOICE', VOICE);
+  const ADAPTER_TTS_PROVIDER = cfg('VOICE_ADAPTER_TTS_PROVIDER', 'openai').toLowerCase();
   // Voice turns need a fast, high-volume coding model, not the quality-first
   // desktop default. Keep this scoped to voice-created sessions so normal Box
   // chats remain on their existing model and effort settings.
@@ -3036,7 +3037,9 @@ ${voiceAutonomyPolicy()}
         transport: ADAPTER_TRANSPORT,
         stt: ADAPTER_TRANSPORT === 'livekit' ? 'LiveKit worker: Deepgram nova-3 streaming' : 'box transcribe (Deepgram primary, ElevenLabs fallback)',
         tts: ADAPTER_TRANSPORT === 'livekit'
-          ? { provider: 'cartesia', model: cfg('VOICE_ADAPTER_CARTESIA_MODEL', 'sonic-3.5'), voice: cfg('VOICE_ADAPTER_CARTESIA_VOICE', 'a5136bf9-224c-4d76-b823-52bd5efcffcc'), fallback: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE } }
+          ? (ADAPTER_TTS_PROVIDER === 'cartesia'
+            ? { provider: 'cartesia', model: cfg('VOICE_ADAPTER_CARTESIA_MODEL', 'sonic-3.5'), voice: cfg('VOICE_ADAPTER_CARTESIA_VOICE', 'a5136bf9-224c-4d76-b823-52bd5efcffcc'), fallback: { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE } }
+            : { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE })
           : { provider: 'openai', model: ADAPTER_TTS_MODEL, voice: ADAPTER_TTS_VOICE },
         livekit: { configured: livekitConfigured(LIVEKIT), agentName: LIVEKIT.agentName },
         vad: ADAPTER_VAD, interruptResponse: INTERRUPT_RESPONSE, maxTurnMs: ADAPTER_MAX_TURN_MS, maxResponseChars: ADAPTER_MAX_RESPONSE_CHARS,
