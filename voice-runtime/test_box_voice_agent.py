@@ -21,13 +21,13 @@ def test_text_and_default_voice_are_available(monkeypatch):
 
 def test_deepgram_utterance_end_satisfies_provider_minimum():
     assert deepgram_options()["utterance_end_ms"] >= 1000
-    assert deepgram_options()["endpointing_ms"] >= 500
+    assert deepgram_options()["endpointing_ms"] == 300
 
 
 def test_turn_handling_commits_only_on_deepgram_finalized_speech():
     options = turn_handling_options()
     assert options["turn_detection"] == "stt"
-    assert options["endpointing"] == {"mode": "fixed", "min_delay": 0.15, "max_delay": 0.15}
+    assert options["endpointing"] == {"mode": "fixed", "min_delay": 0.05, "max_delay": 0.05}
     assert options["interruption"]["enabled"] is False
 
 
@@ -48,6 +48,7 @@ def test_final_text_is_not_spoken_twice_after_matching_progress():
     assert final_text_to_speak("I found the issue!", "I found the issue.") == ""
     assert final_text_to_speak("The fix is deployed.", "I found the issue.") == "The fix is deployed."
     assert final_text_to_speak("The fix is deployed.", "The fix is deployed!") == ""
+    assert final_text_to_speak("I found the issue. The fix is deployed.", "I found the issue.") == "The fix is deployed."
 
 
 def test_manual_turn_commit_requires_the_caller_and_control_topic():

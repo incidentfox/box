@@ -3695,12 +3695,18 @@ function enqueue(extKey, msg) {
 // It deliberately uses the existing Claude/Codex turn runners: context, tool streaming,
 // sandbox settings, remote-control ownership, and session persistence stay identical to
 // a phone chat. Adapter callers may have only one outstanding spoken turn per session.
-function runVoiceAdapterTurn({ key, sessionId = '', text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter', interrupt = false, onStart, onSession, onText } = {}) {
+function runVoiceAdapterTurn({ key, sessionId = '', text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter', interrupt = false, codexSettings = null, onStart, onSession, onText } = {}) {
   // A call id is intentionally not the Codex session id.  The call may survive a
   // Box deploy/restart, which clears RT/ALIAS, so resume from the durable Codex id
   // recorded by the voice layer whenever it has one.
   const s = rt(sessionId || key);
   if (s.sessionId && s.agent && s.agent !== agent) return Promise.reject(new Error(`voice adapter session belongs to ${s.agent}; start a new call before switching agents`));
+  // A voice call owns a persistent thread, but its first turn should use the
+  // voice-specific latency profile. Do not silently change an already-running
+  // or resumed Codex session's model mid-conversation.
+  if (!s.sessionId && agent === 'codex' && codexSettings) {
+    s.settings = normalizeSettings({ ...s.settings, codex: { ...(s.settings || {}).codex, ...codexSettings } });
+  }
   const busy = s.running || s.queue.length;
   if (busy && !interrupt) return Promise.reject(new Error('voice adapter session is busy — wait for the current reply'));
   // Codex CLI turns are atomic.  To accept a caller barge-in, end the current

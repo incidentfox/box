@@ -876,6 +876,13 @@ export function registerVoiceAssistant(app, ctx) {
   });
   const ADAPTER_TTS_MODEL = cfg('VOICE_ADAPTER_TTS_MODEL', 'gpt-4o-mini-tts');
   const ADAPTER_TTS_VOICE = cfg('VOICE_ADAPTER_TTS_VOICE', VOICE);
+  // Voice turns need a fast, high-volume coding model, not the quality-first
+  // desktop default. Keep this scoped to voice-created sessions so normal Box
+  // chats remain on their existing model and effort settings.
+  const ADAPTER_CODEX_SETTINGS = {
+    model: cfg('VOICE_ADAPTER_CODEX_MODEL', 'gpt-5.6-luna'),
+    reasoningEffort: cfg('VOICE_ADAPTER_CODEX_REASONING_EFFORT', 'low'),
+  };
   const ADAPTER_MAX_RESPONSE_CHARS = Math.max(200, Math.min(6000, Number(cfg('VOICE_ADAPTER_MAX_RESPONSE_CHARS', 1400)) || 1400));
   const ADAPTER_MAX_TURN_MS = Math.max(15000, Math.min(10 * 60 * 1000, Number(cfg('VOICE_ADAPTER_MAX_TURN_MS', 180000)) || 180000));
   const ADAPTER_VAD = voiceAdapterVAD({
@@ -2802,6 +2809,7 @@ ${voiceAutonomyPolicy()}
     const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId, interrupted }) + voicePipelinePrompt(vsid);
     const turn = runAdapterTurn({
       key, sessionId: prior.sessionId, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})`, interrupt: interrupted,
+      codexSettings: ADAPTER_AGENT === 'codex' ? ADAPTER_CODEX_SETTINGS : null,
       onStart: () => {
         turnStartedAt = Date.now();
         appendAdapterDiagnostic(vsid, 'adapter_turn_started', { queue_ms: turnStartedAt - startedAt, interrupted });

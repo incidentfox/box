@@ -69,8 +69,17 @@ def final_text_to_speak(answer: Any, spoken_progress: Any) -> str:
     final = speakable_text(answer)
     progress = speakable_text(spoken_progress)
     normalize = lambda text: re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    if final and progress and normalize(final) == normalize(progress):
+    final_normalized = normalize(final)
+    progress_normalized = normalize(progress)
+    if final and progress and final_normalized == progress_normalized:
         return ""
+    # Codex commonly emits a concise status as one message, then repeats that
+    # status verbatim before appending its actual answer.  Speak only the new
+    # suffix; otherwise the caller hears the same thought twice in succession.
+    progress_words = re.findall(r"[a-z0-9]+", progress.lower())
+    final_words = list(re.finditer(r"[a-z0-9]+", final.lower()))
+    if progress_words and len(final_words) > len(progress_words) and final_normalized.startswith(progress_normalized + " "):
+        return final[final_words[len(progress_words) - 1].end() :].lstrip(" ,;:-.")
     return final
 
 
@@ -90,7 +99,7 @@ def deepgram_options() -> dict[str, Any]:
         "smart_format": True,
         # Finalize words promptly, then let UtteranceEnd decide that the caller
         # really stopped. This avoids a VAD breath becoming an agent handoff.
-        "endpointing_ms": 500,
+        "endpointing_ms": 300,
         "utterance_end_ms": 1000,
     }
 
@@ -106,7 +115,7 @@ def turn_handling_options(*, allow_interruptions: bool = False) -> TurnHandlingO
         turn_detection="stt",
         # Deepgram waits one second of silence before UtteranceEnd. Do not add
         # a second human-noticeable delay after that provider signal.
-        endpointing={"mode": "fixed", "min_delay": 0.15, "max_delay": 0.15},
+        endpointing={"mode": "fixed", "min_delay": 0.05, "max_delay": 0.05},
         # Adaptive interruption is enabled only when the browser has also been
         # told to keep its microphone open during TTS. It rejects short
         # backchannels better than raw VAD while letting a real barge-in stop
@@ -232,7 +241,9 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.8, activation_threshold=0.5)
+    # VAD only supplies activity to the STT turn handler. A shorter floor makes
+    # activity clear promptly without making VAD itself a competing turn commit.
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.45, activation_threshold=0.5)
 
 
 server.setup_fnc = prewarm
