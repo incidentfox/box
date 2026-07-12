@@ -104,9 +104,14 @@ try {
 
     mem.updateConfig({ storeAudio: true }, 'test');
     assert.equal(mem.audioOn(), true);
-    const stored = mem.storeAudioClip('vs-spectrum', Buffer.from('fake-audio-bytes'), 'audio/webm', { seq: 0 });
+    const stored = mem.storeAudioClip('vs-spectrum', Buffer.from('fake-audio-bytes'), 'audio/webm', {
+      seq: 0, role: 'caller', startedAt: clock - 1000, capturedAt: clock,
+    });
     assert.equal(stored.stored, true);
     assert.equal(mem.listAudioClips('vs-spectrum').length, 1);
+    const storedAudit = mem.readAudit(1)[0];
+    assert.equal(storedAudit.role, 'caller', 'capture side is retained for call reconstruction');
+    assert.equal(storedAudit.capturedAt, clock, 'capture timestamp is retained for latency analysis');
 
     const clip = mem.listAudioClips('vs-spectrum')[0].clip;
     const rt = await mem.retranscribeClip('vs-spectrum', clip);

@@ -285,7 +285,14 @@ export function createVoiceMemory({ dir, transcriptsDir = null, now = () => Date
     const name = id + extForMime(mimetype);
     try { writeFileSync(join(clipDir(vsid), name), buffer); } catch { return { skipped: 'write_failed' }; }
     pruneClips(vsid);
-    audit('audio_store', { vsid: safeName(vsid), clip: name, bytes: buffer.length, ...(meta.seq != null ? { seq: meta.seq } : {}) });
+    // Keep only timing and stream identity in the audit trail.  This lets us
+    // align split caller/assistant captures without putting spoken content there.
+    const recording = {};
+    if (meta.seq != null && Number.isFinite(Number(meta.seq))) recording.seq = Number(meta.seq);
+    if (meta.role === 'caller' || meta.role === 'assistant') recording.role = meta.role;
+    if (Number.isFinite(Number(meta.capturedAt))) recording.capturedAt = Number(meta.capturedAt);
+    if (Number.isFinite(Number(meta.startedAt))) recording.startedAt = Number(meta.startedAt);
+    audit('audio_store', { vsid: safeName(vsid), clip: name, bytes: buffer.length, ...recording });
     return { stored: true, clip: name, bytes: buffer.length };
   }
 
