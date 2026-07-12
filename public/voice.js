@@ -56,6 +56,7 @@ let voLivekitEndpointAt = 0, voLivekitEndpointText = '', voLivekitPlaybackLogged
 // that says the assistant is no longer audible. This avoids claiming microphone
 // onset timing that the browser cannot observe accurately.
 let voLivekitBargeAt = 0;
+let voLivekitCallerSpeechAt = 0, voLivekitFirstAssistantTextLogged = false;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -441,6 +442,11 @@ function voLivekitAppendTranscript(segments) {
     voLivekitEndpointText = String(final.text || '').slice(0, 160);
     voLivekitPlaybackLogged = false;
     voDiag('livekit', 'caller_final_transcript', { chars: voLivekitEndpointText.length });
+    if (voLivekitCallerSpeechAt) {
+      voDiag('livekit', 'caller_speech_to_final_transcript', { ms: voLivekitEndpointAt - voLivekitCallerSpeechAt });
+      voLivekitCallerSpeechAt = 0;
+    }
+    voLivekitFirstAssistantTextLogged = false;
   }
   if (!voLivekitBubble) voLivekitBubble = voBubble('user', 'Listening…');
   voLivekitBubble.textContent = voLivekitTranscript || 'Listening…';
@@ -448,6 +454,10 @@ function voLivekitAppendTranscript(segments) {
 }
 function voLivekitAppendAssistantTranscript(segments) {
   voLivekitAsstTranscript = voLivekitMergeSegments(voLivekitAsstSegments, segments);
+  if (voLivekitAsstTranscript && voLivekitEndpointAt && !voLivekitFirstAssistantTextLogged) {
+    voLivekitFirstAssistantTextLogged = true;
+    voDiag('livekit', 'endpoint_to_first_assistant_text', { ms: Date.now() - voLivekitEndpointAt });
+  }
   if (!voLivekitAsstBubble) voLivekitAsstBubble = voBubble('asst', '');
   voLivekitAsstBubble.textContent = voLivekitAsstTranscript;
   if (voLivekitAsstTranscript) { voAsstText = voLivekitAsstTranscript; voRememberAsst(voLivekitAsstTranscript); }
@@ -462,7 +472,7 @@ async function voStartLivekitAdapter(cfg) {
   const room = new LK.Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: voMicConstraints() });
   voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null; voLivekitUserSegments = new Map();
   voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; voLivekitAsstSegments = new Map();
-  voLivekitBargeAt = 0;
+  voLivekitBargeAt = 0; voLivekitCallerSpeechAt = 0; voLivekitFirstAssistantTextLogged = false;
   room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => {
     if (!participant || participant.identity === room.localParticipant.identity) voLivekitAppendTranscript(segments);
     else voLivekitAppendAssistantTranscript(segments);
@@ -479,6 +489,10 @@ async function voStartLivekitAdapter(cfg) {
     const active = speakers || [];
     const agentSpeaking = active.some((p) => p.identity !== room.localParticipant.identity);
     const callerSpeaking = active.some((p) => p.identity === room.localParticipant.identity);
+    if (callerSpeaking && !voLivekitCallerSpeechAt) {
+      voLivekitCallerSpeechAt = Date.now();
+      voDiag('livekit', 'caller_speech_detected', { whileAssistant: !!voAdapterSpeaking });
+    }
     // This is a real barge-in candidate only if the assistant was already
     // speaking. The next no-agent event marks the audible cut-off. Keep the
     // pair even if the candidate later turns out to be a backchannel; that is
@@ -492,6 +506,8 @@ async function voStartLivekitAdapter(cfg) {
       voDiag('livekit', 'barge_in_playback_stopped', { ms });
       voLivekitBargeAt = 0;
     }
+    if (agentSpeaking && !voAdapterSpeaking) voDiag('livekit', 'assistant_playback_started', {});
+    if (!agentSpeaking && voAdapterSpeaking) voDiag('livekit', 'assistant_playback_stopped', {});
     voAdapterSpeaking = agentSpeaking;
     voOrbMode(agentSpeaking ? 'speaking' : 'listening');
     if (agentSpeaking && voLivekitEndpointAt && !voLivekitPlaybackLogged) {
