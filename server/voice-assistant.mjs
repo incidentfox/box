@@ -2682,16 +2682,28 @@ ${voiceAutonomyPolicy()}
     try { return await synthesizeAdapterSpeech(text); }
     catch (e) { return { tts_error: String((e && e.message) || e).slice(0, 240) }; }
   }
-  async function runAdapterTranscript({ vsid, transcript, sttModel = '' }) {
+  async function runAdapterTranscript({ vsid, transcript, sttModel = '', onProgress = null, withTts = true }) {
     const key = voiceAdapterSessionKey(vsid);
     if (!key) throw new Error('invalid voice session id');
+    const startedAt = Date.now();
+    let firstCodexTextAt = 0;
+    let sentProgress = false;
+    const emitProgress = (text) => {
+      if (sentProgress || typeof onProgress !== 'function') return;
+      const clean = spokenAdapterText(text, 360);
+      if (!clean) return;
+      sentProgress = true;
+      firstCodexTextAt = Date.now();
+      onProgress(clean, { codex_ms: firstCodexTextAt - startedAt });
+    };
+    const speech = async (text) => withTts ? adapterSpeechPayload(text) : {};
     const prior = typeof adapterSessionInfo === 'function' ? adapterSessionInfo(key) : { sessionId: '', busy: false };
     if (prior.busy) {
       const text = 'That voice turn is still running in the same session. Give it a moment, then ask me for the result.';
-      return { status: 202, body: { text, pending: true, ...(await adapterSpeechPayload(text)) } };
+      return { status: 202, body: { text, pending: true, timings: { backend_ms: Date.now() - startedAt }, ...(await speech(text)) } };
     }
     const prompt = buildVoiceAdapterPrompt(transcript, { agent: ADAPTER_AGENT, firstTurn: !prior.sessionId });
-    const turn = runAdapterTurn({ key, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})` });
+    const turn = runAdapterTurn({ key, text: prompt, agent: ADAPTER_AGENT, cwd: defaultCwd(), title: `Voice adapter (${ADAPTER_AGENT})`, onText: emitProgress });
     let timeout;
     const result = await Promise.race([
       turn,
@@ -2700,7 +2712,7 @@ ${voiceAutonomyPolicy()}
     clearTimeout(timeout);
     if (result && result.timeout) {
       const text = 'I am still working on that. I will keep the same session context, so ask again in a moment for the result.';
-      return { status: 202, body: { transcript, stt_model: sttModel, text, pending: true, ...(await adapterSpeechPayload(text)) } };
+      return { status: 202, body: { transcript, stt_model: sttModel, text, pending: true, timings: { backend_ms: Date.now() - startedAt, first_codex_ms: firstCodexTextAt ? firstCodexTextAt - startedAt : null }, ...(await speech(text)) } };
     }
     if (result && result.error) throw new Error(result.error);
     if (result && result.canceled) throw new Error('voice adapter turn was cancelled');
@@ -2709,7 +2721,9 @@ ${voiceAutonomyPolicy()}
       appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'user', text: transcript, source: 'adapter', stt_model: sttModel }) + '\n');
       appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'assistant', text, source: 'adapter', agent: ADAPTER_AGENT, session_id: result && result.sessionId || '' }) + '\n');
     } catch {}
-    return { status: 200, body: { transcript, stt_model: sttModel, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', ...(await adapterSpeechPayload(text)) } };
+    const timings = { backend_ms: Date.now() - startedAt, first_codex_ms: firstCodexTextAt ? firstCodexTextAt - startedAt : null };
+    try { appendFileSync(diagnosticPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'diag', source: 'adapter', event: 'turn_timing', data: timings }) + '\n'); } catch {}
+    return { status: 200, body: { transcript, stt_model: sttModel, text, agent: ADAPTER_AGENT, session_id: result && result.sessionId || '', timings, ...(await speech(text)) } };
   }
   // Low-latency transcript preview for adapter mode. It intentionally DOES NOT touch
   // a CLI session: a partial utterance may change, and Codex/Claude turns are atomic.
@@ -2731,6 +2745,33 @@ ${voiceAutonomyPolicy()}
       const out = await runAdapterTranscript({ vsid, transcript, sttModel: String(req.body && req.body.stt_model || 'streaming') });
       res.status(out.status).json(out.body);
     } catch (e) { res.status(502).json({ error: String((e && e.message) || e).slice(0, 400) }); }
+  });
+  // LiveKit's media worker consumes this server-sent event stream. It gets the
+  // first real Codex update as a short spoken acknowledgement, then the final
+  // result. Unlike the legacy endpoint, it deliberately skips OpenAI HTTP TTS:
+  // Cartesia is already connected to the caller and starts speech directly.
+  app.post('/api/voice/adapter/stream', requireAuth, async (req, res) => {
+    if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
+    const vsid = String(req.body && req.body.vsid || '').trim();
+    const transcript = String(req.body && req.body.text || '').trim().slice(0, 6000);
+    if (!transcript) return res.status(422).json({ error: 'no speech detected' });
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+    const send = (event, body) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(body)}\n\n`); } catch {} };
+    try {
+      const out = await runAdapterTranscript({
+        vsid, transcript, sttModel: String(req.body && req.body.stt_model || 'streaming'), withTts: false,
+        onProgress: (text, timings) => send('progress', { text, timings }),
+      });
+      send('final', out.body);
+    } catch (e) {
+      send('error', { error: String((e && e.message) || e).slice(0, 400) });
+    } finally {
+      res.end();
+    }
   });
   app.post('/api/voice/adapter/turn', requireAuth, uploadAdapterAudio.single('audio'), async (req, res) => {
     if (!adapterEnabled()) return res.status(409).json({ error: 'voice adapter mode is not enabled or lacks STT/TTS configuration' });
