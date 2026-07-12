@@ -29,7 +29,7 @@ export function voiceAdapterVAD({ threshold, silenceMs, minSpeechMs } = {}) {
   };
 }
 
-export function buildVoiceAdapterPrompt(text, { agent = 'claude', firstTurn = false } = {}) {
+export function buildVoiceAdapterPrompt(text, { agent = 'claude', firstTurn = false, interrupted = false } = {}) {
   const spoken = String(text || '').trim().slice(0, 6000);
   const bootstrap = firstTurn ? `
 You are the conversational voice layer for Box, speaking to its owner hands-free. This is a persistent ${agent} Code session, so retain useful context across turns.
@@ -43,7 +43,10 @@ Voice rules:
 - Treat inspect/explain/status requests as read-only. For destructive, external, privacy-sensitive, financial, deployment, or irreversible actions, ask for explicit confirmation before acting.
 - Do not claim a command, message, deployment, or edit happened unless the tool/session evidence shows it succeeded.
 ` : '';
-  return `${bootstrap}\nUSER VOICE TRANSCRIPT:\n${spoken}`.trim();
+  const interruption = interrupted ? `
+This is a new instruction that interrupted work already under way in this same persistent session. Treat it as higher-priority context, then continue the earlier work unless this instruction changes or replaces it. Check the live state before repeating an action that may already have started. For substantial work, use safe background or parallel work when available so this conversation stays responsive; do not pretend background work completed before evidence shows it did.
+` : '';
+  return `${bootstrap}${interruption}\nUSER VOICE TRANSCRIPT:\n${spoken}`.trim();
 }
 
 export function spokenAdapterText(value, maxChars = 1400) {

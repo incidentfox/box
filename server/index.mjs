@@ -2705,8 +2705,10 @@ try {
     transcribe: transcribeBuffer, // for voice-memory re-transcription (recover a garbled clip)
     voiceSttEnabled: !!(ELEVEN_KEY || DEEPGRAM_KEY),
     runAdapterTurn: runVoiceAdapterTurn,
-    adapterSessionInfo: (key) => {
-      const s = rt(key);
+    adapterSessionInfo: (key, sessionId = '') => {
+      // `sessionId` is the durable Codex id recovered from the voice transcript.
+      // It is required after a Box restart, when the in-memory call-id alias is gone.
+      const s = rt(sessionId || key);
       return { sessionId: s.sessionId || '', agent: s.agent || '', busy: !!s.running || s.queue.length > 0 };
     },
   });
@@ -3693,13 +3695,21 @@ function enqueue(extKey, msg) {
 // It deliberately uses the existing Claude/Codex turn runners: context, tool streaming,
 // sandbox settings, remote-control ownership, and session persistence stay identical to
 // a phone chat. Adapter callers may have only one outstanding spoken turn per session.
-function runVoiceAdapterTurn({ key, text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter', onText } = {}) {
-  const s = rt(key);
-  if (s.running || s.queue.length) return Promise.reject(new Error('voice adapter session is busy — wait for the current reply'));
+function runVoiceAdapterTurn({ key, sessionId = '', text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter', interrupt = false, onStart, onSession, onText } = {}) {
+  // A call id is intentionally not the Codex session id.  The call may survive a
+  // Box deploy/restart, which clears RT/ALIAS, so resume from the durable Codex id
+  // recorded by the voice layer whenever it has one.
+  const s = rt(sessionId || key);
   if (s.sessionId && s.agent && s.agent !== agent) return Promise.reject(new Error(`voice adapter session belongs to ${s.agent}; start a new call before switching agents`));
+  const busy = s.running || s.queue.length;
+  if (busy && !interrupt) return Promise.reject(new Error('voice adapter session is busy — wait for the current reply'));
+  // Codex CLI turns are atomic.  To accept a caller barge-in, end the current
+  // process and place the new instruction directly behind it in the SAME queue.
+  // The next resume retains its thread/tool context; it never creates a new chat.
+  if (busy && interrupt) cancelCurrent(s.key);
   return new Promise((resolve) => {
-    enqueue(key, {
-      text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true, onText,
+    enqueue(s.key, {
+      text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true, onStart, onSession, onText,
       // A Codex turn can emit a progress note followed by its final answer.
       // The Box chat retains both, but the voice bridge must speak only the
       // final substantive agent message.
@@ -3779,6 +3789,7 @@ async function runWorker(s) {
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
+    if (typeof msg.onStart === 'function') { try { msg.onStart({ sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude' }); } catch {} }
     await runTurn(s, msg);
     if (typeof msg.onComplete === 'function') {
       const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
@@ -3957,6 +3968,7 @@ function runCodexTurn(s, msg, resolve) {
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
         if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts }); // provisional path already appended it
         persist(s);
+        if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'codex' }); } catch {} }
         bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
       } else if (ev.type === 'text') {
         // Codex streams each agent_message as a complete, self-contained chunk. When
