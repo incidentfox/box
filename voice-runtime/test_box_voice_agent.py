@@ -16,7 +16,7 @@ def test_text_and_default_voice_are_available(monkeypatch):
     monkeypatch.delenv("VOICE_ADAPTER_CARTESIA_VOICE", raising=False)
     monkeypatch.delenv("VOICE_ADAPTER_CARTESIA_MODEL", raising=False)
     assert text_from_message(FakeMessage()) == "hello there"
-    assert RuntimeConfig.from_env().tts_provider == "openai"
+    assert RuntimeConfig.from_env().tts_provider == "deepgram"
     assert RuntimeConfig.from_env().cartesia_voice == DEFAULT_CARTESIA_VOICE
     assert RuntimeConfig.from_env().cartesia_model == DEFAULT_CARTESIA_MODEL
 
