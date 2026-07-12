@@ -58,6 +58,22 @@ def speakable_text(value: Any) -> str:
     return text.strip()
 
 
+def final_text_to_speak(answer: Any, spoken_progress: Any) -> str:
+    """Suppress a final event that merely repeats the progress already spoken.
+
+    Codex can emit its complete final answer as both the first streamed text event
+    and the terminal event.  The media bridge must not make the caller hear that
+    same answer twice.  This deliberately handles only an exact normalized match;
+    a distinct final result still gets spoken after a genuine progress update.
+    """
+    final = speakable_text(answer)
+    progress = speakable_text(spoken_progress)
+    normalize = lambda text: re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    if final and progress and normalize(final) == normalize(progress):
+        return ""
+    return final
+
+
 def voice_bool(value: str | None, default: bool = False) -> bool:
     if value is None or not str(value).strip():
         return default
@@ -166,7 +182,7 @@ class BoxCodexVoiceAgent(Agent):
             # the caller-visible interruption explicit in diagnostics.
             "interrupt": interrupt,
         }
-        spoken_progress = ""
+        spoken_progress: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=190) as client:
                 async with client.stream("POST", f"{self.runtime.backend_url}/api/voice/adapter/stream", headers=headers, json=payload) as response:
@@ -186,10 +202,10 @@ class BoxCodexVoiceAgent(Agent):
                                 body = {}
                             if event == "progress":
                                 progress = speakable_text(body.get("text"))
-                                if progress:
+                                if progress and not any(final_text_to_speak(progress, prior) == "" for prior in spoken_progress):
                                     if not await self._say(progress):
                                         return
-                                    spoken_progress = progress
+                                    spoken_progress.append(progress)
                             elif event == "final":
                                 answer = speakable_text(body.get("text"))
                             elif event == "error":
@@ -204,7 +220,10 @@ class BoxCodexVoiceAgent(Agent):
             answer = "I could not reach the Box session just now. Please try that once more."
         if not answer:
             answer = "The Box session finished without a speakable answer. Please ask me to check its text response."
-        if answer == spoken_progress:
+        if any(final_text_to_speak(answer, progress) == "" for progress in spoken_progress):
+            return
+        answer = speakable_text(answer)
+        if not answer:
             return
         await self._say(answer)
 

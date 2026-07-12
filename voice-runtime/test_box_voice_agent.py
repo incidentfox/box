@@ -1,4 +1,4 @@
-from box_voice_agent import DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, voice_bool, vsid_from_room
+from box_voice_agent import DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, final_text_to_speak, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, voice_bool, vsid_from_room
 
 
 class FakeMessage:
@@ -41,6 +41,13 @@ def test_adaptive_barge_in_requires_explicit_runtime_flag():
 def test_speakable_text_removes_markdown_ellipses_and_joined_chunks():
     raw = "## Status\n- First point...Next point. [Details](https://example.test/a)\n```sh\nrm -rf /\n```"
     assert speakable_text(raw) == "Status First point. Next point. Details I put the code details in the session."
+
+
+def test_final_text_is_not_spoken_twice_after_matching_progress():
+    assert final_text_to_speak("I found the issue.", "I found the issue.") == ""
+    assert final_text_to_speak("I found the issue!", "I found the issue.") == ""
+    assert final_text_to_speak("The fix is deployed.", "I found the issue.") == "The fix is deployed."
+    assert final_text_to_speak("The fix is deployed.", "The fix is deployed!") == ""
 
 
 def test_manual_turn_commit_requires_the_caller_and_control_topic():

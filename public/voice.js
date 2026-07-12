@@ -57,7 +57,8 @@ let voLivekitEndpointAt = 0, voLivekitEndpointText = '', voLivekitPlaybackLogged
 // that says the assistant is no longer audible. This avoids claiming microphone
 // onset timing that the browser cannot observe accurately.
 let voLivekitBargeAt = 0;
-let voLivekitCallerSpeechAt = 0, voLivekitFirstAssistantTextLogged = false;
+let voLivekitCallerSpeechAt = 0, voLivekitCallerSpeaking = false, voLivekitCallerSpeechEndedAt = 0;
+let voLivekitTurnFinalAt = 0, voLivekitSpeechEndLatencyLogged = false, voLivekitFirstAssistantTextLogged = false;
 
 /* ---------- INC-1088: audio-pipeline hardening (half-duplex + self-echo guard) ----------
  * The assistant's TTS plays out the phone/car speaker and the mic hears it. OpenAI's
@@ -275,7 +276,8 @@ function voDiag(source, event, data) {
   // Timing events are useful only if the agent can see them on its next turn.
   // Push those boundaries immediately; routine diagnostics still batch normally.
   const liveBoundary = new Set([
-    'caller_speech_detected', 'caller_final_transcript', 'caller_speech_to_final_transcript',
+    'caller_speech_detected', 'caller_speech_ended', 'caller_final_transcript',
+    'speech_start_to_final_transcript', 'caller_speech_end_to_final_transcript',
     'endpoint_to_first_assistant_text', 'endpoint_to_playback',
     'assistant_playback_started', 'assistant_playback_stopped',
     'barge_in_detected', 'barge_in_playback_stopped',
@@ -448,12 +450,19 @@ function voLivekitAppendTranscript(segments) {
   const final = finals[finals.length - 1];
   if (final) {
     voLivekitEndpointAt = Date.now();
+    voLivekitTurnFinalAt = voLivekitEndpointAt;
     voLivekitEndpointText = String(final.text || '').slice(0, 160);
     voLivekitPlaybackLogged = false;
     voDiag('livekit', 'caller_final_transcript', { chars: voLivekitEndpointText.length });
     if (voLivekitCallerSpeechAt) {
-      voDiag('livekit', 'caller_speech_to_final_transcript', { ms: voLivekitEndpointAt - voLivekitCallerSpeechAt });
+      // Kept only as a descriptive diagnostic. It includes the duration of the
+      // caller's utterance, so it is never used as a latency target.
+      voDiag('livekit', 'speech_start_to_final_transcript', { ms: voLivekitEndpointAt - voLivekitCallerSpeechAt });
       voLivekitCallerSpeechAt = 0;
+    }
+    if (voLivekitCallerSpeechEndedAt && !voLivekitSpeechEndLatencyLogged) {
+      voLivekitSpeechEndLatencyLogged = true;
+      voDiag('livekit', 'caller_speech_end_to_final_transcript', { ms: Math.max(0, voLivekitEndpointAt - voLivekitCallerSpeechEndedAt) });
     }
     voLivekitFirstAssistantTextLogged = false;
   }
@@ -481,7 +490,8 @@ async function voStartLivekitAdapter(cfg) {
   const room = new LK.Room({ adaptiveStream: true, dynacast: true, audioCaptureDefaults: voMicConstraints() });
   voLivekitRoom = room; voLivekitTranscript = ''; voLivekitBubble = null; voLivekitUserSegments = new Map();
   voLivekitAsstTranscript = ''; voLivekitAsstBubble = null; voLivekitAsstSegments = new Map();
-  voLivekitBargeAt = 0; voLivekitCallerSpeechAt = 0; voLivekitFirstAssistantTextLogged = false;
+  voLivekitBargeAt = 0; voLivekitCallerSpeechAt = 0; voLivekitCallerSpeaking = false; voLivekitCallerSpeechEndedAt = 0;
+  voLivekitTurnFinalAt = 0; voLivekitSpeechEndLatencyLogged = false; voLivekitFirstAssistantTextLogged = false;
   room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => {
     if (!participant || participant.identity === room.localParticipant.identity) voLivekitAppendTranscript(segments);
     else voLivekitAppendAssistantTranscript(segments);
@@ -500,8 +510,22 @@ async function voStartLivekitAdapter(cfg) {
     const callerSpeaking = active.some((p) => p.identity === room.localParticipant.identity);
     if (callerSpeaking && !voLivekitCallerSpeechAt) {
       voLivekitCallerSpeechAt = Date.now();
+      voLivekitCallerSpeechEndedAt = 0;
+      voLivekitTurnFinalAt = 0;
+      voLivekitSpeechEndLatencyLogged = false;
       voDiag('livekit', 'caller_speech_detected', { whileAssistant: !!voAdapterSpeaking });
     }
+    if (voLivekitCallerSpeaking && !callerSpeaking) {
+      voLivekitCallerSpeechEndedAt = Date.now();
+      voDiag('livekit', 'caller_speech_ended', {});
+      // If the transcript was already final before LiveKit published the
+      // activity transition, the post-speech transcription latency is zero.
+      if (voLivekitTurnFinalAt && !voLivekitSpeechEndLatencyLogged) {
+        voLivekitSpeechEndLatencyLogged = true;
+        voDiag('livekit', 'caller_speech_end_to_final_transcript', { ms: Math.max(0, voLivekitTurnFinalAt - voLivekitCallerSpeechEndedAt) });
+      }
+    }
+    voLivekitCallerSpeaking = callerSpeaking;
     // This is a real barge-in candidate only if the assistant was already
     // speaking. The next no-agent event marks the audible cut-off. Keep the
     // pair even if the candidate later turns out to be a backchannel; that is

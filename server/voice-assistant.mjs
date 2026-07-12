@@ -2493,7 +2493,7 @@ ${voiceAutonomyPolicy()}
         try {
           const o = JSON.parse(l);
           if (o.kind === 'user') return `Jimmy: ${short(o.text, 260)}`;
-          if (o.kind === 'assistant') return `You: ${short(o.text, 260)}`;
+          if (o.kind === 'assistant' || o.kind === 'assistant_progress') return `You: ${short(o.text, 260)}`;
           if (o.kind === 'tool') return `(you called ${o.name})`;
           return null;
         } catch { return null; }
@@ -2512,7 +2512,7 @@ ${voiceAutonomyPolicy()}
   function readTurns(vsid) {
     return readTranscriptRows(vsid).map((o) => {
       if (o.kind === 'user') return { role: 'user', text: o.text, ts: o.ts };
-      if (o.kind === 'assistant') return { role: 'assistant', text: o.text, ts: o.ts };
+      if (o.kind === 'assistant' || o.kind === 'assistant_progress') return { role: 'assistant', text: o.text, ts: o.ts };
       return null;
     }).filter(Boolean);
   }
@@ -2543,7 +2543,7 @@ ${voiceAutonomyPolicy()}
     // Operational UX budgets, not claims about a provider SLA. They make a slow
     // stage visible in the call record and can be overridden later only after
     // measured real-call data supports a different target.
-    caller_speech_to_final_transcript: 1500,
+    caller_speech_end_to_final_transcript: 1500,
     adapter_queue: 250,
     final_transcript_to_first_codex_text: 3000,
     final_transcript_to_audible_playback: 4500,
@@ -2560,7 +2560,7 @@ ${voiceAutonomyPolicy()}
       samples[key] = events.filter((row) => row.event === event && Number.isFinite(Number(row.data && row.data.ms)))
         .map((row) => Number(row.data.ms));
     };
-    collect('caller_speech_to_final_transcript', 'caller_speech_to_final_transcript');
+    collect('caller_speech_end_to_final_transcript', 'caller_speech_end_to_final_transcript');
     collect('adapter_turn_started', 'adapter_queue');
     samples.adapter_queue = events.filter((row) => row.event === 'adapter_turn_started' && Number.isFinite(Number(row.data && row.data.queue_ms)))
       .map((row) => Number(row.data.queue_ms));
@@ -2772,16 +2772,27 @@ ${voiceAutonomyPolicy()}
     const recoveredSessionId = adapterSessionIdFromTranscript(vsid);
     let firstCodexTextAt = 0;
     let turnStartedAt = 0;
-    let sentProgress = false;
+    let firstProgressSent = false;
+    let lastProgress = '';
     appendAdapterDiagnostic(vsid, 'adapter_request_received', { recovered_session: !!recoveredSessionId, stt_model: sttModel || 'unknown' });
     const emitProgress = (text) => {
-      if (sentProgress || typeof onProgress !== 'function') return;
+      if (typeof onProgress !== 'function') return;
       const clean = spokenAdapterText(text, 360);
-      if (!clean) return;
-      sentProgress = true;
-      firstCodexTextAt = Date.now();
-      const data = { from_request_ms: firstCodexTextAt - startedAt, from_turn_start_ms: turnStartedAt ? firstCodexTextAt - turnStartedAt : null };
-      appendAdapterDiagnostic(vsid, 'first_codex_text', data);
+      if (!clean || clean === lastProgress) return;
+      lastProgress = clean;
+      const first = !firstProgressSent;
+      if (first) {
+        firstProgressSent = true;
+        firstCodexTextAt = Date.now();
+      }
+      const data = { from_request_ms: firstCodexTextAt ? firstCodexTextAt - startedAt : null, from_turn_start_ms: firstCodexTextAt && turnStartedAt ? firstCodexTextAt - turnStartedAt : null, first };
+      appendAdapterDiagnostic(vsid, first ? 'first_codex_text' : 'adapter_progress', data);
+      // The voice surface is a separate UI from the underlying Codex session.
+      // Keep its durable transcript in lock-step with every distinct streamed
+      // assistant message so Jimmy can see what was happening during a long turn.
+      try {
+        appendFileSync(transcriptPath(vsid), JSON.stringify({ ts: Date.now(), kind: 'assistant_progress', text: clean, source: 'adapter', agent: ADAPTER_AGENT }) + '\n');
+      } catch {}
       onProgress(clean, data);
     };
     const speech = async (text) => withTts ? adapterSpeechPayload(text) : {};
