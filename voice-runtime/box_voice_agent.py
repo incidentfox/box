@@ -13,12 +13,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, TurnHandlingOptions, cli, inference, tts
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, TurnHandlingOptions, cli, tts
 from livekit.plugins import cartesia, deepgram, openai, silero
 
 AGENT_NAME = "box-codex-voice"
 ROOM_PREFIX = "box-voice-"
-DEFAULT_CARTESIA_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+DEFAULT_CARTESIA_VOICE = "a5136bf9-224c-4d76-b823-52bd5efcffcc"  # Jameson, en-US
+DEFAULT_CARTESIA_MODEL = "sonic-3.5"
 
 
 def safe_vsid(value: str) -> str:
@@ -38,42 +39,51 @@ def text_from_message(message: Any) -> str:
     return str(value or "").strip()
 
 
+def speakable_text(value: Any) -> str:
+    """Turn a CLI response into plain prose before it reaches a literal TTS engine."""
+    text = str(value or "").replace("\r", "").strip()
+    # Never have the voice attempt to read a code block or a raw Markdown link.
+    text = re.sub(r"```[\s\S]*?```", " I put the code details in the session. ", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "that link", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"(?m)^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", text)
+    text = re.sub(r"(?:\*\*|__|~~|`)", "", text)
+    # Codex's streamed chunks can be joined without a separating space. Ellipses
+    # and Markdown punctuation are the common source of literal "dot" read-outs.
+    text = re.sub(r"(?:\.\.\.|…)+", ". ", text)
+    text = re.sub(r"([.!?])(?=[A-Z])", r"\1 ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 def deepgram_options() -> dict[str, Any]:
-    # Deepgram requires utterance_end_ms >= 1000. LiveKit's semantic detector,
-    # not this provider hint, controls our 350 ms–1.5 s handoff target.
+    # Deepgram requires utterance_end_ms >= 1000. It is the sole turn commit
+    # signal in this adapter, while VAD remains activity-only.
     return {
         "model": "nova-3",
         "language": "multi",
         "interim_results": True,
         "smart_format": True,
-        # Let streaming STT retain a phrase through a short pause. The semantic
-        # detector decides when it is a real handoff, not this acoustic hint.
+        # Finalize words promptly, then let UtteranceEnd decide that the caller
+        # really stopped. This avoids a VAD breath becoming an agent handoff.
         "endpointing_ms": 500,
         "utterance_end_ms": 1000,
     }
 
 
 def turn_handling_options() -> TurnHandlingOptions:
-    """Use LiveKit's current semantic endpointing API with documented bounds."""
-    def number(name: str, default: float) -> float:
-        try:
-            return float(os.getenv(name, default))
-        except ValueError:
-            return default
-
-    # The standard 0.5 s lower bound is too eager for a hands-free caller: a
-    # natural mid-sentence breath can be that long, and the live transcript
-    # showed turns such as "So let's" reaching Codex as completed requests.
-    # Keep dynamic semantic endpointing, but bias its default window toward
-    # finishing the caller's sentence. Operators can still lower these values
-    # explicitly when latency is more important than conversational tolerance.
-    minimum = min(2.0, max(0.5, number("VOICE_ADAPTER_MIN_ENDPOINTING_DELAY", 1.2)))
-    maximum = min(5.0, max(minimum + 0.5, number("VOICE_ADAPTER_MAX_ENDPOINTING_DELAY", 4.5)))
+    """Commit on Deepgram's own finalized utterance event, never VAD silence."""
     return TurnHandlingOptions(
-        # v1 is LiveKit's hosted audio+semantic detector. It avoids handing a
-        # dangling phrase such as "if we..." to Codex as a completed request.
-        turn_detection=inference.TurnDetector(version="v1"),
-        endpointing={"mode": "dynamic", "min_delay": minimum, "max_delay": maximum, "alpha": 0.9},
+        # The hosted detector starts an inference request from a VAD pause. In
+        # the live call it repeatedly committed *before* Nova-3's final
+        # transcript arrived. Use Deepgram UtteranceEnd as the single commit
+        # authority. Silero still supplies speech activity to LiveKit, but it
+        # cannot end a user turn on its own in this mode.
+        turn_detection="stt",
+        # Deepgram waits one second of silence before UtteranceEnd. Do not add
+        # a second human-noticeable delay after that provider signal.
+        endpointing={"mode": "fixed", "min_delay": 0.15, "max_delay": 0.15},
         # Box is deliberately half-duplex while TTS plays. The browser gates
         # its mic, so a live interruption would otherwise be inconsistent.
         interruption={"enabled": False},
@@ -95,6 +105,7 @@ class RuntimeConfig:
     backend_url: str
     auth_token: str
     cartesia_voice: str
+    cartesia_model: str
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -102,6 +113,7 @@ class RuntimeConfig:
             backend_url=os.getenv("BOX_VOICE_BACKEND_URL", "http://127.0.0.1:7321").rstrip("/"),
             auth_token=os.getenv("CC_AUTH_TOKEN", ""),
             cartesia_voice=os.getenv("VOICE_ADAPTER_CARTESIA_VOICE", DEFAULT_CARTESIA_VOICE),
+            cartesia_model=os.getenv("VOICE_ADAPTER_CARTESIA_MODEL", DEFAULT_CARTESIA_MODEL),
         )
 
 
@@ -121,7 +133,7 @@ class BoxCodexVoiceAgent(Agent):
             async with httpx.AsyncClient(timeout=190) as client:
                 response = await client.post(f"{self.runtime.backend_url}/api/voice/adapter/text", headers=headers, json=payload)
                 response.raise_for_status()
-                answer = str(response.json().get("text") or "").strip()
+                answer = speakable_text(response.json().get("text"))
         except Exception:
             answer = "I could not reach the Box session just now. Please try that once more."
         if not answer:
@@ -155,7 +167,7 @@ async def entrypoint(ctx: JobContext) -> None:
         raise RuntimeError("voice room is missing its session id")
 
     primary_tts = cartesia.TTS(
-        api_key=os.getenv("CARTESIA_API_KEY"), model="sonic-3", voice=runtime.cartesia_voice,
+        api_key=os.getenv("CARTESIA_API_KEY"), model=runtime.cartesia_model, voice=runtime.cartesia_voice,
         language="en", sample_rate=24000,
     )
     fallback_tts = openai.TTS(
