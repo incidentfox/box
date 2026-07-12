@@ -3693,13 +3693,13 @@ function enqueue(extKey, msg) {
 // It deliberately uses the existing Claude/Codex turn runners: context, tool streaming,
 // sandbox settings, remote-control ownership, and session persistence stay identical to
 // a phone chat. Adapter callers may have only one outstanding spoken turn per session.
-function runVoiceAdapterTurn({ key, text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter' } = {}) {
+function runVoiceAdapterTurn({ key, text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter', onText } = {}) {
   const s = rt(key);
   if (s.running || s.queue.length) return Promise.reject(new Error('voice adapter session is busy — wait for the current reply'));
   if (s.sessionId && s.agent && s.agent !== agent) return Promise.reject(new Error(`voice adapter session belongs to ${s.agent}; start a new call before switching agents`));
   return new Promise((resolve) => {
     enqueue(key, {
-      text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true,
+      text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true, onText,
       // A Codex turn can emit a progress note followed by its final answer.
       // The Box chat retains both, but the voice bridge must speak only the
       // final substantive agent message.
@@ -3967,6 +3967,9 @@ function runCodexTurn(s, msg, resolve) {
         // leading separator there would render a stray empty paragraph.
         const raw = ev.delta || '';
         if (msg.voiceOnly && raw.trim()) s.voiceFinalText = raw;
+        if (msg.voiceOnly && typeof msg.onText === 'function' && raw.trim()) {
+          try { msg.onText(raw); } catch {}
+        }
         const last = s.curParts[s.curParts.length - 1];
         const delta = ((last && last.t === 'text' && last.text) ? '\n\n' : '') + raw;
         pushTextPart(s, delta);

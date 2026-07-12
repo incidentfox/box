@@ -139,15 +139,42 @@ class BoxCodexVoiceAgent(Agent):
             return
         headers = {"Authorization": f"Bearer {self.runtime.auth_token}"}
         payload = {"vsid": self.vsid, "text": transcript, "stt_model": "livekit:deepgram/nova-3"}
+        spoken_progress = ""
         try:
             async with httpx.AsyncClient(timeout=190) as client:
-                response = await client.post(f"{self.runtime.backend_url}/api/voice/adapter/text", headers=headers, json=payload)
-                response.raise_for_status()
-                answer = speakable_text(response.json().get("text"))
+                async with client.stream("POST", f"{self.runtime.backend_url}/api/voice/adapter/stream", headers=headers, json=payload) as response:
+                    response.raise_for_status()
+                    event = ""
+                    data_lines: list[str] = []
+                    answer = ""
+                    async for line in response.aiter_lines():
+                        if line.startswith("event:"):
+                            event = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data_lines.append(line[5:].strip())
+                        elif not line and data_lines:
+                            try:
+                                body = json.loads("\n".join(data_lines))
+                            except json.JSONDecodeError:
+                                body = {}
+                            if event == "progress":
+                                progress = speakable_text(body.get("text"))
+                                if progress:
+                                    speech = self.session.say(progress, allow_interruptions=self.runtime.allow_interruptions)
+                                    await speech.wait_for_playout()
+                                    spoken_progress = progress
+                            elif event == "final":
+                                answer = speakable_text(body.get("text"))
+                            elif event == "error":
+                                raise RuntimeError(str(body.get("error") or "adapter stream failed"))
+                            event = ""
+                            data_lines = []
         except Exception:
             answer = "I could not reach the Box session just now. Please try that once more."
         if not answer:
             answer = "The Box session finished without a speakable answer. Please ask me to check its text response."
+        if answer == spoken_progress:
+            return
         speech = self.session.say(answer, allow_interruptions=self.runtime.allow_interruptions)
         await speech.wait_for_playout()
 
