@@ -297,6 +297,7 @@ const ICONS = {
   'sidebar-collapse': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M16 9l-3 3 3 3"/>', { w: 1.9 }),
   'sidebar-expand': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9l3 3-3 3"/>', { w: 1.9 }),
   search: SVG('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', { w: 2 }),
+  more: SVG('<circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/>'),
   settings: SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1A1.7 1.7 0 0 0 10 3V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1A1.7 1.7 0 0 0 21 10h0a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', { w: 1.8 }),
 };
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { if (!el._painted) { el.innerHTML = ICONS[el.dataset.icon] || ''; el._painted = 1; } }); }
@@ -1239,6 +1240,17 @@ function renderContextMeter() {
   el.title = `${cx.usedTokens.toLocaleString()} / ${cx.windowTokens.toLocaleString()} tokens${estimated ? ' (estimated)' : ''}`;
   el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
 }
+function openSessionMenu() {
+  const voiceAvailable = $('voiceBtn') && !$('voiceBtn').classList.contains('hidden');
+  const rows = [
+    { ic: ICONS.settings, label: 'Settings', desc: 'Workspace, agent, and permissions', fn: openAppSettings },
+    { ic: document.documentElement.dataset.theme === 'dark' ? ICONS.sun : ICONS.moon, label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Switch to light' : 'Switch to dark', fn: toggleTheme },
+    { ic: ICONS.pulse, label: 'Pipelines', desc: 'Automation and inbox health', fn: openPipelines },
+  ];
+  if (CFG.features && CFG.features.linear) rows.splice(2, 0, { ic: ICONS.board, label: 'Linear board', desc: 'Open your work queue', fn: openBoard });
+  if (voiceAvailable && typeof openVoice === 'function') rows.push({ ic: ICONS.mic, label: 'Voice assistant', desc: 'Talk to your box hands-free', fn: openVoice });
+  openSheet('Workspace', rows);
+}
 $('newBtn').onclick = () => {
   const labels = {
     codex: ['Run Codex on the box', 'New Codex chat'],
@@ -1258,6 +1270,7 @@ $('newBtn').onclick = () => {
   openSheet('New chat', rows);
 };
 if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
+if ($('sessionMenuBtn')) $('sessionMenuBtn').onclick = openSessionMenu;
 if ($('bulkBtn')) $('bulkBtn').onclick = () => setBulkMode(!bulkMode);
 $('themeBtn').onclick = toggleTheme;
 if ($('sidebarCollapseBtn')) $('sidebarCollapseBtn').onclick = toggleSidebarCollapsed;
