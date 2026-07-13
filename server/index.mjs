@@ -3375,6 +3375,13 @@ app.get('/vendor/livekit-client.umd.js', (_req, res) => {
   });
 });
 app.use(express.static(PUBLIC));
+// Box is a client-side app, but its screens use real pathname routes so chats and
+// issues can be bookmarked/shared and browser navigation reads naturally. Serve the
+// shell for those route URLs; API and static-file requests retain normal 404 behavior.
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/') || extname(req.path)) return next();
+  res.sendFile(join(PUBLIC, 'index.html'));
+});
 
 // ---- per-session queue workers --------------------------------------------
 // Each session has a server-side queue + worker that runs turns sequentially,
