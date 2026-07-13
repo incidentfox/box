@@ -81,17 +81,63 @@ function show(id) {
 // Back/Forward buttons, the in-app back arrows, and swipe-back all walk one stack.
 let navSuppress = false;   // true while restoring a popped route, so the render itself doesn't re-push
 const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || ''].join('|') : '');
+const safeRoutePart = (value) => encodeURIComponent(String(value || '').trim());
+function routeSlug(value, fallback = '') {
+  const slug = String(value || '').toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 72);
+  return slug || fallback;
+}
+function routeUrl(state) {
+  const s = state || { view: 'sessions', filter: 'all' };
+  switch (s.view) {
+    case 'board': return '/board';
+    case 'issue': return `/issues/${safeRoutePart(s.id)}${routeSlug(s.title) ? `/${routeSlug(s.title)}` : ''}`;
+    case 'issueNew': return '/issues/new';
+    case 'pipelines': return '/pipelines';
+    case 'voice': return '/voice';
+    case 'chat': return s.id
+      ? `/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}`
+      : '/sessions/new';
+    case 'sessions': {
+      const filter = s.filter || 'all';
+      return filter === 'all' ? '/sessions' : `/sessions?filter=${encodeURIComponent(filter)}`;
+    }
+    case 'login':
+    default: return '/';
+  }
+}
+function routeFromLocation() {
+  const parts = location.pathname.split('/').filter(Boolean).map((part) => {
+    try { return decodeURIComponent(part); } catch { return part; }
+  });
+  const filter = new URLSearchParams(location.search).get('filter') || 'all';
+  if (parts[0] === 'board' && parts.length === 1) return { view: 'board' };
+  if (parts[0] === 'issues' && parts[1] === 'new') return { view: 'issueNew' };
+  if (parts[0] === 'issues' && parts[1]) return { view: 'issue', id: parts[1] };
+  if (parts[0] === 'pipelines') return { view: 'pipelines' };
+  if (parts[0] === 'voice') return { view: 'voice' };
+  if (parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true };
+  if (parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1] };
+  if (parts[0] === 'sessions') return { view: 'sessions', filter };
+  return { view: 'sessions', filter: 'all' };
+}
 function navTo(state, { replace = false } = {}) {
   if (navSuppress) return;                       // we're rendering a popped route — don't push
   const prev = history.state;
+  // Closing a sheet by tapping its backdrop/row queues the sheet entry for removal.
+  // If that tap immediately navigates, replace the sheet entry with the destination
+  // instead of leaving a dead entry that makes the next Back appear to do nothing.
+  if (pendingSheetHistory) { pendingSheetHistory = null; replace = true; }
   // Replace (don't grow the stack) for: first entry, an explicit replace, the same
   // screen re-rendering (e.g. re-filtering the list / refresh), or stepping off the
   // login screen — so Back from the list leaves the app instead of flashing login.
   if (!prev || replace || routeKey(prev) === routeKey(state) || prev.view === 'login') {
-    try { history.replaceState(state, ''); } catch {}
+    try { history.replaceState(state, '', routeUrl(state)); } catch {}
     return;
   }
-  try { history.pushState(state, ''); } catch {}
+  try { history.pushState(state, '', routeUrl(state)); } catch {}
 }
 function renderRoute(s) {
   navSuppress = true;
@@ -111,6 +157,7 @@ function renderRoute(s) {
         if (s.id && cur.id === s.id && chatVisible()) { if (attnMode) closeAttention(); break; } // just closing the overlay
         if (attnMode) closeAttention();
         if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent });
+        else if (s.new) openChat({ id: null, title: 'New chat', cwd: defaultCwd, agent: configuredDefaultAgent() });
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
         else openSessions();
         break;
@@ -129,7 +176,7 @@ window.addEventListener('popstate', (e) => {
   // A bottom sheet is open: the Back gesture / browser Back should dismiss the sheet
   // (it pushed its own history entry in showSheet) and leave the screen underneath
   // untouched — not navigate away and strand the drawer on top of the next screen.
-  if (!$('sheet').classList.contains('hidden')) { closeSheet(); return; }
+  if (!$('sheet').classList.contains('hidden')) { closeSheet({ fromHistory: true }); return; }
   renderRoute(e.state);
 });
 function toast(m, ms = 2200, action) {
@@ -620,7 +667,10 @@ async function login() {
   const token = $('tokenInput').value.trim(); if (!token) return;
   const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
   if (!r.ok) { $('loginErr').textContent = 'Wrong token'; return; }
-  TOKEN = token; LS.setItem('cc_token', token); loadConfig(); openSessions();
+  TOKEN = token; LS.setItem('cc_token', token);
+  const initialRoute = (history.state && history.state.returnTo) || routeFromLocation();
+  navTo(initialRoute, { replace: true });
+  loadConfig(); renderRoute(initialRoute);
 }
 function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); navTo({ view: 'login' }, { replace: true }); show('login'); }
 
@@ -1721,7 +1771,13 @@ async function openIssue(id) {
   try { d = await (await api(`/api/linear/${id}/detail`)).json(); }
   catch { $('issueScroll').innerHTML = '<p class="empty">Could not load issue.</p>'; return; }
   if (d.error) { $('issueScroll').innerHTML = `<p class="empty">${esc(d.error)}</p>`; return; }
-  curIssue = d; renderIssue(d);
+  curIssue = d;
+  // The ticket title is available only after the detail fetch. Replace the route
+  // in place so a copied URL is readable without creating another Back entry.
+  if (!navSuppress && history.state && history.state.view === 'issue' && history.state.id === id) {
+    navTo({ ...history.state, title: d.title || '' }, { replace: true });
+  }
+  renderIssue(d);
   // find sessions that filed/worked this ticket (so the user can jump back in)
   curIssueSessions = [];
   try {
@@ -4273,6 +4329,7 @@ function openSheet(title, rows) {
   showSheet();
 }
 let sheetDrag = null;
+let pendingSheetHistory = null;
 function setSheetDragOffset(y) {
   const sheet = $('sheet');
   const offset = Math.max(0, y || 0);
@@ -4292,14 +4349,31 @@ function showSheet() {
   const sheet = $('sheet');
   const wasHidden = sheet.classList.contains('hidden');
   sheet.classList.remove('hidden');
-  // Wire the sheet into the history stack so the phone's Back gesture / browser Back
-  // dismisses the SHEET itself instead of navigating the screen underneath it (which
-  // left the drawer stuck on top of the homepage). One pushed entry per fresh open;
-  // the popstate handler pops it back off. (Closing via tap/swipe/Escape leaves the
-  // spent entry in place — harmless: it just re-renders the same screen.)
-  if (wasHidden) { try { history.pushState({ ...(history.state || {}), _sheet: true }, ''); } catch {} }
+  // Wire the sheet into history so browser Back dismisses it before leaving the page.
+  // Reopening/replacing a sheet before its queued close settles reuses that entry.
+  if (wasHidden) {
+    pendingSheetHistory = null;
+    try {
+      const state = { ...(history.state || {}), _sheet: true };
+      if (history.state && history.state._sheet) history.replaceState(state, '', routeUrl(state));
+      else history.pushState(state, '', routeUrl(state));
+    } catch {}
+  }
 }
-function closeSheet() { resetSheetDrag(); $('sheet').classList.add('hidden'); }
+function closeSheet({ fromHistory = false } = {}) {
+  resetSheetDrag();
+  $('sheet').classList.add('hidden');
+  if (fromHistory || !(history.state && history.state._sheet)) return;
+  // Give a click handler one microtask to navigate or open a replacement sheet. If
+  // neither happens, actually pop this transient entry so Back never needs two taps.
+  const token = {};
+  pendingSheetHistory = token;
+  queueMicrotask(() => {
+    if (pendingSheetHistory !== token) return;
+    pendingSheetHistory = null;
+    try { history.back(); } catch {}
+  });
+}
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
 function onSheetTouchStart(e) {
   if ($('sheet').classList.contains('hidden') || e.touches.length !== 1) return;
@@ -4966,5 +5040,16 @@ document.addEventListener('visibilitychange', () => {
   refreshSessionsSoon(100);
 });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-if (TOKEN) { navTo({ view: 'sessions', filter: 'all' }, { replace: true }); loadConfig(); openSessions().catch(() => show('login')); }
-else { navTo({ view: 'login' }, { replace: true }); show('login'); }
+const requestedRoute = routeFromLocation();
+if (TOKEN) {
+  const initialRoute = requestedRoute;
+  navTo(initialRoute, { replace: true });
+  loadConfig();
+  renderRoute(initialRoute);
+}
+else {
+  // Keep a copied deep-link intact while the token gate is on screen; after login
+  // the requested route is restored instead of silently dropping the user at home.
+  try { history.replaceState({ view: 'login', returnTo: requestedRoute }, '', location.pathname + location.search); } catch {}
+  show('login');
+}
