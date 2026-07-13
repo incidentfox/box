@@ -249,7 +249,7 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .ver { font-size: 11px; color: var(--muted); margin-left: 7px; align-self: flex-end; padding-bottom: 4px; }
 .compose { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; box-shadow: 0 3px 10px rgba(200,110,80,.4); flex: none; }
 .compose svg { width: 22px; height: 22px; }
-.sidebarToggle.sidebarToggle, .sidebarRestore.sidebarRestore { display: none; }
+.sidebarToggle.sidebarToggle, .sidebarRestore.sidebarRestore, .sessionMenu.sessionMenu { display: none; }
 
 /* status filter tabs */
 .tabs { display: flex; gap: 8px; padding: 12px 14px 6px; overflow-x: auto; flex: none; scrollbar-width: none; }
@@ -931,6 +931,25 @@ textarea.acctInput { resize: vertical; }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .compose svg {
     width: 19px; height: 19px;
   }
+  /* The sidebar is deliberately a compact launcher on desktop. Keeping every
+     secondary destination as a separate icon made the primary New-chat control
+     overflow at common laptop widths, leaving no way to start a conversation.
+     Search stays one click away; the overflow menu keeps the rest reachable. */
+  #sessions .sbar #settingsBtn,
+  #sessions .sbar #themeBtn,
+  #sessions .sbar #boardBtn,
+  #sessions .sbar #pipesBtn,
+  #sessions .sbar #voiceBtn {
+    display: none !important;
+  }
+  #sessions .sbar .sessionMenu {
+    display: grid;
+  }
+  #sessions .sbar #newBtn {
+    width: auto; min-width: 94px; height: 36px; padding: 0 12px; gap: 6px;
+    border-radius: 10px; grid-auto-flow: column; font-size: 13px; font-weight: 700;
+  }
+  #sessions .sbar #newBtn::after { content: 'New chat'; }
   body[data-view="sessions"] #sessions {
     flex: 1 1 auto; width: 100%;
   }
