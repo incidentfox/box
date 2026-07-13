@@ -65,7 +65,25 @@ server_pids() {
   done
 }
 server_up() { [ -n "$(server_pids | head -n 1)" ]; }
-start_server() { nohup node server/index.mjs >>"$SRV_LOG" 2>&1 9>&- & }
+ensure_node_pty() {
+  if node -e 'require("node-pty")' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "$(date -u +%FT%TZ) node-pty native module unavailable; rebuilding" >>"$SRV_LOG"
+  if npm rebuild node-pty >>"$SRV_LOG" 2>&1 \
+    && node -e 'require("node-pty")' >/dev/null 2>&1; then
+    echo "$(date -u +%FT%TZ) node-pty native module rebuilt successfully" >>"$SRV_LOG"
+    return 0
+  fi
+
+  echo "$(date -u +%FT%TZ) node-pty rebuild failed; server not started" >>"$SRV_LOG"
+  return 1
+}
+start_server() {
+  ensure_node_pty || return 1
+  nohup node server/index.mjs >>"$SRV_LOG" 2>&1 9>&- &
+}
 
 tunnel_up()  { pgrep -f "cloudflared tunnel" >/dev/null 2>&1; }
 start_tunnel() {
