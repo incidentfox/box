@@ -5144,7 +5144,24 @@ document.addEventListener('visibilitychange', () => {
   refreshSessionListTimes();
   refreshSessionsSoon(100);
 });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  // A waiting worker can claim an already-open PWA, but the page keeps running the
+  // old HTML/JS until it is reloaded. Refresh once when an existing installation
+  // switches controllers so frontend fixes become visible without a manual relaunch.
+  const hadServiceWorkerController = !!navigator.serviceWorker.controller;
+  let reloadingForServiceWorkerUpdate = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadServiceWorkerController || reloadingForServiceWorkerUpdate) return;
+    reloadingForServiceWorkerUpdate = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('/sw.js').then((registration) => {
+    registration.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) registration.update().catch(() => {});
+    });
+  }).catch(() => {});
+}
 const requestedRoute = routeFromLocation();
 if (TOKEN) {
   const initialRoute = requestedRoute;
