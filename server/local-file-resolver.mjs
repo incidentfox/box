@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 
 export const LOCAL_PATH_ALLOWED_RE = /^(?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))(?:\/|$)/;
 export const FILE_SEARCH_SKIP_DIRS = new Set(['.git', 'node_modules', '.next', 'dist', 'build', 'coverage', '.cache', '.turbo']);
-export const FILE_SEARCH_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xlsx?|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac)$/i;
+export const FILE_SEARCH_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xls|xlsx|xlsm|xlsb|ods|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac)$/i;
 
 export function cleanPathToken(raw) {
   let s = String(raw || '').trim().replace(/^['"`]+|['"`]+$/g, '');

@@ -592,6 +592,22 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .binaryFileDownload { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 180px; padding: 11px 18px; border: 0; border-radius: 11px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
 .binaryFileDownload svg { width: 17px; height: 17px; }
 .binaryFileDownload:active { opacity: .75; }
+.spreadsheetBody { overflow: hidden !important; }
+.sheetLoading { min-height: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); }
+.sheetLoading .loading { display: inline-flex; }
+.spreadsheetPreview { height: 100%; min-height: 0; display: grid; grid-template-rows: auto 1fr auto; background: var(--bg); }
+.sheetTabs { display: flex; gap: 6px; overflow-x: auto; padding: 9px 10px; border-bottom: 1px solid var(--line); scrollbar-width: none; }
+.sheetTabs::-webkit-scrollbar { display: none; }
+.sheetTabs button { flex: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); color: var(--muted); font-size: 12px; font-weight: 650; }
+.sheetTabs button.on { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, var(--card)); color: var(--ink); }
+.sheetViewport { min-height: 0; overflow: auto; overscroll-behavior: contain; background: var(--card); }
+.sheetTable { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font: 12px/1.35 -apple-system, "Inter", system-ui, sans-serif; color: var(--ink); }
+.sheetTable th, .sheetTable td { min-width: 112px; max-width: 260px; height: 30px; padding: 5px 8px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--card); text-align: left; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; box-sizing: border-box; }
+.sheetTable thead th { position: sticky; top: 0; z-index: 3; min-width: 112px; height: 28px; padding: 5px 7px; background: var(--subtle); color: var(--muted); text-align: center; font-size: 11px; font-weight: 700; }
+.sheetTable tbody th { position: sticky; left: 0; z-index: 2; min-width: 44px; width: 44px; max-width: 44px; background: var(--subtle); color: var(--muted); text-align: right; font-size: 11px; font-weight: 600; }
+.sheetTable .sheetCorner { left: 0; z-index: 4; min-width: 44px; width: 44px; max-width: 44px; }
+.sheetFoot { padding: 7px 10px calc(7px + var(--safe-b)); border-top: 1px solid var(--line); color: var(--muted); background: var(--bg); font-size: 11px; line-height: 1.35; }
+.sheetEmpty { padding: 30px 18px; color: var(--muted); text-align: center; }
 
 /* clickable tool chips + detail sheet */
 .toolchip.clickable { cursor: pointer; min-width: 0; }
