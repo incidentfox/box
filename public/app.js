@@ -416,7 +416,7 @@ const LOCAL_PATH_RE = /^(~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))(?:\/|$)
 // Extensions worth auto-linking when an agent mentions a *relative* path in chat. Deliberately
 // excludes code exts (js/ts/py/…) — those are noisy in technical prose and already shown via
 // Edit/Write tool chips. Focused on deliverables: docs, data, media.
-const REL_FILE_EXTS = 'png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xlsx?|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac';
+const REL_FILE_EXTS = 'png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xls|xlsx|xlsm|xlsb|ods|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac';
 // A relative file token preceded by a word-boundary char. The (^|[\s([]) prefix keeps it from
 // matching inside generated HTML attributes or URLs (those are preceded by " or /, not a boundary).
 const REL_FILE_RE = new RegExp('(^|[\\s([])((?:\\.\\/)?(?:[\\w.-]+\\/)*[\\w.-]+\\.(?:' + REL_FILE_EXTS + '))\\b', 'gi');
@@ -3159,7 +3159,7 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-terra' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-sol' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
   const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
@@ -4261,9 +4261,13 @@ function openToolDetail(name, data) {
   showSheet();
 }
 const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'], video: ['mp4', 'mov', 'webm', 'm4v', 'mkv'] };
+const SPREADSHEET_EXTS = ['xls', 'xlsx', 'xlsm', 'xlsb', 'ods'];
+const SPREADSHEET_MAX_BYTES = 20 * 1024 * 1024;
+let spreadsheetWorker = null;
 const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
 function openFile(path) { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); showMedia(path); }
 function showMedia(path) {
+  if (spreadsheetWorker) { spreadsheetWorker.terminate(); spreadsheetWorker = null; }
   path = normalizeJumpPath(path);
   $('expList').classList.add('hidden'); $('expReader').classList.remove('hidden'); paintIcons($('expReader'));
   $('readerName').textContent = path.split('/').pop();
@@ -4285,6 +4289,7 @@ function showMedia(path) {
     const a = document.createElement('a'); a.className = 'filePreviewBtn'; a.textContent = 'Open in browser'; a.href = rawUrl(path); a.target = '_blank'; a.rel = 'noopener';
     bar.appendChild(a); body.appendChild(bar);
   }
+  else if (SPREADSHEET_EXTS.includes(ext)) renderSpreadsheetPreview(body, path);
   else if (isTextPreviewExt(ext)) {
     body.classList.add('astext'); body.textContent = 'Loading…';
     api('/api/fs?path=' + encodeURIComponent(path)).then((r) => r.json()).then((d) => {
@@ -4326,6 +4331,79 @@ function showMedia(path) {
     body.appendChild(panel);
     fillFileSize(size, path);
   }
+}
+function spreadsheetColumnName(index) {
+  let n = Number(index) + 1, out = '';
+  while (n > 0) { const r = (n - 1) % 26; out = String.fromCharCode(65 + r) + out; n = Math.floor((n - 1) / 26); }
+  return out;
+}
+function spreadsheetFallback(body, path, message) {
+  body.innerHTML = '';
+  const panel = document.createElement('div'); panel.className = 'binaryFilePanel';
+  const badge = document.createElement('div'); badge.className = 'binaryFileBadge'; badge.textContent = 'XLSX';
+  const note = document.createElement('p'); note.textContent = message;
+  const dl = document.createElement('button'); dl.className = 'binaryFileDownload'; dl.innerHTML = `${ICONS['arrow-down']}<span>Download</span>`;
+  dl.onclick = () => downloadFile(path, path.split('/').pop());
+  panel.append(badge, note, dl); body.appendChild(panel);
+}
+async function renderSpreadsheetPreview(body, path) {
+  body.classList.add('spreadsheetBody');
+  body.innerHTML = '<div class="sheetLoading"><span class="loading"><span></span><span></span><span></span></span><strong>Opening workbook…</strong></div>';
+  try {
+    const response = await fetch(rawFileUrl(path));
+    if (!response.ok) throw new Error('Could not read workbook');
+    const announcedSize = Number(response.headers.get('content-length') || 0);
+    if (announcedSize > SPREADSHEET_MAX_BYTES) return spreadsheetFallback(body, path, `This workbook is ${fmtBytes(announcedSize)}. Preview supports files up to ${fmtBytes(SPREADSHEET_MAX_BYTES)}; download it to open the full file.`);
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > SPREADSHEET_MAX_BYTES) return spreadsheetFallback(body, path, `This workbook is ${fmtBytes(buffer.byteLength)}. Preview supports files up to ${fmtBytes(SPREADSHEET_MAX_BYTES)}; download it to open the full file.`);
+    const worker = new Worker('/xlsx-worker.js'); spreadsheetWorker = worker;
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { worker.terminate(); reject(new Error('Preview took too long')); }, 20000);
+      worker.onmessage = (event) => { clearTimeout(timer); resolve(event.data); };
+      worker.onerror = () => { clearTimeout(timer); reject(new Error('Could not parse workbook')); };
+      worker.postMessage({ buffer, maxRows: 250, maxCols: 50, maxSheets: 20 }, [buffer]);
+    });
+    worker.terminate(); if (spreadsheetWorker === worker) spreadsheetWorker = null;
+    if (!result || !result.ok) throw new Error((result && result.error) || 'Could not parse workbook');
+    renderSpreadsheetSheets(body, result);
+  } catch (error) {
+    spreadsheetFallback(body, path, `${String((error && error.message) || error || 'Could not preview workbook')}. Download the workbook to open it.`);
+  }
+}
+function renderSpreadsheetSheets(body, workbook) {
+  body.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className = 'spreadsheetPreview';
+  const tabs = document.createElement('div'); tabs.className = 'sheetTabs';
+  const viewport = document.createElement('div'); viewport.className = 'sheetViewport';
+  const foot = document.createElement('div'); foot.className = 'sheetFoot';
+  wrap.append(tabs, viewport, foot); body.appendChild(wrap);
+  const sheets = workbook.sheets || [];
+  if (!sheets.length) { viewport.innerHTML = '<div class="sheetEmpty">This workbook has no visible cells.</div>'; return; }
+  const draw = (index) => {
+    const sheet = sheets[index];
+    tabs.querySelectorAll('button').forEach((button, i) => button.classList.toggle('on', i === index));
+    viewport.innerHTML = '';
+    const table = document.createElement('table'); table.className = 'sheetTable';
+    const head = document.createElement('thead'); const headRow = document.createElement('tr');
+    const corner = document.createElement('th'); corner.className = 'sheetCorner'; headRow.appendChild(corner);
+    const shownCols = Math.max(1, Math.min(50, sheet.totalCols || Math.max(0, ...(sheet.rows || []).map((row) => row.length))));
+    for (let c = 0; c < shownCols; c++) { const th = document.createElement('th'); th.textContent = spreadsheetColumnName((sheet.startCol || 0) + c); headRow.appendChild(th); }
+    head.appendChild(headRow); table.appendChild(head);
+    const tbody = document.createElement('tbody');
+    for (let r = 0; r < (sheet.rows || []).length; r++) {
+      const tr = document.createElement('tr'); const rowNum = document.createElement('th'); rowNum.textContent = String((sheet.startRow || 0) + r + 1); tr.appendChild(rowNum);
+      for (let c = 0; c < shownCols; c++) { const td = document.createElement('td'); const value = sheet.rows[r] && sheet.rows[r][c]; td.textContent = value == null ? '' : String(value); tr.appendChild(td); }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody); viewport.appendChild(table);
+    const notes = [`${sheet.totalRows.toLocaleString()} rows × ${sheet.totalCols.toLocaleString()} columns`, 'read-only'];
+    if (sheet.truncated) notes.push('showing first 250 rows × 50 columns');
+    if (workbook.sheetsTruncated) notes.push(`showing 20 of ${workbook.totalSheets} sheets`);
+    foot.textContent = notes.join(' · ');
+    viewport.scrollTo(0, 0);
+  };
+  sheets.forEach((sheet, index) => { const button = document.createElement('button'); button.textContent = sheet.name || `Sheet ${index + 1}`; button.onclick = () => draw(index); tabs.appendChild(button); });
+  draw(0);
 }
 function isTextPreviewExt(ext) {
   return !ext || ['txt', 'text', 'log', 'csv', 'tsv', 'md', 'markdown'].includes(ext) || Object.prototype.hasOwnProperty.call(EXT_LANG, ext);

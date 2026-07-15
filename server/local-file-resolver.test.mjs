@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { cleanPathToken, createLocalFileResolver } from './local-file-resolver.mjs';
+import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'box-file-resolver-'));
 try {
@@ -25,6 +25,7 @@ try {
   });
 
   assert.equal(cleanPathToken('"./attendees.csv,"'), './attendees.csv');
+  for (const name of ['book.xls', 'book.xlsx', 'book.xlsm', 'book.xlsb', 'book.ods']) assert.equal(FILE_SEARCH_EXT_RE.test(name), true, name);
   const exact = resolver.resolveLocalFileReference('./attendees.csv', cwd);
   assert.equal(exact.found, true);
   assert.equal(exact.path, join(cwd, 'attendees.csv'));
