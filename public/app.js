@@ -6,7 +6,7 @@ let ws = null;
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'high', sandbox: 'off' },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
@@ -2535,11 +2535,15 @@ function fillFileSize(el, fp) {
     .catch(() => {});
 }
 function downloadFile(fp, fname) {
-  fetch(rawFileUrl(fp)).then((r) => r.blob()).then((blob) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = fname; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  }).catch(() => window.open(rawFileUrl(fp), '_blank'));
+  // Use the server's attachment response instead of buffering the entire file in JS.
+  // This is important for large workbooks/archives and gives iOS a real download response.
+  const a = document.createElement('a');
+  a.href = rawFileUrl(fp, true);
+  a.download = fname || String(fp || '').split('/').pop() || 'download';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 function fileDlBtn(fp, fname) {
   const dl = document.createElement('button'); dl.className = 'fileCardDl'; dl.title = 'Download'; dl.innerHTML = ICONS['arrow-down'];
@@ -2768,7 +2772,7 @@ function clearLoading() { if (live && live.loading) { live.loading.remove(); liv
 function killGhostIndicators() { $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); }
 const imgUrl = (p) => '/api/img?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
 // For arbitrary filesystem paths (e.g. tool Read on an image), use /api/raw which has no dir restriction
-const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
+const rawFileUrl = (p, download = false) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN) + (download ? '&dl=1' : '');
 // Remember the last user bubble we drew, so a re-echoed copy of the SAME message (e.g. the
 // server's own injected-echo suppression desyncing on a force-queue + Stop, which leaks the
 // echo back as a `remote_user`) can be dropped instead of rendering the message twice.
@@ -4266,6 +4270,7 @@ function showMedia(path) {
   $('expPath').textContent = shortCwd(path);
   $('expJumpInput').value = path;
   $('readerAt').onclick = () => insertRef(path);
+  $('readerDownload').onclick = () => downloadFile(path, path.split('/').pop());
   const ext = (path.split('.').pop() || '').toLowerCase();
   const body = $('readerBody'); body.innerHTML = ''; body.classList.remove('astext');
   if (MEDIA.img.includes(ext)) { const im = document.createElement('img'); im.className = 'mediaimg'; im.src = rawUrl(path); body.appendChild(im); }
@@ -4280,7 +4285,7 @@ function showMedia(path) {
     const a = document.createElement('a'); a.className = 'filePreviewBtn'; a.textContent = 'Open in browser'; a.href = rawUrl(path); a.target = '_blank'; a.rel = 'noopener';
     bar.appendChild(a); body.appendChild(bar);
   }
-  else {
+  else if (isTextPreviewExt(ext)) {
     body.classList.add('astext'); body.textContent = 'Loading…';
     api('/api/fs?path=' + encodeURIComponent(path)).then((r) => r.json()).then((d) => {
       if (d.error) { body.textContent = d.error; return; }
@@ -4302,6 +4307,28 @@ function showMedia(path) {
       }
     }).catch(() => { body.textContent = '(cannot read)'; });
   }
+  else {
+    // Office files and other binary artifacts turn into mojibake when read as UTF-8.
+    // Give them a useful landing screen with an explicit download action instead.
+    const fname = path.split('/').pop() || 'file';
+    const panel = document.createElement('div'); panel.className = 'binaryFilePanel';
+    const badge = document.createElement('div'); badge.className = 'binaryFileBadge'; badge.textContent = ext ? ext.toUpperCase() : 'FILE';
+    const name = document.createElement('strong'); name.textContent = fname;
+    const size = document.createElement('span'); size.className = 'fileCardSize';
+    const note = document.createElement('p');
+    note.textContent = ['xls', 'xlsx', 'xlsm', 'ods'].includes(ext)
+      ? 'Spreadsheet preview isn’t supported in Box. Download the workbook to open it.'
+      : 'Preview isn’t available for this file type. Download the file to open it.';
+    const dl = document.createElement('button'); dl.className = 'binaryFileDownload';
+    dl.innerHTML = `${ICONS['arrow-down']}<span>Download</span>`;
+    dl.onclick = () => downloadFile(path, fname);
+    panel.append(badge, name, size, note, dl);
+    body.appendChild(panel);
+    fillFileSize(size, path);
+  }
+}
+function isTextPreviewExt(ext) {
+  return !ext || ['txt', 'text', 'log', 'csv', 'tsv', 'md', 'markdown'].includes(ext) || Object.prototype.hasOwnProperty.call(EXT_LANG, ext);
 }
 function renderHtmlContent(body, content, path = '') {
   body.classList.remove('astext');
