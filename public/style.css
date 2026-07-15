@@ -585,6 +585,13 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .detailimg { max-height: 50vh; width: auto; margin: 0 18px 12px; }
 .mediaimg { max-width: 100%; height: auto; border-radius: 10px; display: block; }
 .mediael { width: 100%; margin-top: 6px; }
+.binaryFilePanel { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 28px 22px; text-align: center; box-sizing: border-box; }
+.binaryFileBadge { min-width: 56px; height: 64px; padding: 0 9px; border-radius: 12px; display: grid; place-items: center; box-sizing: border-box; background: var(--user-bub); color: var(--ink); font-size: 12px; font-weight: 800; letter-spacing: .06em; }
+.binaryFilePanel strong { max-width: min(520px, 88vw); font-size: 16px; overflow-wrap: anywhere; }
+.binaryFilePanel p { max-width: 420px; margin: 2px 0 8px; color: var(--muted); font-size: 14px; line-height: 1.45; }
+.binaryFileDownload { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 180px; padding: 11px 18px; border: 0; border-radius: 11px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
+.binaryFileDownload svg { width: 17px; height: 17px; }
+.binaryFileDownload:active { opacity: .75; }
 
 /* clickable tool chips + detail sheet */
 .toolchip.clickable { cursor: pointer; min-width: 0; }
