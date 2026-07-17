@@ -111,6 +111,7 @@ function smokeTurn(base, token, { key, cwd, agent, model, deadline }) {
     let text = '';
     let sessionId = '';
     let sawSync = false;
+    const activity = [];
     let finished = false;
     const timer = setInterval(() => {
       if (Date.now() < deadline || finished) return;
@@ -131,6 +132,7 @@ function smokeTurn(base, token, { key, cwd, agent, model, deadline }) {
     ws.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg.activityAt && msg.activityLabel) activity.push({ type: msg.type, at: msg.activityAt, label: msg.activityLabel });
       if (msg.type === 'sync' && !sawSync) {
         sawSync = true;
         ws.send(JSON.stringify({
@@ -156,8 +158,8 @@ function smokeTurn(base, token, { key, cwd, agent, model, deadline }) {
         done({ ok: false, error: msg.msg || 'server emitted error', sessionId, text });
       } else if (msg.type === 'done') {
         sessionId = msg.sessionId || sessionId;
-        const ok = text.includes(EXPECT);
-        done({ ok, sessionId, text, error: ok ? '' : `expected ${EXPECT}, got ${JSON.stringify(text.slice(-500))}` });
+        const ok = text.includes(EXPECT) && activity.length > 0;
+        done({ ok, sessionId, text, activity, error: ok ? '' : activity.length ? `expected ${EXPECT}, got ${JSON.stringify(text.slice(-500))}` : 'turn emitted no live activity metadata' });
       }
     });
     ws.on('error', (e) => done({ ok: false, error: String(e && e.message || e), sessionId, text }));
@@ -194,6 +196,7 @@ try {
     model: AGENT === 'codex' ? MODEL : '',
     fakeCodex: !!v['fake-codex'],
     sessionId: result.sessionId,
+    activity: result.activity.slice(0, 8),
     response: result.text.trim().slice(0, 500),
   }, null, 2));
 } catch (e) {

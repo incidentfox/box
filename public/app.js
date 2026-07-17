@@ -2758,20 +2758,59 @@ function renderQueue(items) {
 /* live turn rendering */
 let live = null;
 let liveUser = null;
+let pendingLiveActivity = null;
+function activityAge(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 5) return 'active now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ago`;
+}
+function renderLiveProgress() {
+  if (!live || !live.progress || !live.progress.isConnected) return;
+  const ageMs = Math.max(0, Date.now() - (live.lastActivityAt || Date.now()));
+  const stale = ageMs >= 90_000;
+  live.progress.classList.toggle('stale', stale);
+  live.progressText.textContent = stale
+    ? `Still running · last activity ${activityAge(ageMs)}`
+    : `${live.activityLabel || 'Working'} · ${activityAge(ageMs)}`;
+  live.progress.title = stale && live.activityLabel ? `Last phase: ${live.activityLabel}` : '';
+  // Keep the status immediately below the newest tool/text block. Otherwise a long
+  // tool-heavy turn leaves it above the fold and still looks frozen at the bottom.
+  live.body.appendChild(live.progress);
+}
+function setLiveActivity(label, at = Date.now()) {
+  if (!live) { pendingLiveActivity = { label: label || 'Working', at: Number(at) || Date.now() }; return; }
+  live.activityLabel = label || live.activityLabel || 'Working';
+  live.lastActivityAt = Number(at) || Date.now();
+  renderLiveProgress();
+}
+function stopLiveProgress(target = live) {
+  if (!target) return;
+  if (target.progressTimer) clearInterval(target.progressTimer);
+  target.progressTimer = null;
+  if (target.progress) target.progress.remove();
+}
 function startAssistant() {
   killGhostIndicators();
   const wrap = document.createElement('div'); wrap.className = 'msg assistant';
   const body = document.createElement('div'); body.className = 'body';
   wrap.appendChild(body); $('messages').appendChild(wrap);
+  const progress = document.createElement('div'); progress.className = 'liveProgress';
+  progress.innerHTML = '<span class="liveProgressDot"></span><span class="liveProgressText">Starting · active now</span>';
+  body.appendChild(progress);
   const loading = document.createElement('div'); loading.className = 'loading'; loading.innerHTML = '<span></span><span></span><span></span>'; body.appendChild(loading);
   const textEl = document.createElement('div'); textEl.className = 'cursor mdBlock'; textEl._rawMdText = ''; body.appendChild(textEl);
-  live = { body, raw: '', copyText: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
+  live = { body, raw: '', copyText: '', textEl, loading, progress, progressText: progress.querySelector('.liveProgressText'), activityLabel: 'Starting', lastActivityAt: Date.now(), progressTimer: null };
+  live.progressTimer = setInterval(renderLiveProgress, 5000);
+  if (pendingLiveActivity) { const pending = pendingLiveActivity; pendingLiveActivity = null; setLiveActivity(pending.label, pending.at); }
+  running = true; refreshButton(); scrollBottom();
   liveMdCache = { cut: -1, html: '' };   // never reuse a previous turn's cached prefix
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
 // remove orphaned streaming indicators (blinking cursor / loading dots) left by a previous
 // turn or a reconnect — prevents stray ghost indicators lingering in the transcript.
-function killGhostIndicators() { $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); }
+function killGhostIndicators() { stopLiveProgress(); $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); $('messages').querySelectorAll('.liveProgress').forEach((e) => e.remove()); }
 const imgUrl = (p) => '/api/img?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
 // For arbitrary filesystem paths (e.g. tool Read on an image), use /api/raw which has no dir restriction
 const rawFileUrl = (p, download = false) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN) + (download ? '&dl=1' : '');
@@ -2811,6 +2850,7 @@ function beginTurn(text, images) { clearWaitingCard(); liveUser = addUser(text |
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
   if (o.type === 'sync') return onSync(o);
+  if (o.activityAt || o.activityLabel) setLiveActivity(o.activityLabel, o.activityAt);
   // cur.hadHistory MUST flip true once the real id is known: a brand-new chat opens with
   // hadHistory=false, renders the user bubble from turn_start, THEN learns its id here. If
   // the WS later reconnects mid-first-turn, onSync re-adds the user bubble (guarded only by
@@ -2899,7 +2939,11 @@ function onSync(o) {
       liveUser = addUser(o.curUser || '', o.curUserImages || []);
     }
     startAssistant();
+    setLiveActivity(o.activityLabel || 'Working', o.activityAt || Date.now());
     if (Array.isArray(o.curParts) && o.curParts.length) {
+      // Any persisted text/tool proves the turn has started. Drop the generic
+      // three-dot placeholder so reconnects show the real phase line instead.
+      clearLoading();
       // Rebuild the in-flight turn in its REAL order — interleaved tool chips and
       // SEPARATE text segments — mirroring the live text/tool handlers exactly, so a
       // mid-turn reconnect doesn't jam every message into one block.
@@ -2961,7 +3005,9 @@ function queueRender() {
   raf = setTimeout(() => { requestAnimationFrame(() => { raf = 0; renderLiveNow(); }); }, wait);
 }
 function finishTurn(o) {
+  pendingLiveActivity = null;
   if (live) {
+    stopLiveProgress(live);
     clearLoading(); live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
     if (o.canceled) { const s = document.createElement('div'); s.className = 'stoppedTag'; s.textContent = 'stopped'; live.body.appendChild(s); }
     const rawText = cleanCopyText(live.copyText || live.raw); const msgWrap = live.body.parentElement;
