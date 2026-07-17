@@ -23,6 +23,7 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
+import { recoverPersistedQueue } from './queue-state.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
@@ -3411,11 +3412,11 @@ function rt(extKey) {
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
       settings: normalizeSettings(p.settings || {}),
       context: p.context || null,
-      queue: p.queue || [], running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, canceled: false });
+      queue: recoverPersistedQueue(p), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, canceled: false });
   }
   return RT.get(key);
 }
-function persist(s) { try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, queue: s.queue })); } catch {} }
+function persist(s) { try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, queue: s.queue, inflight: s.inflight || null })); } catch {} }
 function activityLabelForEvent(o, previous = '') {
   if (!o || !o.type) return '';
   if (o.type === 'turn_start') return 'Starting';
@@ -3827,6 +3828,10 @@ async function runWorker(s) {
   while (s.queue.length) {
     const batch = s.queue.splice(0, s.queue.length);   // drain ALL currently queued
     const msg = combineQueued(batch);
+    // Removing a message from `queue` must not remove it from durable state. A deploy or
+    // crash can happen before Codex emits anything; retain the active turn separately so
+    // the replacement Box process puts it back at the front of the queue on startup.
+    s.inflight = msg;
     s.agent = msg.agent || s.agent || 'claude';
     if (msg.parentId) s.parentId = msg.parentId;
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
@@ -3843,6 +3848,7 @@ async function runWorker(s) {
       const text = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
       try { msg.onComplete({ text, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
     }
+    s.inflight = null;
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
@@ -3975,11 +3981,13 @@ function runCodexTurn(s, msg, resolve) {
     // incrementally below; this just clears the `live` flag — or writes it once for a
     // turn so short nothing flushed mid-stream.
     if (s.sessionId) {
+      const assistantParts = codexAssistantParts(s.curParts);
       flushCodexAssistant(s, { finalize: true });
       // A turn that errored out (e.g. model_not_found, rate limit) only ever bcast the error to the
       // live view — reopening the chat later showed silence. Persist a short note so the failure is
       // visible in history too.
       if (lastError && !s.canceled) appendCodexMessage(s.sessionId, 'assistant', `⚠️ Codex error: ${lastError}`);
+      else if (!s.canceled && !assistantParts.length) appendCodexMessage(s.sessionId, 'assistant', "⚠️ Codex exited without a response. Send again to retry.");
     } else if (s.provKey) {
       // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
       // entry already holds the user's message, so the chat stays in the list and is retryable in
@@ -4305,7 +4313,7 @@ function runMacTurn(s, msg, resolve) {
   for (const f of files) {
     try {
       const p = JSON.parse(readFileSync(join(QDIR, f), 'utf8'));
-      if (!(p.queue && p.queue.length)) continue;
+      if (!recoverPersistedQueue(p).length) continue;
       const key = p.sessionId || f.replace(/\.json$/, '');
       runWorker(rt(key));
     } catch {}
@@ -4444,7 +4452,15 @@ function summarizeToolInput(name, input) {
   return '';
 }
 
-function killAllProcs() { for (const s of RT.values()) { if (s.bashProc) { try { s.bashProc.kill("SIGKILL"); } catch {} } } try { rcEngine.closeAll(); } catch {} }
+function killAllProcs() {
+  for (const s of RT.values()) {
+    if (s.bashProc) { try { s.bashProc.kill('SIGKILL'); } catch {} }
+    // Codex/Gemini/Mac turns live in `proc`, not `bashProc`. Leaving these alive across
+    // a Box restart creates an orphan worker while the new server recovers the turn.
+    if (s.proc) { try { s.proc.kill('SIGKILL'); } catch {} }
+  }
+  try { rcEngine.closeAll(); } catch {}
+}
 process.on("exit", killAllProcs);
 for (const sig of ["SIGTERM","SIGINT"]) process.on(sig, () => { killAllProcs(); process.exit(0); });
 
