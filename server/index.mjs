@@ -23,6 +23,7 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
+import { codexRolloutHistory } from './codex-rollout-history.mjs';
 import { recoverPersistedQueue } from './queue-state.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
@@ -1959,7 +1960,11 @@ function claudeSessionHistory(id, file, before = null) {
 }
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
-  if (codex) return { messages: enrichCodexHistory(id, loadCodexMessages(id, codex).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+  if (codex) {
+    const rolloutMessages = codexRolloutHistory(findCodexRollout(CODEX_HOME, id));
+    const messages = rolloutMessages.length ? rolloutMessages : loadCodexMessages(id, codex);
+    return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+  }
   const gemini = (loadGemini().sessions || {})[id];
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const agy = (loadAgy().sessions || {})[id];
