@@ -71,6 +71,8 @@ if (args.includes('--version')) { console.log('codex-smoke-stub 1.0.0'); process
 if (args[0] !== 'exec') { console.error('codex smoke stub only supports exec'); process.exit(2); }
 const thread = '00000000-0000-4000-8000-' + String(process.pid).padStart(12, '0').slice(-12);
 console.log(JSON.stringify({ type: 'thread.started', thread_id: thread }));
+console.log(JSON.stringify({ type: 'item.started', item: { id: 'reasoning-1', type: 'reasoning' } }));
+console.log(JSON.stringify({ type: 'item.completed', item: { id: 'reasoning-1', type: 'reasoning' } }));
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: process.env.BOX_FAKE_CODEX_RESPONSE || 'BOX_SMOKE_OK' } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));
 `, 'utf8');
@@ -190,6 +192,9 @@ try {
     deadline,
   });
   if (!result.ok) throw new Error(result.error || 'smoke failed');
+  if (v['fake-codex'] && !result.activity.some((event) => event.label === 'Thinking')) {
+    throw new Error(`fake Codex reasoning did not refresh activity: ${JSON.stringify(result.activity)}`);
+  }
   console.log(JSON.stringify({
     ok: true,
     agent: AGENT,

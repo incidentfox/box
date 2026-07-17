@@ -38,6 +38,16 @@ function toolFromItem(item) {
 }
 const TOOL_ITEMS = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
 
+// Codex emits reasoning items while it is actively thinking, but they intentionally
+// contain no user-visible chain-of-thought. Preserve that privacy while still turning
+// the envelope into a heartbeat so Box does not claim the process has been idle.
+export function reasoningHeartbeat(o) {
+  const item = o && o.item;
+  if (!item || (item.type !== 'reasoning' && item.type !== 'reasoning_summary')) return null;
+  if (o.type !== 'item.started' && o.type !== 'item.completed') return null;
+  return { type: 'thinking', delta: '' };
+}
+
 // Build the `codex` argv for one turn. Pure (no spawn) so it's unit-testable.
 //
 // CRITICAL ordering rule: the variadic `-i, --image <FILE>...` option goes LAST, after the
@@ -131,6 +141,11 @@ export class CodexExecEngine {
       }
 
       const item = o.item;
+      const heartbeat = reasoningHeartbeat(o);
+      if (heartbeat) {
+        emit(heartbeat);
+        return;
+      }
 
       // A tool starts → open its chip immediately so progress is live, not retro.
       if (o.type === 'item.started' && item && TOOL_ITEMS.has(item.type)) {

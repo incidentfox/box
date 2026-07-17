@@ -4044,6 +4044,10 @@ function runCodexTurn(s, msg, resolve) {
         // (~tens per turn), so a crash never loses one.
         if (s.sessionId) { s.cxLastFlush = Date.now(); flushCodexAssistant(s); }
         bcast(s, { type: 'text', delta });
+      } else if (ev.type === 'thinking') {
+        // Reasoning content stays hidden; this is only a liveness heartbeat used by the
+        // activity clock so a healthy, quiet Codex turn does not look frozen.
+        bcast(s, { type: 'thinking', delta: '' });
       } else if (ev.type === 'context') {
         // The context event is our cue that a turn settled; read the LIVE occupancy from
         // the rollout (codexContext) rather than ev.info, which is the cumulative session
