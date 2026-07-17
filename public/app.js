@@ -2265,7 +2265,7 @@ async function openChat(s) {
   updateFavoriteButton();
   updateArchiveButton();
   renderContextMeter();
-  $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
+  $('messages').innerHTML = ''; live = null; liveUser = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
   setNewChatIntro(!s.id && !(s.carry && s.carry.length));
@@ -2392,6 +2392,7 @@ function buildHistElement(m) {
   const role = m.role === 'user' ? 'user' : 'assistant';
   const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
   if (m._idx != null) wrap.dataset.idx = String(m._idx);
+  if (m.live) wrap.dataset.historyLive = 'true';
   const body = document.createElement('div'); body.className = 'body';
   let rawText = '';
   for (const p of historyParts(m)) {
@@ -2756,6 +2757,7 @@ function renderQueue(items) {
 
 /* live turn rendering */
 let live = null;
+let liveUser = null;
 function startAssistant() {
   killGhostIndicators();
   const wrap = document.createElement('div'); wrap.className = 'msg assistant';
@@ -2802,8 +2804,9 @@ function addUser(text, images) {
   cpBtn.onclick = () => writeClipboardText(text || '', 'Copied!');
   acts.appendChild(cpBtn); wrap.appendChild(acts);
   $('messages').appendChild(wrap);
+  return wrap;
 }
-function beginTurn(text, images) { clearWaitingCard(); addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
+function beginTurn(text, images) { clearWaitingCard(); liveUser = addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
 
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
@@ -2871,16 +2874,30 @@ function onSync(o) {
     // Reopening/reloading a session whose latest turn is still in-flight would render
     // that turn TWICE: REST /history already drew the in-flight turn's assistant blocks
     // (they're flushed to the JSONL as the turn runs), and the live path below redraws
-    // the SAME turn from curParts. When history is present (cur.hadHistory), drop its
-    // copy of the in-flight assistant turn — every node after the last user bubble — so
-    // only the live rebuild remains. The user bubble itself stays (history owns it).
-    if (cur.hadHistory) {
-      const kids = [...$('messages').children];
-      let lastUser = -1;
-      kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
-      if (lastUser >= 0) for (let i = kids.length - 1; i > lastUser; i--) kids[i].remove();
+    // the SAME turn from curParts. The old cleanup deleted *everything* after the last
+    // rendered user bubble. On a reconnect race, the new turn can reach sync before its
+    // turn_start bubble; "last user" then belongs to the PREVIOUS turn, so its completed
+    // answer vanished until the chat was reopened. First prove that the last user bubble
+    // is this turn, then remove only the durable live row for Codex-like histories.
+    const kids = [...$('messages').children];
+    let lastUser = -1;
+    kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
+    const tail = lastUser >= 0 ? kids.slice(lastUser + 1) : kids;
+    const lastUserEl = lastUser >= 0 ? kids[lastUser] : null;
+    const sameText = !!lastUserEl && (lastUserEl.dataset.rawText || '') === (o.curUser || '');
+    // A freshly-rendered turn owns liveUser. After a reload, the current user is either
+    // the final history row (no output yet) or is followed by a persisted `live` reply.
+    const hasCurrentUser = sameText && (lastUserEl === liveUser || tail.length === 0 || tail.some((el) => el.dataset && el.dataset.historyLive === 'true'));
+    if (hasCurrentUser) {
+      const durableLiveHistory = ['codex', 'gemini', 'mac'].includes(o.agent || cur.agent);
+      for (const el of tail) {
+        if (!durableLiveHistory || (el.dataset && el.dataset.historyLive === 'true')) el.remove();
+      }
+    } else if (o.curUser || (o.curUserImages || []).length) {
+      // sync arrived before turn_start (or REST history had not persisted the user yet):
+      // append the actual current user after the intact previous answer.
+      liveUser = addUser(o.curUser || '', o.curUserImages || []);
     }
-    if (!cur.hadHistory && (o.curUser || (o.curUserImages || []).length) && !isRecentDupUser(o.curUser || '')) addUser(o.curUser, o.curUserImages);  // existing sessions already have it in history; skip if we just drew it
     startAssistant();
     if (Array.isArray(o.curParts) && o.curParts.length) {
       // Rebuild the in-flight turn in its REAL order — interleaved tool chips and
@@ -2960,7 +2977,7 @@ function finishTurn(o) {
       }
     }
   }
-  live = null; killGhostIndicators();
+  live = null; liveUser = null; killGhostIndicators();
   running = false; refreshButton();
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
   if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); setChatTitle(cur.title); }
