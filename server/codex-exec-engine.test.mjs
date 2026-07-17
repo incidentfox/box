@@ -2,7 +2,7 @@
 // before the positional prompt made codex's variadic `-i` swallow the prompt (and the session id
 // on resume), so an image message silently vanished. Run: node server/codex-exec-engine.test.mjs
 import assert from 'node:assert/strict';
-import { buildCodexArgs } from './codex-exec-engine.mjs';
+import { buildCodexArgs, reasoningHeartbeat } from './codex-exec-engine.mjs';
 
 // Helper: index of the LAST `-i` flag, and the positions of the positionals.
 const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
@@ -107,5 +107,11 @@ const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
     if (saved === undefined) delete process.env.CODEX_SANDBOX; else process.env.CODEX_SANDBOX = saved;
   }
 }
+
+// Reasoning stays private, but its start/completion envelopes keep the Box activity
+// clock fresh. Unrelated item events must not create false heartbeats.
+assert.deepEqual(reasoningHeartbeat({ type: 'item.started', item: { type: 'reasoning' } }), { type: 'thinking', delta: '' });
+assert.deepEqual(reasoningHeartbeat({ type: 'item.completed', item: { type: 'reasoning_summary' } }), { type: 'thinking', delta: '' });
+assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }), null);
 
 console.log('✅ codex-exec-engine.test.mjs passed');
