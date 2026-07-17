@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { spawn, execSync, execFile } from 'node:child_process';
 import {
   readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, unlinkSync,
-  openSync, readSync, closeSync, renameSync,
+  openSync, readSync, closeSync, renameSync, chmodSync,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
@@ -16,14 +16,21 @@ import { join, resolve, dirname, basename, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import multer from 'multer';
-import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases } from './rc-engine.mjs';
+import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd } from './rc-engine.mjs';
 import * as accounts from './accounts.mjs';
+import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
+import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
+import { renderMeetingContextForIssue } from './meeting-context.mjs';
+import { registerVoiceAssistant } from './voice-assistant.mjs';
+import { slackConfigured } from './slack-context.mjs';
+import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -32,6 +39,7 @@ const rcEngine = new RCEngine();
 const codexEngine = new CodexExecEngine();
 const geminiEngine = new GeminiExecEngine();
 const agyEngine = new AgyExecEngine();
+const macEngine = new MacExecEngine();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -58,6 +66,7 @@ function findSessionFile(id) {
   return null;
 }
 const STATE_DIR = join(HOME, '.cc-mobile');
+mkdirSync(STATE_DIR, { recursive: true });
 const NAMES_FILE = join(STATE_DIR, 'names.json');
 const UPLOAD_DIR = join(STATE_DIR, 'uploads');
 mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -73,6 +82,10 @@ mkdirSync(SESS_ATT_DIR, { recursive: true });
 const sessionAttFile = (sessionId) => join(SESS_ATT_DIR, `${String(sessionId).replace(/[^\w.-]/g, '_')}.md`);
 const sessionAttOff = (sessionId) => join(SESS_ATT_DIR, `${String(sessionId).replace(/[^\w.-]/g, '_')}.off`);
 
+const localFileResolver = () => createLocalFileResolver({ HOME, STATE_DIR, UPLOAD_DIR, defaultCwd: DEFAULT_CWD });
+const expandLocalPathToken = (raw, cwd = DEFAULT_CWD) => localFileResolver().expandLocalPathToken(raw, cwd);
+const resolveLocalFileReference = (raw, cwd = DEFAULT_CWD) => localFileResolver().resolveLocalFileReference(raw, cwd);
+
 // ---- config ---------------------------------------------------------------
 function loadEnvFile(path) {
   const out = {};
@@ -83,7 +96,7 @@ function loadEnvFile(path) {
   }
   return out;
 }
-const localEnv = loadEnvFile(join(ROOT, '.env'));
+const localEnv = process.env.BOX_IGNORE_LOCAL_ENV === '1' ? {} : loadEnvFile(join(ROOT, '.env'));
 // Optional: point EXTRA_ENV_FILE at a shared secrets file (e.g. one your harness
 // already maintains) to source keys from there instead of duplicating them in .env.
 const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FILE || '');
@@ -93,7 +106,181 @@ const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 const PORT = Number(cfg('PORT', 7321));
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
-const DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
+const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
+const APP_SETTINGS_FILE = join(STATE_DIR, 'app-settings.json');
+const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy', 'mac']);
+const VALID_CODEX_SANDBOX = new Set(['off', 'read-only', 'workspace-write']);
+const expandUserPath = (p) => {
+  const s = String(p || '').trim();
+  if (!s) return '';
+  return resolve(s === '~' ? HOME : s.startsWith('~/') ? join(HOME, s.slice(2)) : s);
+};
+function normalizeAppSettings(raw = {}) {
+  const out = {};
+  const defaultCwd = expandUserPath(raw.defaultCwd);
+  if (defaultCwd) out.defaultCwd = defaultCwd;
+  const agent = String(raw.defaultAgent || '').trim().toLowerCase();
+  if (VALID_APP_AGENTS.has(agent)) out.defaultAgent = agent;
+  const sandbox = String(raw.codexSandbox || '').trim().toLowerCase();
+  if (VALID_CODEX_SANDBOX.has(sandbox)) out.codexSandbox = sandbox;
+  return out;
+}
+function loadAppSettings() {
+  try { return normalizeAppSettings(JSON.parse(readFileSync(APP_SETTINGS_FILE, 'utf8'))); }
+  catch { return {}; }
+}
+let APP_SETTINGS = loadAppSettings();
+const appDefaultCwd = () => (APP_SETTINGS.defaultCwd && validateDirectory(APP_SETTINGS.defaultCwd)) ? APP_SETTINGS.defaultCwd : ENV_DEFAULT_CWD;
+const appDefaultAgent = () => APP_SETTINGS.defaultAgent || 'claude';
+const appCodexSandbox = () => APP_SETTINGS.codexSandbox || String(cfg('CODEX_SANDBOX') || 'off').trim().toLowerCase() || 'off';
+let DEFAULT_CWD = appDefaultCwd();
+const PROMPT_OVERRIDES_FILE = join(STATE_DIR, 'prompt-overrides.json');
+const PROMPT_TEMPLATES = {
+  'linear-delegation': {
+    title: 'Linear delegation',
+    desc: 'Seed prompt for a fresh agent dispatched from a Linear issue.',
+    vars: ['issueId', 'issueTitle', 'issueContext', 'branchSlug', 'agentBranch'],
+    default: `Work the Linear issue {{issueId}}: "{{issueTitle}}".
+
+Everything the Box app already knows about this ticket is below: title, state, priority, assignee, labels, dates, links, description, attachments, meeting-source artifacts/transcript if this came from a meeting, every non-delegation comment, and agents that already touched it. Read it before re-deriving anything. Do not re-fetch the Linear ticket unless you need fresh data beyond this snapshot.
+
+{{issueContext}}
+
+How to work it:
+- Do not edit a shared clone. Create an isolated git worktree for your branch off the latest default branch. Use a unique branch name for this ticket, for example:
+  git worktree add ../{{branchSlug}} -b {{agentBranch}}/{{branchSlug}} && cd ../{{branchSlug}}
+- Implement and verify the change, open or refresh the PR, and post the PR link as a comment on {{issueId}}.
+- When done, set {{issueId}} to In Review, or comment your status and blockers.`,
+  },
+  'linear-resume': {
+    title: 'Linear resume',
+    desc: 'Prompt sent when resuming an existing session from a Linear issue.',
+    vars: ['issueId', 'issueTitle', 'issueContext', 'branchSlug', 'agentBranch'],
+    default: `Continue working on {{issueId}}: "{{issueTitle}}".
+
+You worked on this earlier — pick up where you left off. The full CURRENT ticket context (description, meeting-source artifacts/transcript if this came from a meeting, every comment, and who else touched it) is included below so you don't need to re-fetch the Linear ticket:
+
+{{issueContext}}
+
+How to continue:
+- If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
+  git worktree add ../{{branchSlug}} -b {{agentBranch}}/{{branchSlug}} && cd ../{{branchSlug}}
+- Finish the work, open/refresh the PR, and post the PR link + a status comment on {{issueId}}.`,
+  },
+  'fork-thread': {
+    title: 'Fork thread',
+    desc: 'Seed prompt for a child agent thread forked from a parent chat.',
+    vars: ['parentTitle', 'parentId', 'workspace', 'transcript'],
+    default: `You are a forked child agent thread created in the Box mobile app.
+
+Parent thread: {{parentTitle}}
+Parent id: {{parentId}}
+Workspace: {{workspace}}
+
+Use the transcript below as prior context for this child branch. Treat this as a separate branch: do not assume future parent-thread messages are visible here, and do not write back to the parent. Do not run commands or edit files in this seed turn.
+
+Parent transcript:
+{{transcript}}
+
+For this seed turn, briefly acknowledge that the fork is ready and mention the parent thread title. Wait for the next user instruction.`,
+  },
+  'switch-agent': {
+    title: 'Switch agent',
+    desc: 'Seed prompt when continuing a chat in another agent.',
+    vars: ['targetAgent', 'sourceAgent', 'sourceTitle', 'sourceId', 'workspace', 'transcript'],
+    default: `You are continuing a Box mobile conversation in {{targetAgent}} after switching from {{sourceAgent}}.
+
+Source thread: {{sourceTitle}}
+Source id: {{sourceId}}
+Workspace: {{workspace}}
+
+Use the transcript below as prior context. Continue as the same working conversation, but do not assume future messages in the source thread are visible here unless they are pasted later.
+
+Source transcript:
+{{transcript}}
+
+For this first turn, briefly acknowledge that {{targetAgent}} has the prior context and is ready to continue. Do not run commands or edit files until the next user instruction.`,
+  },
+  'review-current': {
+    title: 'Review command',
+    desc: 'Prompt inserted by the built-in /review command.',
+    vars: [],
+    default: 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.',
+  },
+  'attention-status': {
+    title: 'Morning brief status',
+    desc: 'Server-side prompt used to update per-session Needs input / In progress / Done briefs.',
+    vars: ['ownerName', 'existingDocBlock', 'imageSection', 'recentTurns', 'imageRule', 'doneImageHint'],
+    default: `You are maintaining a morning-briefing status doc for {{ownerName}} so {{ownerName}} can orient after being away, without reading the full chat.
+
+{{existingDocBlock}}{{imageSection}}RECENT CONVERSATION (last 20 turns — use this to update the doc):
+{{recentTurns}}
+
+Output ONLY the updated markdown — no preamble, no commentary. Rules:
+- KEEP existing "Needs your input" items unless the new conversation clearly resolves them
+- REMOVE or move to "Done recently" any item explicitly completed in the new turns
+- ADD new blocking items or decisions discovered in the new turns
+- If the new turns are just idle checks / heartbeats with no new information, output the existing doc mostly unchanged
+- Omit a section only if it genuinely has nothing to say
+{{imageRule}}
+
+## Needs your input
+For each open decision or question blocking progress, write:
+
+**[Topic label]**
+- *Question:* Exactly what needs to be decided or answered — specific, not vague
+- *Context:* 1–2 sentences: what's already done, what's at stake, what options exist if relevant
+- *Why now:* why it's blocking (skip if obvious)
+
+## In progress
+- [item] — [what specifically is happening and current state]
+
+## Done recently
+- [item] — [what was completed and its outcome]{{doneImageHint}}
+
+Be specific enough that {{ownerName}} can act or reply without reading the chat. List all sub-questions under a topic, not just the topic label.`,
+  },
+};
+function loadPromptOverrides() {
+  try {
+    const o = JSON.parse(readFileSync(PROMPT_OVERRIDES_FILE, 'utf8'));
+    return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+  } catch { return {}; }
+}
+let PROMPT_OVERRIDES = loadPromptOverrides();
+function promptTemplateList() {
+  return Object.entries(PROMPT_TEMPLATES).map(([id, tpl]) => ({
+    id,
+    title: tpl.title,
+    desc: tpl.desc,
+    vars: tpl.vars,
+    default: tpl.default,
+    value: typeof PROMPT_OVERRIDES[id] === 'string' ? PROMPT_OVERRIDES[id] : tpl.default,
+    overridden: typeof PROMPT_OVERRIDES[id] === 'string',
+  }));
+}
+function renderTemplate(id, vars = {}) {
+  const tpl = PROMPT_TEMPLATES[id];
+  const raw = (tpl && typeof PROMPT_OVERRIDES[id] === 'string') ? PROMPT_OVERRIDES[id] : (tpl && tpl.default) || '';
+  return raw.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => String(vars[key] ?? ''));
+}
+const HOOK_SPECS = [
+  { id: 'inject-time', title: 'Inject current time', file: 'inject-time.sh', event: 'UserPromptSubmit' },
+  { id: 'surface-attention', title: 'Surface needs-you items', file: 'surface-attention.sh', event: 'SessionStart' },
+  { id: 'surface-slack', title: 'Surface recent Slack context', file: 'surface-slack.sh', event: 'SessionStart' },
+  { id: 'skip-automated', title: 'Skip automated sessions helper', file: '_skip-automated.sh', event: 'helper' },
+];
+const hookSpec = (id) => HOOK_SPECS.find((h) => h.id === id || h.file === id);
+const defaultHookPath = (spec) => join(ROOT, 'harness', 'hooks', spec.file);
+const liveHookPath = (spec) => join(HOME, '.claude', 'hooks', spec.file);
+function hookPayload(spec) {
+  const live = liveHookPath(spec);
+  const fallback = defaultHookPath(spec);
+  const path = existsSync(live) ? live : fallback;
+  let content = ''; try { content = readFileSync(path, 'utf8'); } catch {}
+  let defaultContent = ''; try { defaultContent = readFileSync(fallback, 'utf8'); } catch {}
+  return { id: spec.id, title: spec.title, file: spec.file, event: spec.event, path, livePath: live, defaultPath: fallback, source: existsSync(live) ? 'live' : 'repo-default', content, defaultContent, overridden: existsSync(live) && content !== defaultContent };
+}
 const STT_MODELS = cfg('STT_MODEL', 'scribe_v2,scribe_v1').split(',');
 // Voice (speech-to-text) is OPTIONAL. ElevenLabs Scribe is the zero-friction pick;
 // Deepgram nova-3 is the higher-quality batch transcriber. Leave both unset to disable voice.
@@ -178,7 +365,7 @@ function childEnv() {
 
 // ---- helpers: names store -------------------------------------------------
 const loadNames = () => { try { return JSON.parse(readFileSync(NAMES_FILE, 'utf8')); } catch { return {}; } };
-const saveNames = (n) => writeFileSync(NAMES_FILE, JSON.stringify(n, null, 2));
+const saveNames = (n) => { writeFileSync(NAMES_FILE, JSON.stringify(n, null, 2)); invalidateSessionLists(); };
 
 // ---- helpers: sessions ----------------------------------------------------
 function readRcRegistry() {
@@ -225,8 +412,7 @@ function reconcileLiveBridges() {
   // so an actively used session is never reaped.
   let archived; try { archived = loadArchived(); } catch { archived = new Set(); }
   let reaped = 0;
-  let out = '';
-  try { out = execSync(`pgrep -af -- '--remote-control' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
+  const out = pgrepFull('--remote-control');
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
     const sp = line.indexOf(' ');
@@ -247,8 +433,7 @@ function reconcileLiveBridges() {
       continue;
     }
     const rcm = cmd.match(/--remote-control\s+(\S+)/);
-    let cwd = '';
-    try { cwd = execSync(`readlink /proc/${pid}/cwd 2>/dev/null || true`, { encoding: 'utf8', timeout: 1000 }).trim(); } catch {}
+    const cwd = pidCwd(pid);
     next.set(sessionId, { rcName: rcm ? rcm[1] : null, cwd: cwd || DEFAULT_CWD, pid });
   }
   LIVE_BRIDGES.clear();
@@ -289,7 +474,7 @@ function killSessionBridge(id) {
   // same); the registry row is already gone, so nothing relaunches it.
   const pids = [];
   try {
-    const out = execSync(`pgrep -af ${JSON.stringify(id)} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 });
+    const out = pgrepFull(id);
     for (const line of out.split('\n')) {
       if (!line.trim() || !/--remote-control(\s|$)/.test(line)) continue;
       const pid = parseInt(line, 10);
@@ -307,6 +492,29 @@ function killSessionBridge(id) {
   }
   LIVE_BRIDGES.delete(id);
   return { killed: pids.length };
+}
+
+function restoreSessionBridge(id) {
+  if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { started: false, reason: 'bad-id' };
+  try {
+    if ((loadCodex().sessions || {})[id]) return { started: false, reason: 'codex-on-demand' };
+  } catch {}
+  const file = findSessionFile(id);
+  if (!file) return { started: false, reason: 'history-not-found' };
+  try {
+    const s = rt(id);
+    s.sessionId = id;
+    s.agent = s.agent || 'claude';
+    s.cwd = s.cwd || decodeCwd(dirname(file)) || DEFAULT_CWD;
+    persist(s);
+    const rec = rcEngine.open(id, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    if (rec && rec.blocked) return { started: false, reason: rec.reason || 'blocked' };
+    ensureTail(s);
+    LIVE_BRIDGES.set(id, { rcName: rcName(s), cwd: s.cwd, pid: rec && rec.pid ? rec.pid : null });
+    return { started: true };
+  } catch (e) {
+    return { started: false, reason: String((e && e.message) || e).slice(-160) };
+  }
 }
 
 // Dream-cycle / meta sessions all open with the SAME boilerplate prompt, so the
@@ -328,6 +536,27 @@ function metaSubject(t) {
 }
 
 // Pull a human title from a session's jsonl: first real user text message.
+// mtime+size-keyed caches for the per-file reads listSessions does on every rebuild.
+// The feed scan tail-reads 130 files and head/tail-reads ~40 more; almost none change
+// between rebuilds (the 5s list cache is invalidated constantly by RUNNING/archive/
+// favorite churn), so without these every rebuild re-read ~7MB and blocked the event
+// loop 150-250ms — stalling every request AND every open chat's WebSocket stream.
+const FILE_READ_CACHES = [];
+function cachedFileRead(cache, file, compute) {
+  let st;
+  try { st = statSync(file); } catch { return compute(); }
+  const hit = cache.get(file);
+  if (hit && hit.m === st.mtimeMs && hit.s === st.size) return hit.v;
+  const v = compute();
+  if (cache.size > 8000) cache.clear();
+  cache.set(file, { m: st.mtimeMs, s: st.size, v });
+  return v;
+}
+function makeFileReadCache(fn) {
+  const cache = new Map();
+  FILE_READ_CACHES.push(cache);
+  return (file, ...rest) => cachedFileRead(cache, file, () => fn(file, ...rest));
+}
 function sessionTitle(file) {
   try {
     const lines = readFileSync(file, 'utf8').split('\n');
@@ -356,7 +585,8 @@ function sessionTitle(file) {
 // tail; we also scan the head (ai-title is written at line 1, and to catch an early
 // rename that wasn't re-appended). Reading/writing this keeps Box, pickup, the picker
 // and the mobile app all showing ONE name. See writeCustomTitle()/the rename route.
-function titleMeta(file) {
+const titleMeta = makeFileReadCache(titleMetaRead);
+function titleMetaRead(file) {
   let custom = '', ai = '';
   const scan = (buf) => {
     for (const line of buf.split('\n')) {
@@ -425,7 +655,8 @@ function stampTitleWhenReady(sessionId, title, tries = 24) {
 }
 
 // last meaningful message in a session (read only the tail for speed)
-function sessionPreview(file) {
+const sessionPreview = makeFileReadCache(sessionPreviewRead);
+function sessionPreviewRead(file) {
   try {
     const st = statSync(file); const len = Math.min(st.size, 48 * 1024); const start = st.size - len;
     const fd = openSync(file, 'r'); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, start); closeSync(fd);
@@ -454,7 +685,8 @@ function sessionPreview(file) {
 // the feed by file mtime therefore floats days-old sessions to the top with a near-now
 // time — exactly the "archived chats suddenly reappear as just-now" bug. lastTs reads
 // the real conversation clock instead, so an idle heartbeat can't fake recency.
-function tailInfo(file) {
+const tailInfo = makeFileReadCache(tailInfoRead);
+function tailInfoRead(file) {
   try {
     const st = statSync(file); const len = Math.min(st.size, 48 * 1024); const start = st.size - len;
     const fd = openSync(file, 'r'); const buf = Buffer.alloc(len); readSync(fd, buf, 0, len, start); closeSync(fd);
@@ -483,6 +715,8 @@ function tailInfo(file) {
 }
 // session ids with a currently-running worker turn (set maintained by runWorker)
 const RUNNING = new Set();
+function addRunning(id) { if (id && !RUNNING.has(id)) { RUNNING.add(id); invalidateSessionLists(); } }
+function deleteRunning(id) { if (id && RUNNING.delete(id)) invalidateSessionLists(); }
 
 // Atomic JSON write: write a temp file then rename over the target, so a concurrent reader
 // always sees either the old or the new COMPLETE file — never a half-written (torn) one.
@@ -499,10 +733,13 @@ const ARCH_FILE = join(STATE_DIR, 'archived.json');
 // `pickup` CLI and any older box build keep reading it. Archive *timestamps* live in a
 // separate sidecar so the Archived view can sort most-recently-archived first.
 const loadArchived = () => { try { return new Set(JSON.parse(readFileSync(ARCH_FILE, 'utf8'))); } catch { return new Set(); } };
-const saveArchived = (set) => writeJsonAtomic(ARCH_FILE, [...set]);
+const saveArchived = (set) => { writeJsonAtomic(ARCH_FILE, [...set]); invalidateSessionLists(); };
 const ARCH_AT_FILE = join(STATE_DIR, 'archived-at.json');   // { sessionId: archivedAtMs } — additive sidecar
 const loadArchivedAt = () => { try { const o = JSON.parse(readFileSync(ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
-const saveArchivedAt = (m) => writeJsonAtomic(ARCH_AT_FILE, m);
+const saveArchivedAt = (m) => { writeJsonAtomic(ARCH_AT_FILE, m); invalidateSessionLists(); };
+const FAVORITES_FILE = join(STATE_DIR, 'favorites.json');
+const loadFavorites = () => { try { return new Set(JSON.parse(readFileSync(FAVORITES_FILE, 'utf8'))); } catch { return new Set(); } };
+const saveFavorites = (set) => { writeJsonAtomic(FAVORITES_FILE, [...set]); invalidateSessionLists(); };
 // Resuming an archived chat brings it back to life: when the user sends a new message we
 // un-archive it so it rejoins the active feed AND the reconcile reaper (which tears down
 // bridges for archived sessions, see reconcileLiveBridges) leaves its freshly-spawned bridge
@@ -543,15 +780,273 @@ function parseSessiongrep(out) {
   }
   return results;
 }
+const SESSION_SEARCH_STOP = new Set([
+  'a', 'an', 'and', 'are', 'about', 'all', 'can', 'chat', 'chats', 'find', 'for', 'from', 'i',
+  'im', 'in', 'it', 'like', 'looking', 'me', 'my', 'of', 'on', 'or', 'past', 'session', 'sessions',
+  'stuff', 'talk', 'talking', 'that', 'the', 'this', 'to', 'was', 'were', 'with', 'you',
+]);
+const SESSION_SEARCH_EXPANSIONS = [
+  {
+    terms: ['visa', 'immigration', 'rfe', 'uscis', 'h1b', 'h-1b', 'o1', 'o-1', 'opt', 'lawyer', 'attorney'],
+    queries: [
+      'immigration visa RFE USCIS O-1 H-1B OPT',
+      'Request for Evidence petition attorney lawyer immigration',
+      'status change visa petition denial USCIS',
+    ],
+  },
+  {
+    terms: ['linear', 'ticket', 'issue', 'needs-jimmy', 'inc'],
+    queries: ['Linear issue ticket INC needs-jimmy', 'work queue in progress Linear'],
+  },
+  {
+    terms: ['email', 'gmail', 'inbox', 'mail'],
+    queries: ['email Gmail inbox message thread', 'AgentMail sent received email'],
+  },
+  {
+    terms: ['meeting', 'call', 'transcript', 'recording'],
+    queries: ['meeting transcript recording Circleback Deepgram', 'call notes action items'],
+  },
+];
+function sessionSearchTokens(q) {
+  return String(q || '').toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)?/g) || [];
+}
+function addSearchQuery(list, seen, query, kind = 'query') {
+  const clean = String(query || '').replace(/\s+/g, ' ').trim();
+  if (clean.length < 2) return;
+  const key = clean.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  list.push({ query: clean, kind });
+}
+function buildSessionSearchQueries(q) {
+  const tokens = sessionSearchTokens(q);
+  const tok = new Set(tokens);
+  const queries = []; const seen = new Set();
+  addSearchQuery(queries, seen, q, 'exact');
+  const meaningful = tokens.filter((t) => !SESSION_SEARCH_STOP.has(t));
+  if (meaningful.length) addSearchQuery(queries, seen, meaningful.join(' '), 'keywords');
+  for (const intent of SESSION_SEARCH_EXPANSIONS) {
+    if (!intent.terms.some((t) => tok.has(t))) continue;
+    const intentTerms = meaningful.filter((t) => intent.terms.includes(t));
+    if (intentTerms.length && intentTerms.length !== meaningful.length) addSearchQuery(queries, seen, intentTerms.join(' '), 'intent');
+    for (const query of intent.queries) addSearchQuery(queries, seen, query, 'expanded');
+  }
+  return queries.slice(0, 8);
+}
+function runSessiongrepSearch(query, limit = 40) {
+  return new Promise((resolve) => {
+    execFile(SESSIONGREP_BIN, ['search', query, '--limit', String(limit)], { timeout: 9000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      if (err && !stdout) return resolve({ error: 'search unavailable', results: [] });
+      resolve({ results: parseSessiongrep(stdout) });
+    });
+  });
+}
+function usableSearchText(s) {
+  const text = sgStrip(s).replace(/https?:\/\/\S+/g, '[link]').replace(/\bX-Amz-[A-Za-z]+=\S+/g, '').replace(/\s+/g, ' ').trim();
+  if (!text || text === '[link]') return '';
+  if (!/[a-z0-9]{3}/i.test(text)) return '';
+  if (text.length > 60 && /[?&]X-Amz-|%2Faws4_request|X-Amz-Signature/i.test(text)) return '';
+  return text;
+}
+function sessionSearchPreview(r) {
+  return usableSearchText(r.snippet) || usableSearchText(r.preview);
+}
+function sessionSearchRank(r, variant, queryTokens) {
+  const hay = `${r.title} ${r.cwd} ${r.preview} ${r.snippet}`.toLowerCase();
+  let overlap = 0;
+  for (const t of queryTokens) if (t.length > 2 && hay.includes(t)) overlap += 1;
+  const kindBoost = ({ exact: 24, keywords: 32, intent: 46, expanded: 38 })[variant.kind] || 0;
+  const fieldBoost = r.match === 'title' ? 18 : r.match === 'cwd' ? 8 : 0;
+  return (Number(r.score) || 0) + kindBoost + fieldBoost + (overlap * 12);
+}
+const JSON_FILE_CACHE = new Map();
+function loadJsonCached(file, fallback) {
+  let st = null;
+  try { st = statSync(file); } catch { return fallback(); }
+  const cached = JSON_FILE_CACHE.get(file);
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.value;
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8'));
+    JSON_FILE_CACHE.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+    return value;
+  } catch {
+    return fallback();
+  }
+}
+function rememberJsonCache(file, value) {
+  try {
+    const st = statSync(file);
+    JSON_FILE_CACHE.set(file, { mtimeMs: st.mtimeMs, size: st.size, value });
+  } catch {
+    JSON_FILE_CACHE.set(file, { mtimeMs: 0, size: 0, value });
+  }
+}
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
-const loadCodex = () => { try { return JSON.parse(readFileSync(CODEX_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveCodex = (state) => writeJsonAtomic(CODEX_FILE, state);
+const loadCodex = () => loadJsonCached(CODEX_FILE, () => ({ sessions: {} }));
+const saveCodex = (state) => { writeJsonAtomic(CODEX_FILE, state); rememberJsonCache(CODEX_FILE, state); invalidateSessionLists(); };
+// Codex transcripts live in per-session sidecar files, NOT inline in codex-sessions.json.
+// Inline transcripts grew that file to ~90MB, and saveCodex() re-stringified + rewrote ALL
+// of it on EVERY message append / streaming flush — ~1s of event-loop blockage that froze
+// every request and every open chat's WebSocket stream. The sidecar makes a codex message
+// write O(one session) instead of O(all sessions ever).
+const CODEX_MSG_DIR = join(STATE_DIR, 'codex-messages');
+const CODEX_MSG_LIMIT = 160;
+const codexMsgFile = (id) => join(CODEX_MSG_DIR, String(id).replace(/[^\w.-]/g, '_') + '.json');
+// `session` lets a legacy inline `messages` array (written by an old build) win until
+// the next save migrates it out.
+function loadCodexMessages(id, session = null) {
+  if (session && Array.isArray(session.messages) && session.messages.length) return session.messages;
+  if (!id) return [];
+  const v = loadJsonCached(codexMsgFile(id), () => []);
+  return Array.isArray(v) ? v : [];
+}
+function saveCodexMessages(id, msgs) {
+  if (!id) return;
+  try { mkdirSync(CODEX_MSG_DIR, { recursive: true }); } catch {}
+  const f = codexMsgFile(id);
+  const v = (msgs || []).slice(-CODEX_MSG_LIMIT);
+  writeJsonAtomic(f, v);
+  rememberJsonCache(f, v);
+}
+// One-time boot migration: split any inline transcripts out to sidecars and shrink the
+// main state file to metadata only. Runs before the server accepts connections.
+(function splitInlineCodexMessages() {
+  try {
+    const state = loadCodex();
+    const sessions = state.sessions || {};
+    const inline = Object.keys(sessions).filter((k) => Array.isArray(sessions[k] && sessions[k].messages) && sessions[k].messages.length);
+    if (!inline.length) return;
+    for (const k of inline) saveCodexMessages(k, sessions[k].messages);
+    for (const k of Object.keys(sessions)) { if (sessions[k]) delete sessions[k].messages; }
+    saveCodex(state);
+    console.log(`[codex] split ${inline.length} inline transcripts into ${CODEX_MSG_DIR}`);
+  } catch (e) { console.error('[codex] transcript split failed:', e); }
+})();
 const GEMINI_FILE = join(STATE_DIR, 'gemini-sessions.json');
-const loadGemini = () => { try { return JSON.parse(readFileSync(GEMINI_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveGemini = (state) => writeJsonAtomic(GEMINI_FILE, state);
+const loadGemini = () => loadJsonCached(GEMINI_FILE, () => ({ sessions: {} }));
+const saveGemini = (state) => { writeJsonAtomic(GEMINI_FILE, state); rememberJsonCache(GEMINI_FILE, state); invalidateSessionLists(); };
 const AGY_FILE = join(STATE_DIR, 'agy-sessions.json');
-const loadAgy = () => { try { return JSON.parse(readFileSync(AGY_FILE, 'utf8')); } catch { return { sessions: {} }; } };
-const saveAgy = (state) => writeJsonAtomic(AGY_FILE, state);
+const loadAgy = () => loadJsonCached(AGY_FILE, () => ({ sessions: {} }));
+const saveAgy = (state) => { writeJsonAtomic(AGY_FILE, state); rememberJsonCache(AGY_FILE, state); invalidateSessionLists(); };
+// Mac "Computer Use" sessions run codex on the user's Mac (via cu-bridge) — same on-disk
+// transcript shape as Codex/Gemini so the list + reopen "just work".
+const MAC_FILE = join(STATE_DIR, 'mac-sessions.json');
+const loadMac = () => loadJsonCached(MAC_FILE, () => ({ sessions: {} }));
+const saveMac = (state) => { writeJsonAtomic(MAC_FILE, state); rememberJsonCache(MAC_FILE, state); invalidateSessionLists(); };
+function codexMessageText(m) {
+  if (!m) return '';
+  const out = [];
+  const push = (v) => { if (typeof v === 'string' && v.trim()) out.push(v); };
+  push(m.text);
+  if (typeof m.content === 'string') push(m.content);
+  else if (Array.isArray(m.content)) {
+    for (const p of m.content) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') push(p.text);
+    }
+  }
+  if (Array.isArray(m.parts)) {
+    for (const p of m.parts) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.t === 'text' || p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') push(p.text);
+    }
+  }
+  return out.join('\n').trim();
+}
+function codexMessageTs(m) {
+  return m && (m.ts || m.timestamp || m.createdAt || m.created || null);
+}
+function codexUserMessagesFromSession(session) {
+  const messages = [];
+  for (const m of loadCodexMessages(session && session.id, session)) {
+    if (!m || m.role !== 'user') continue;
+    const text = codexMessageText(m);
+    if (!text) continue;
+    messages.push({ text, ts: codexMessageTs(m) });
+  }
+  return messages;
+}
+function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
+  const safeTitle = title || 'conversation';
+  const header = `# ${safeTitle}\n\nExported ${messages.length} messages\n\n`;
+  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
+  const body = messages.map((m) => {
+    const role = m.role === 'user' ? '**You**' : `**${assistantName}**`;
+    const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
+    const tools = (m.parts || []).filter((p) => p.t === 'tool').map((p) => `\`[${p.name}]\``).join(' ');
+    return `${role}\n\n${text || ''}${tools ? (text ? '\n\n' : '') + tools : ''}`.trim();
+  }).filter((s) => s.length > 10).join('\n\n---\n\n');
+  return header + body;
+}
+const SESSION_STORES = [
+  { agent: 'codex', load: loadCodex, save: saveCodex },
+  { agent: 'gemini', load: loadGemini, save: saveGemini },
+  { agent: 'agy', load: loadAgy, save: saveAgy },
+  { agent: 'mac', load: loadMac, save: saveMac },
+];
+function storedSession(id) {
+  for (const spec of SESSION_STORES) {
+    const state = spec.load();
+    const rec = state.sessions && state.sessions[id];
+    if (rec) return { ...spec, state, rec };
+  }
+  return null;
+}
+function fullSessionHistory(id) {
+  const stored = storedSession(id);
+  if (stored) {
+    const rec = stored.rec;
+    return {
+      id,
+      title: rec.title || `${agentDisplayName(stored.agent)} chat`,
+      cwd: rec.cwd || DEFAULT_CWD,
+      agent: stored.agent,
+      settings: normalizeSettings(rec.settings || {}),
+      parentId: rec.parentId || null,
+      parentTitle: rec.parentTitle || '',
+      context: stored.agent === 'codex' ? contextForSession(id, { agent: 'codex', codex: rec }) : normalizeContext(rec.context || { agent: stored.agent }),
+      messages: rec.messages || [],
+      mutable: true,
+    };
+  }
+  const file = findSessionFile(id);
+  if (!file) return { id, title: id.slice(0, 8), cwd: DEFAULT_CWD, agent: 'claude', settings: normalizeSettings({}), messages: [], mutable: false };
+  const MAX = 50 * 1024 * 1024;
+  const { size } = statSync(file);
+  let raw;
+  if (size <= MAX) raw = readFileSync(file, 'utf8');
+  else {
+    const buf = Buffer.allocUnsafe(MAX);
+    const fd = openSync(file, 'r'); readSync(fd, buf, 0, MAX, size - MAX); closeSync(fd);
+    const s = buf.toString('utf8'); const nl = s.indexOf('\n'); raw = nl >= 0 ? s.slice(nl + 1) : s;
+  }
+  return {
+    id,
+    title: sessionTitle(file) || id.slice(0, 8),
+    cwd: decodeCwd(dirname(file)),
+    agent: 'claude',
+    settings: normalizeSettings({}),
+    context: contextForSession(id, { agent: 'claude', file }),
+    messages: parseJsonlMessages(raw),
+    mutable: false,
+  };
+}
+function codexSessionMentionCount(session, issueId) {
+  let n = 0;
+  for (const m of loadCodexMessages(session && session.id, session)) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    const txt = codexMessageText(m);
+    if (!txt) continue;
+    n += (txt.match(new RegExp(issueId, 'g')) || []).length;
+  }
+  return n;
+}
+function codexSessionMtime(session) {
+  const v = session && (session.lastUsed || session.updatedAt || session.created);
+  if (typeof v === 'number') return v;
+  const t = Date.parse(v || '');
+  return Number.isFinite(t) ? t : 0;
+}
 // Delegation ledger: INC-id (e.g. "INC-917") -> array of delegation records, oldest→newest.
 // The LAST entry is the current/primary delegation (the session the user delegated to most
 // recently); the history is kept so a re-delegated ticket still shows every owner.
@@ -560,26 +1055,55 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: appCodexSandbox() },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
+  mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'opus', effort: 'xhigh' },
+};
+const refreshRuntimeDefaults = () => {
+  DEFAULT_CWD = appDefaultCwd();
+  DEFAULT_SETTINGS.codex.sandbox = appCodexSandbox();
 };
 function normalizeSettings(settings = {}) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
+    mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
+}
+function appSettingsPayload() {
+  return {
+    defaultCwd: DEFAULT_CWD,
+    envDefaultCwd: ENV_DEFAULT_CWD,
+    defaultAgent: appDefaultAgent(),
+    codexSandbox: appCodexSandbox(),
+    settingsFile: APP_SETTINGS_FILE,
+  };
+}
+function validateDirectory(dir) {
+  try {
+    const st = statSync(dir);
+    return st.isDirectory();
+  } catch {
+    return false;
+  }
 }
 const DEFAULT_CONTEXT_WINDOWS = {
   codex: 258400,
   claude: 1000000,
+  gemini: 1000000,   // Gemini 2.5 / 3.x all expose a ~1M-token context window
+  mac: 258400,       // Computer Use = codex on the Mac
 };
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
-  if (agent === 'codex') return DEFAULT_CONTEXT_WINDOWS.codex;
+  if (agent === 'codex' || agent === 'mac') {
+    if (!m || m.startsWith('gpt-5.6')) return 1050000;
+    return DEFAULT_CONTEXT_WINDOWS.codex;
+  }
+  if (agent === 'gemini') return DEFAULT_CONTEXT_WINDOWS.gemini;
   if (!m) return DEFAULT_CONTEXT_WINDOWS.claude;
   if (m.includes('opus-4-8') || m.includes('opus')) return 1000000;
   return 200000;
@@ -676,7 +1200,6 @@ function ensureCodexSession(id, attrs = {}) {
     created: prev.created || attrs.created || now,
     lastUsed: attrs.lastUsed || now,
     preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
-    messages: attrs.messages || prev.messages || [],
     settings: normalizeSettings(attrs.settings || prev.settings || {}),
     parentId: attrs.parentId || prev.parentId || null,
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
@@ -688,7 +1211,7 @@ function ensureCodexSession(id, attrs = {}) {
 function updateCodexContext(id, info, precomputed = null) {
   if (!id || (!info && !precomputed)) return null;
   const state = loadCodex();
-  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, messages: [] };
+  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD };
   // Prefer the rollout-derived live context (precomputed) over the streamed turn.completed
   // usage, which is cumulative and would inflate the meter (the "999%" bug).
   prev.context = precomputed || contextFromCodexInfo(info, prev.context || {});
@@ -701,15 +1224,116 @@ function appendCodexMessage(id, role, text, extra = {}) {
   if (!id || (!text && !extra.parts)) return;
   const state = loadCodex();
   const now = Date.now();
-  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, created: now };
   const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
-  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  saveCodexMessages(id, [...loadCodexMessages(id, prev), { role, parts, ts: extra.ts || now }]);
+  delete prev.messages;
   const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
   if (role === 'user' && (!prev.title || prev.title === 'Codex chat')) prev.title = plain.slice(0, 80) || 'Codex chat';
   if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
   prev.lastUsed = now;
   state.sessions[id] = prev;
   saveCodex(state);
+}
+const codexAttachmentIsImage = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
+function codexUserParts(text, attachments = []) {
+  const parts = [];
+  if (text) parts.push({ t: 'text', text: String(text) });
+  for (const p of attachments || []) {
+    if (!p) continue;
+    parts.push({ t: codexAttachmentIsImage(p) ? 'image' : 'file', path: String(p) });
+  }
+  return parts.length ? parts : [{ t: 'text', text: '' }];
+}
+function codexRolloutUserAttachments(id) {
+  const file = findCodexRollout(CODEX_HOME, id);
+  if (!file) return [];
+  const out = [];
+  try {
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o; try { o = JSON.parse(line); } catch { continue; }
+      const p = o && o.type === 'event_msg' ? o.payload : null;
+      if (!p || p.type !== 'user_message') continue;
+      const attachments = [...(p.local_images || []), ...(p.local_files || [])].filter(Boolean);
+      if (attachments.length) out.push({ text: String(p.message || '').trim(), attachments });
+    }
+  } catch {}
+  return out;
+}
+function enrichCodexUserAttachments(id, messages) {
+  const rows = codexRolloutUserAttachments(id);
+  if (!rows.length) return messages || [];
+  let idx = 0;
+  return (messages || []).map((m) => {
+    if (!m || m.role !== 'user' || (m.parts || []).some((p) => p.t === 'image' || p.t === 'file')) return m;
+    const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text || '').join('\n').trim();
+    const hitAt = rows.findIndex((r, i) => i >= idx && (!r.text || r.text === text));
+    if (hitAt < 0) return m;
+    idx = hitAt + 1;
+    return { ...m, parts: [...(m.parts || []), ...codexUserParts('', rows[hitAt].attachments)] };
+  });
+}
+function codexRolloutToolResults(id) {
+  const file = findCodexRollout(CODEX_HOME, id);
+  if (!file) return [];
+  const calls = new Map(), results = [];
+  try {
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o; try { o = JSON.parse(line); } catch { continue; }
+      const p = o && o.type === 'response_item' ? o.payload : null;
+      if (!p) continue;
+      if (p.type === 'function_call') {
+        let args = {};
+        try { args = JSON.parse(p.arguments || '{}'); } catch {}
+        calls.set(p.call_id, { name: p.name || '', args });
+      } else if (p.type === 'function_call_output' && p.call_id) {
+        const c = calls.get(p.call_id);
+        if (!c) continue;
+        if (c.name === 'exec_command' && c.args && c.args.cmd) {
+          results.push({ kind: 'Bash', command: String(c.args.cmd), output: String(p.output || '').slice(0, 6000) });
+        }
+      }
+    }
+  } catch {}
+  return results;
+}
+function enrichCodexToolResults(id, messages) {
+  const rows = codexRolloutToolResults(id);
+  if (!rows.length) return messages || [];
+  const byCommand = new Map();
+  const remaining = rows.map((r) => r.output);
+  const index = (key, output) => {
+    if (!key) return;
+    const arr = byCommand.get(key) || [];
+    arr.push(output);
+    byCommand.set(key, arr);
+  };
+  for (const r of rows) {
+    index(r.command, r.output);
+    index(String(r.command || '').replace(/\s+/g, ' ').slice(0, 120), r.output);
+  }
+  return (messages || []).map((m) => {
+    if (!m || m.role !== 'assistant') return m;
+    let changed = false;
+    const parts = (m.parts || []).map((p) => {
+      if (!p || p.t !== 'tool' || p.result || p.name !== 'Bash') return p;
+      const command = String((p.detail && p.detail.command) || p.input || '');
+      const arr = byCommand.get(command);
+      const result = arr && arr.length ? arr.shift() : remaining.shift();
+      if (!result) return p;
+      changed = true;
+      return { ...p, detail: p.detail || { command }, result };
+    });
+    return changed ? { ...m, parts } : m;
+  });
+}
+function enrichCodexHistory(id, messages, { attachments = false, toolResults = false } = {}) {
+  let out = messages || [];
+  if (attachments) out = enrichCodexUserAttachments(id, out);
+  if (toolResults) out = enrichCodexToolResults(id, out);
+  return out;
 }
 // codex hands errors back in several shapes (a plain string, or a JSON envelope like
 // {error:{message}} / {message}). Pull out the human-readable bit before we persist it as a note,
@@ -730,26 +1354,38 @@ function migrateCodexSession(fromId, toId) {
   const prev = state.sessions[fromId];
   if (!prev) return null;
   const dest = state.sessions[toId] || {};
+  // transcripts live in sidecar files: carry the provisional entry's messages onto the
+  // real thread id unless the destination already has its own
+  const destMsgs = loadCodexMessages(toId, dest);
+  if (!destMsgs.length) saveCodexMessages(toId, loadCodexMessages(fromId, prev));
+  try { unlinkSync(codexMsgFile(fromId)); } catch {}
   state.sessions[toId] = {
     ...prev, ...dest,
     id: toId,
     title: (dest.title && dest.title !== 'Codex chat') ? dest.title : (prev.title || dest.title || 'Codex chat'),
-    messages: (dest.messages && dest.messages.length) ? dest.messages : (prev.messages || []),
     preview: dest.preview || prev.preview || '',
     created: prev.created || dest.created || Date.now(),
   };
+  delete state.sessions[toId].messages;
   delete state.sessions[fromId];
   saveCodex(state);
+  try {
+    const fav = loadFavorites();
+    if (fav.has(fromId)) {
+      fav.delete(fromId);
+      fav.add(toId);
+      saveFavorites(fav);
+    }
+  } catch {}
   return state.sessions[toId];
 }
 
-// Build the stripped {text|tool} parts a history reload renders, from the live turn's
-// curParts (heavy tool results/detail dropped — history only shows the chip label).
+// Build the ordered parts a history reload renders from the live turn's curParts.
 function codexAssistantParts(curParts) {
   return (curParts || [])
     .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool'))
     .map((p) => (p.t === 'tool'
-      ? { t: 'tool', id: p.id, name: p.name, input: p.input }
+      ? { t: 'tool', id: p.id, name: p.name, input: compactString(p.input || '', 240), detail: compactToolDetail(p.name, p.detail || null, p.input), result: p.result ? compactString(p.result, HIST_TOOL_RESULT_LIMIT) : p.result }
       : { t: 'text', text: p.text }));
 }
 // Persist the in-flight Codex assistant turn AS IT STREAMS, not only at finish(). Codex
@@ -767,13 +1403,14 @@ function flushCodexAssistant(s, { finalize = false } = {}) {
   const state = loadCodex();
   const prev = state.sessions[s.sessionId];
   if (!prev) return;
-  const msgs = prev.messages ? [...prev.messages] : [];
+  const msgs = [...loadCodexMessages(s.sessionId, prev)];
   const last = msgs[msgs.length - 1];
-  const row = { role: 'assistant', parts, turnId: s.cxTurnId };
+  const row = { role: 'assistant', parts, turnId: s.cxTurnId, ts: (last && last.live && last.turnId === s.cxTurnId && last.ts) || Date.now() };
   if (!finalize) row.live = true;
   if (last && last.role === 'assistant' && last.live && last.turnId === s.cxTurnId) msgs[msgs.length - 1] = row;
   else msgs.push(row);
-  prev.messages = msgs.slice(-160);
+  saveCodexMessages(s.sessionId, msgs);
+  delete prev.messages;
   const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
   if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
   prev.lastUsed = Date.now();
@@ -799,6 +1436,7 @@ function ensureGeminiSession(id, attrs = {}) {
     settings: normalizeSettings(attrs.settings || prev.settings || {}),
     parentId: attrs.parentId || prev.parentId || null,
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context != null ? attrs.context : (prev.context || null),
   };
   saveGemini(state);
   return state.sessions[id];
@@ -817,6 +1455,43 @@ function appendGeminiMessage(id, role, text, extra = {}) {
   prev.updatedAt = now;
   state.sessions[id] = prev;
   saveGemini(state);
+}
+// Persist the in-flight Gemini assistant turn AS IT STREAMS (same crash-safety as Codex's
+// flushCodexAssistant): upsert ONE "live" assistant row keyed by the turn id, carrying the
+// ordered {text|tool} parts so a reload renders tools too; finalize drops the live flag.
+let GEMINI_TURN_SEQ = 0;
+function flushGeminiAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadGemini();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.gmTurnId, ts: (last && last.live && last.turnId === s.gmTurnId && last.ts) || Date.now() };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.live && last.turnId === s.gmTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  prev.updatedAt = Date.now();
+  state.sessions[s.sessionId] = prev;
+  saveGemini(state);
+}
+// Live context occupancy from the CLI's per-turn `result` stats (input_tokens = the last
+// request's input, the figure the meter wants). Persist it so a reload keeps the meter.
+function updateGeminiContext(id, info) {
+  const used = (info && Number(info.input_tokens)) || 0;
+  const ctx = normalizeContext({ agent: 'gemini', model: (info && info.model) || '', usedTokens: used, source: used ? 'reported' : 'estimated' });
+  if (id) {
+    const state = loadGemini();
+    const prev = state.sessions[id];
+    if (prev) { prev.context = ctx; prev.lastUsed = Date.now(); state.sessions[id] = prev; saveGemini(state); }
+  }
+  return ctx;
 }
 function ensureAgySession(id, attrs = {}) {
   if (!id) return null;
@@ -855,6 +1530,68 @@ function appendAgyMessage(id, role, text, extra = {}) {
   prev.updatedAt = now;
   state.sessions[id] = prev;
   saveAgy(state);
+}
+// ---- Mac "Computer Use" session store (mirrors Gemini: streamed {text|tool} transcript) ----
+function ensureMacSession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadMac();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  const established = prev.title && prev.title !== 'Computer Use chat' ? prev.title : '';
+  state.sessions[id] = {
+    id,
+    agent: 'mac',
+    title: established || attrs.title || prev.title || 'Computer Use chat',
+    cwd: attrs.cwd || prev.cwd || DEFAULT_CWD,
+    created: prev.created || attrs.created || now,
+    lastUsed: attrs.lastUsed || now,
+    updatedAt: attrs.updatedAt || now,
+    preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
+    messages: attrs.messages || prev.messages || [],
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context != null ? attrs.context : (prev.context || null),
+  };
+  saveMac(state);
+  return state.sessions[id];
+}
+function appendMacMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadMac();
+  const now = Date.now();
+  const prev = state.sessions[id] || { id, agent: 'mac', title: 'Computer Use chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'Computer Use chat')) prev.title = plain.slice(0, 80) || 'Computer Use chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = now;
+  prev.updatedAt = now;
+  state.sessions[id] = prev;
+  saveMac(state);
+}
+let MAC_TURN_SEQ = 0;
+function flushMacAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadMac();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.macTurnId, ts: (last && last.live && last.turnId === s.macTurnId && last.ts) || Date.now() };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.live && last.turnId === s.macTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  prev.updatedAt = Date.now();
+  state.sessions[s.sessionId] = prev;
+  saveMac(state);
 }
 
 // META: the real skill / slash-command list as reported by claude's init event
@@ -926,10 +1663,12 @@ function autoSubcat(id, file) {
   return 'other-auto';
 }
 
+let CODEX_LIVE_CACHE = { ts: 0, ids: new Set() };
 function liveCodexSessionIds(sessions) {
+  const now = Date.now();
+  if (now - CODEX_LIVE_CACHE.ts < 2500) return new Set(CODEX_LIVE_CACHE.ids);
   const ids = new Set();
-  let procText = '';
-  try { procText = execSync(`pgrep -af 'codex exec' 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 }); } catch {}
+  const procText = pgrepFull('codex exec');
   for (const s of sessions || []) {
     if (!s || !s.id) continue;
     if (procText.includes(s.id)) { ids.add(s.id); continue; }
@@ -937,6 +1676,7 @@ function liveCodexSessionIds(sessions) {
       try { if (existsSync(s.dtachSock)) ids.add(s.id); } catch {}
     }
   }
+  CODEX_LIVE_CACHE = { ts: now, ids: new Set(ids) };
   return ids;
 }
 
@@ -945,6 +1685,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const names = loadNames();
   const archived = loadArchived();
   const archivedAt = loadArchivedAt();
+  const favorites = loadFavorites();
   const files = [];
   const seenIds = new Set();
   for (const dir of eachProjectDir()) {
@@ -978,8 +1719,13 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     title: s.title || 'Antigravity chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
   }));
+  const macSessions = Object.values(loadMac().sessions || {}).map((s) => ({
+    id: s.id, agent: 'mac', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'Computer Use chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
+    parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+  }));
   files.sort((a, b) => b.mtime - a.mtime);
-  const items = files.concat(codexSessions, geminiSessions, agySessions).sort((a, b) => b.mtime - a.mtime);
+  const items = files.concat(codexSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
   const codexLiveIds = liveCodexSessionIds(codexSessions);
@@ -1004,11 +1750,12 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // counts over ALL sessions. Auto sessions are tallied only under `auto` (and
   // `archived` if archived) so they never inflate All/Working/Needs input/Live.
   // autoSub breaks the auto total into subcategories for the Automated sub-tabs.
-  const counts = { all: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, auto: 0 };
+  const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
+    if (favorites.has(f.id)) counts.favorites++;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
   saveAutoCat();
@@ -1017,6 +1764,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const [fbase, fsub] = String(filter || 'all').split(':');
   let cand;
   if (filter === 'archived') cand = items.filter((f) => archived.has(f.id));
+  else if (filter === 'favorites') cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && favorites.has(f.id));
   else if (fbase === 'auto') cand = items.filter((f) => !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
   else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && statusOf(f.id) === filter);
   else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
@@ -1046,21 +1794,32 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       preview: s.preview || (scan.get(s.id) && scan.get(s.id).preview) || (s.file ? sessionPreview(s.file) : ''),
       parentId: s.parentId || null, parentTitle: s.parentTitle || '',
       live: !!r || !!lb || cxLive, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
+      favorite: favorites.has(s.id),
       status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : 'main',
       subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
       hasAttention,
-      context: contextForSession(s.id, { agent: s.agent || 'claude', file: s.file, codex: s.agent === 'codex' ? s : null }),
     };
   });
   // Archived view sorts most-recently-archived first (so a chat you JUST archived is
   // right at the top), falling back to last-activity for legacy archives with no
   // recorded archive time. Every other view keeps live-pinned-then-recent order.
   if (filter === 'archived') out.sort((a, b) => (b.archivedAt - a.archivedAt) || (b.mtime - a.mtime));
-  else out.sort((a, b) => (b.pinned - a.pinned) || (b.mtime - a.mtime));
+  else out.sort((a, b) => (b.favorite - a.favorite) || (b.pinned - a.pinned) || (b.mtime - a.mtime));
   counts.autoSub = autoSub;
   return { sessions: out, counts };
+}
+const SESSION_LIST_CACHE = new Map();
+function invalidateSessionLists() { try { SESSION_LIST_CACHE.clear(); } catch {} }
+function cachedListSessions(filter) {
+  const key = String(filter || 'all');
+  const now = Date.now();
+  const cached = SESSION_LIST_CACHE.get(key);
+  if (cached && now - cached.ts < 5000) return cached.value;
+  const value = listSessions({ filter: key });
+  SESSION_LIST_CACHE.set(key, { ts: now, value });
+  return value;
 }
 // project dir name "-home-user-code" -> "/home/user/code"
 function decodeCwd(dir) {
@@ -1071,8 +1830,74 @@ function decodeCwd(dir) {
 
 const HIST_MSG_LIMIT = 400;
 const HIST_TAIL_BYTES = 6 * 1024 * 1024; // read last 6MB for large files
+const HIST_TOOL_RESULT_LIMIT = 1200;
+const HIST_TOOL_INPUT_LIMIT = 2200;
+const HISTORY_CACHE_LIMIT = 48;
+const HISTORY_CACHE = new Map();
+function getHistoryCache(key) {
+  const hit = HISTORY_CACHE.get(key);
+  if (!hit) return null;
+  HISTORY_CACHE.delete(key);
+  HISTORY_CACHE.set(key, hit);
+  return { ...hit, messages: hit.messages || [] };
+}
+function setHistoryCache(key, value) {
+  HISTORY_CACHE.set(key, { ...value, messages: value.messages || [] });
+  while (HISTORY_CACHE.size > HISTORY_CACHE_LIMIT) HISTORY_CACHE.delete(HISTORY_CACHE.keys().next().value);
+  return value;
+}
+function compactString(s, limit) {
+  s = String(s == null ? '' : s);
+  if (s.length <= limit) return s;
+  return s.slice(0, limit) + `\n\n[truncated ${s.length - limit} chars]`;
+}
+function compactToolDetail(name, detail, fallbackInput) {
+  if (!detail || typeof detail !== 'object') return fallbackInput || '';
+  if (name === 'Bash') {
+    const out = {};
+    if (detail.command) out.command = compactString(detail.command, HIST_TOOL_INPUT_LIMIT);
+    if (detail.description) out.description = compactString(detail.description, 240);
+    if (detail.timeout_ms) out.timeout_ms = detail.timeout_ms;
+    return out;
+  }
+  if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(name)) {
+    const out = {};
+    for (const k of ['file_path', 'notebook_path', 'old_string', 'new_string', 'content']) {
+      if (detail[k] != null) out[k] = compactString(detail[k], k.endsWith('path') ? 500 : HIST_TOOL_INPUT_LIMIT);
+    }
+    return out;
+  }
+  if (['Grep', 'Glob'].includes(name)) {
+    const out = {};
+    for (const k of ['pattern', 'path', 'glob', 'type']) if (detail[k] != null) out[k] = compactString(detail[k], 500);
+    return out;
+  }
+  const raw = JSON.stringify(detail);
+  return raw.length <= HIST_TOOL_INPUT_LIMIT ? detail : { summary: compactString(raw, HIST_TOOL_INPUT_LIMIT) };
+}
+function compactHistoryMessages(messages) {
+  return (messages || []).map((m) => ({
+    ...m,
+    parts: (m.parts || []).map((p) => {
+      if (!p || p.t !== 'tool') return p;
+      const detail = compactToolDetail(p.name, p.detail || null, p.input);
+      return {
+        ...p,
+        input: compactString(p.input || summarizeToolInput(p.name, detail), 240),
+        detail,
+        result: p.result ? compactString(p.result, HIST_TOOL_RESULT_LIMIT) : p.result,
+      };
+    }),
+  }));
+}
 function parseJsonlMessages(raw) {
   const messages = [];
+  const pendingTools = new Map();
+  const toolResultText = (content) => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.map((x) => (x && x.type === 'text' ? x.text : '')).join('');
+    return content == null ? '' : String(content);
+  };
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let o; try { o = JSON.parse(line); } catch { continue; }
@@ -1084,8 +1909,14 @@ function parseJsonlMessages(raw) {
       else if (Array.isArray(c)) {
         for (const b of c) {
           if (b.type === 'text' && b.text) parts.push({ t: 'text', text: b.text });
-          else if (b.type === 'tool_use') parts.push({ t: 'tool', name: b.name, input: b.input });
-          else if (b.type === 'tool_result' || b.type === 'thinking') { /* skip */ }
+          else if (b.type === 'tool_use') {
+            const part = { t: 'tool', id: b.id, name: b.name, input: summarizeToolInput(b.name, b.input), detail: b.input };
+            parts.push(part);
+            if (b.id) pendingTools.set(b.id, part);
+          } else if (b.type === 'tool_result') {
+            const part = b.tool_use_id ? pendingTools.get(b.tool_use_id) : null;
+            if (part) part.result = toolResultText(b.content).slice(0, 6000);
+          } else if (b.type === 'thinking') { /* skip */ }
         }
       }
       const isToolResultOnly = Array.isArray(c) && c.every((b) => b.type === 'tool_result');
@@ -1115,18 +1946,28 @@ function readJsonlChunk(file, endOffset) {
   const nl = raw.indexOf('\n');
   return { raw: start > 0 && nl >= 0 ? raw.slice(nl + 1) : raw, startOffset: start };
 }
+function claudeSessionHistory(id, file, before = null) {
+  const st = statSync(file);
+  const end = before != null ? Math.min(before, st.size) : st.size;
+  const key = `${id}:${end}:${st.size}:${st.mtimeMs}`;
+  const cached = getHistoryCache(key);
+  if (cached) return cached;
+  const { raw, startOffset } = readJsonlChunk(file, end);
+  const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
+  return setHistoryCache(key, { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) });
+}
 function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
-  if (codex) return { messages: (codex.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+  if (codex) return { messages: enrichCodexHistory(id, loadCodexMessages(id, codex).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
   const gemini = (loadGemini().sessions || {})[id];
-  if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext({ agent: 'gemini' }) };
+  if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const agy = (loadAgy().sessions || {})[id];
   if (agy) return { messages: (agy.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: agy.cwd || DEFAULT_CWD, agent: 'agy', settings: normalizeSettings(agy.settings || {}), parentId: agy.parentId || null, parentTitle: agy.parentTitle || '', context: normalizeContext({ agent: 'agy' }) };
+  const mac = (loadMac().sessions || {})[id];
+  if (mac) return { messages: enrichCodexHistory(id, (mac.messages || []).slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: mac.cwd || DEFAULT_CWD, agent: 'mac', settings: normalizeSettings(mac.settings || {}), parentId: mac.parentId || null, parentTitle: mac.parentTitle || '', context: normalizeContext(mac.context || { agent: 'mac' }) };
   const file = findSessionFile(id);
   if (!file) return { messages: [], hasMore: false, cursor: 0, cwd: DEFAULT_CWD, context: normalizeContext({ agent: 'claude' }) };
-  const { raw, startOffset } = readJsonlChunk(file, before);
-  const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
-  return { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) };
+  return claudeSessionHistory(id, file, before);
 }
 
 // ---- helpers: available skills/commands for the "/" picker ----------------
@@ -1197,6 +2038,27 @@ function scanCodexCommands() {
 // ---- app ------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+// gzip JSON API responses. The phone pulls 100s-of-KB feed/history payloads over
+// cellular and neither Caddy (bare reverse_proxy) nor Express compresses by default;
+// JSON shrinks 5-10x. Only bodies >2KB, only when the client advertises gzip.
+app.use('/api', (req, res, next) => {
+  const orig = res.json.bind(res);
+  res.json = (body) => {
+    let str;
+    try { str = JSON.stringify(body); } catch { return orig(body); }
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    if (str && str.length > 2048 && /\bgzip\b/i.test(String(req.headers['accept-encoding'] || ''))) {
+      try {
+        const buf = gzipSync(Buffer.from(str), { level: 5 });
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Vary', 'Accept-Encoding');
+        return res.send(buf);
+      } catch {}
+    }
+    return res.send(str);
+  };
+  next();
+});
 const authOk = (req) => {
   const h = req.headers.authorization || '';
   const bearer = h.startsWith('Bearer ') ? h.slice(7) : null;
@@ -1207,60 +2069,115 @@ const requireAuth = (req, res, next) => (authOk(req) ? next() : res.status(401).
 app.post('/api/login', (req, res) =>
   (req.body && req.body.token) === AUTH_TOKEN ? res.json({ ok: true }) : res.status(401).json({ error: 'bad token' }));
 
-app.get('/api/sessions', requireAuth, (req, res) => { const r = listSessions({ filter: req.query.filter || 'all' }); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD }); });
+app.get('/api/sessions', requireAuth, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD, defaultAgent: appDefaultAgent() }); });
+app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const on = !(body.archived === false);
+  const preserve = new Set(Array.isArray(body.preserveIds) ? body.preserveIds.map(String) : []);
+  const explicitIds = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : null;
+  const filter = String(body.filter || 'all');
+  const fullList = listSessions({ filter, limit: 10000 }).sessions;
+  const sessionById = new Map(fullList.map((s) => [s.id, s]));
+  const candidates = explicitIds || fullList.map((s) => s.id);
+  const set = loadArchived(); const at = loadArchivedAt(); const now = Date.now();
+  let changed = 0, killed = 0;
+  for (const raw of candidates) {
+    const id = String(raw || '').trim();
+    if (!id || preserve.has(id)) continue;
+    const s = sessionById.get(id);
+    if (body.preserveActive && s && (s.live || s.status === 'working' || s.status === 'needs_input' || s.status === 'live')) continue;
+    if (body.preserveLive && s && s.live) continue;
+    if (body.preserveFavorites && s && s.favorite) continue;
+    const had = set.has(id);
+    if (on) { if (!had) { set.add(id); at[id] = now; changed++; } }
+    else { if (had) { set.delete(id); delete at[id]; changed++; } }
+    if (on) { try { killed += killSessionBridge(id).killed || 0; } catch {} }
+  }
+  saveArchived(set); saveArchivedAt(at);
+  res.json({ ok: true, archived: on, changed, killed });
+});
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const set = loadArchived(); const at = loadArchivedAt();
   const id = req.params.id; const on = !(req.body && req.body.archived === false);
   if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
   saveArchived(set); saveArchivedAt(at);
   // Archiving = done with it → kill its remote-control bridge so it stops consuming a
-  // claude process + heartbeating. Opening the card later just respawns the bridge.
+  // claude process + heartbeating. Unarchiving explicitly warms a fresh bridge below.
   let killed = 0;
   if (on) { try { killed = killSessionBridge(id).killed; } catch {} }
-  res.json({ ok: true, archived: on, killed });
+  const restored = on ? null : restoreSessionBridge(id);
+  res.json({ ok: true, archived: on, killed, restored });
+});
+app.post('/api/sessions/:id/favorite', requireAuth, (req, res) => {
+  const set = loadFavorites();
+  const id = req.params.id;
+  const on = !(req.body && req.body.favorite === false);
+  if (on) set.add(id); else set.delete(id);
+  saveFavorites(set);
+  res.json({ ok: true, favorite: on });
 });
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
-app.get('/api/session-search', requireAuth, (req, res) => {
+// Natural-language queries are expanded into a few targeted searches, then merged and reranked.
+app.get('/api/session-search', requireAuth, async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (q.length < 2) return res.json({ results: [] });
-  execFile(SESSIONGREP_BIN, ['search', q, '--limit', '40'], { timeout: 9000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-    if (err && !stdout) return res.json({ results: [], error: 'search unavailable' });
+  const exclude = new Set(String(req.query.exclude || '').split(',').map((s) => s.trim()).filter(Boolean));
+  const variants = buildSessionSearchQueries(q);
+  const queryTokens = sessionSearchTokens(q).filter((t) => !SESSION_SEARCH_STOP.has(t));
+  const searches = await Promise.all(variants.map(async (variant) => ({ variant, ...(await runSessiongrepSearch(variant.query, 45)) })));
+  if (searches.every((s) => s.error && !s.results.length)) return res.json({ results: [], error: 'search unavailable' });
+  try {
     const codexIds = new Set(Object.values(loadCodex().sessions || {}).map((s) => s.id));
     const archived = loadArchived();
-    const seen = new Set(); const results = [];
-    for (const r of parseSessiongrep(stdout)) {
-      if (r.provider !== 'claude' && r.provider !== 'codex') continue;   // box can only open these
-      if (seen.has(r.id)) continue;
-      const openable = r.provider === 'codex' ? codexIds.has(r.id) : !!findSessionFile(r.id);
-      if (!openable) continue;                                           // skip laptop-only / unindexed hits
-      seen.add(r.id);
-      results.push({
-        id: r.id, agent: r.provider,
-        title: r.title || r.snippet || r.preview || 'session',
-        cwd: r.cwd, preview: r.snippet || r.preview, age: r.age,
-        match: r.match, archived: archived.has(r.id),
-      });
-      if (results.length >= 30) break;
+    const byId = new Map();
+    for (const search of searches) {
+      for (const r of search.results) {
+        if (r.provider !== 'claude' && r.provider !== 'codex') continue;   // box can only open these
+        if (exclude.has(r.id) || exclude.has(`${r.provider}:${r.id}`)) continue;
+        const openable = r.provider === 'codex' ? codexIds.has(r.id) : !!findSessionFile(r.id);
+        if (!openable) continue;                                           // skip laptop-only / unindexed hits
+        const rank = sessionSearchRank(r, search.variant, queryTokens);
+        const prev = byId.get(r.id);
+        if (!prev || rank > prev.rank) byId.set(r.id, { ...r, rank, matchedQuery: search.variant.query, matchKind: search.variant.kind });
+      }
     }
-    res.json({ results });
-  });
+    const results = [...byId.values()].sort((a, b) => (b.rank - a.rank) || (b.score - a.score)).slice(0, 30).map((r) => ({
+      id: r.id, agent: r.provider,
+      title: r.title || r.snippet || r.preview || 'session',
+      cwd: r.cwd, preview: sessionSearchPreview(r), age: r.age,
+      match: r.match, matchedQuery: r.matchedQuery, matchKind: r.matchKind,
+      archived: archived.has(r.id),
+    }));
+    res.json({ results, searched: variants.map((v) => v.query) });
+  } catch (e) {
+    res.status(500).json({ results: [], error: String(e.message || e) });
+  }
 });
 app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
   const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
-  res.json(sessionHistory(req.params.id, { before }));
+  const h = sessionHistory(req.params.id, { before });
+  h.messages = compactHistoryMessages(h.messages || []);
+  h.archived = loadArchived().has(req.params.id);
+  h.favorite = loadFavorites().has(req.params.id);
+  res.json(h);
+});
+app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
+  try {
+    const h = fullSessionHistory(req.params.id);
+    let messages = h.messages || [];
+    if (req.query.through != null) {
+      const idx = Math.max(-1, Math.min(messages.length - 1, parseInt(req.query.through, 10)));
+      messages = idx >= 0 ? messages.slice(0, idx + 1) : [];
+    }
+    res.json({ ...h, messages: compactHistoryMessages(messages), archived: loadArchived().has(req.params.id), favorite: loadFavorites().has(req.params.id) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  const stored = (loadCodex().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id];
-  if (stored) {
-    const messages = [];
-    for (const m of (stored.messages || [])) {
-      if (!m || m.role !== 'user') continue;
-      const text = (m.parts || []).map((p) => (p && p.t === 'text' ? p.text || '' : '')).join('\n').trim();
-      if (text) messages.push({ text, ts: m.ts || null });
-    }
-    return res.json({ messages });
-  }
+  const stored = (loadCodex().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
+  if (stored) return res.json({ messages: codexUserMessagesFromSession(stored) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
   const messages = [];
@@ -1287,23 +2204,30 @@ app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
 });
 // Export full conversation as markdown (up to 50MB of JSONL)
 app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
-  const stored = sessionHistory(req.params.id);
-  if (stored && (stored.agent === 'codex' || stored.agent === 'gemini' || stored.agent === 'agy')) {
-    try {
-      const title = (loadCodex().sessions || {})[req.params.id]?.title || (loadGemini().sessions || {})[req.params.id]?.title || (loadAgy().sessions || {})[req.params.id]?.title || req.params.id.slice(0, 8);
-      const roleLabel = stored.agent === 'codex' ? 'Codex' : stored.agent === 'agy' ? 'Antigravity' : 'Gemini';
-      const header = `# ${title}\n\nExported ${(stored.messages || []).length} messages\n\n`;
-      const body = (stored.messages || []).map((m) => {
-        const role = m.role === 'user' ? '**You**' : `**${roleLabel}**`;
-        const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
-        const tools = (m.parts || []).filter((p) => p.t === 'tool').map((p) => `\`[${p.name}]\``).join(' ');
-        return `${role}\n\n${text || ''}${tools ? (text ? '\n\n' : '') + tools : ''}`.trim();
-      }).filter((s) => s.length > 10).join('\n\n---\n\n');
-      const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
-      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
-      return res.send(header + body);
-    } catch (e) { return res.status(500).json({ error: String(e.message || e) }); }
+  const codex = (loadCodex().sessions || {})[req.params.id];
+  if (codex) {
+    const title = codex.title || 'Codex chat';
+    const messages = enrichCodexHistory(req.params.id, loadCodexMessages(req.params.id, codex), { attachments: true, toolResults: true });
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'codex', messages }));
+  }
+  const gemini = (loadGemini().sessions || {})[req.params.id];
+  if (gemini) {
+    const title = gemini.title || 'Gemini chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'gemini', messages: gemini.messages || [] }));
+  }
+  const agy = (loadAgy().sessions || {})[req.params.id];
+  if (agy) {
+    const title = agy.title || 'Antigravity chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'agy', messages: agy.messages || [] }));
   }
   const file = findSessionFile(req.params.id);
   if (!file) return res.status(404).end();
@@ -1320,17 +2244,10 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
     }
     const messages = parseJsonlMessages(raw);
     const title = sessionTitle(file) || req.params.id.slice(0, 8);
-    const header = `# ${title}\n\nExported ${messages.length} messages\n\n`;
-    const body = messages.map((m) => {
-      const role = m.role === 'user' ? '**You**' : '**Claude**';
-      const text = m.parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
-      const tools = m.parts.filter((p) => p.t === 'tool').map((p) => `\`[${p.name}]\``).join(' ');
-      return `${role}\n\n${text || ''}${tools ? (text ? '\n\n' : '') + tools : ''}`.trim();
-    }).filter((s) => s.length > 10).join('\n\n---\n\n');
     const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
-    res.send(header + body);
+    res.send(conversationMarkdown({ title, agent: 'claude', messages }));
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 // Per-session attention file: ~/.factory/session-attention/<sessionId>.md (auto-updated after turns)
@@ -1354,9 +2271,11 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   const isCodex = !!(loadCodex().sessions || {})[id];
   const isGemini = !!(loadGemini().sessions || {})[id];
   const isAgy = !!(loadAgy().sessions || {})[id];
+  const isMac = !!(loadMac().sessions || {})[id];
   let wrote = false;
   if (isGemini) { ensureGeminiSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
   else if (isAgy) { ensureAgySession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
+  else if (isMac) { ensureMacSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
   else wrote = isCodex ? false : writeCustomTitle(id, name);
   const names = loadNames();
   if (wrote) { if (names[id] != null) { delete names[id]; saveNames(names); } } // drop legacy shadow
@@ -1364,7 +2283,7 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   res.json({ ok: true, synced: wrote });
 });
 app.get('/api/commands', requireAuth, (req, res) => res.json({
-  commands: req.query.agent === 'codex' ? scanCodexCommands() : (req.query.agent === 'gemini' || req.query.agent === 'agy') ? [] : scanCommands(),
+  commands: req.query.agent === 'codex' ? scanCodexCommands() : (req.query.agent === 'gemini' || req.query.agent === 'agy' || req.query.agent === 'mac') ? [] : scanCommands(),
 }));
 
 // ---- Accounts: pool/switch Claude accounts via an external account broker -----
@@ -1384,6 +2303,16 @@ app.post('/api/accounts/remove', ...acctRoute((req) => accounts.removeAccount((r
 app.post('/api/accounts/primary', ...acctRoute((req) => accounts.setPrimary((req.body || {}).id)));
 app.post('/api/accounts/cooldown', ...acctRoute((req) => accounts.cooldown((req.body || {}).id, (req.body || {}).minutes)));
 app.post('/api/accounts/clear', ...acctRoute((req) => accounts.clearCooldown((req.body || {}).id)));
+
+// --- Codex (OpenAI) + Gemini (Google) login: subscription OR API key, from the phone ---
+app.get('/api/providers', ...acctRoute(async () => ({ providers: providerLogin.providerStatus(), meta: providerLogin.providerMeta })));
+app.post('/api/providers/codex/device/start', ...acctRoute(() => providerLogin.codexDeviceStart()));
+app.post('/api/providers/codex/apikey', ...acctRoute((req) => providerLogin.codexApiKey((req.body || {}).apiKey)));
+app.post('/api/providers/gemini/google/start', ...acctRoute(() => providerLogin.geminiGoogleStart()));
+app.post('/api/providers/gemini/google/complete', ...acctRoute((req) => providerLogin.geminiGoogleComplete((req.body || {}).flowId, (req.body || {}).code)));
+app.post('/api/providers/gemini/apikey', ...acctRoute((req) => providerLogin.geminiApiKey((req.body || {}).apiKey)));
+app.get('/api/providers/poll', ...acctRoute((req) => providerLogin.loginPoll(req.query.flowId)));
+app.post('/api/providers/logout', ...acctRoute((req) => providerLogin.providerLogout((req.body || {}).provider)));
 
 // Move a LIVE session to another account: stop its bridge on the old account, relocate
 // its transcript into the new account's config dir, pin affinity. It resumes on the new
@@ -1551,8 +2480,93 @@ function ghToken() {
 const OPENAI_KEY = cfg('OPENAI_API_KEY');
 const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).replace(/\/$/, '');
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
+const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
 const GEMINI_KEY = cfg('GEMINI_API_KEY') || cfg('GOOGLE_AI_STUDIO_API_KEY') || cfg('GOOGLE_API_KEY');
 const AGY_CMD = cfg('AGY_CMD') || (existsSync(join(HOME, '.local', 'bin', 'agy')) ? join(HOME, '.local', 'bin', 'agy') : 'agy');
+
+function isPlaceholderTitle(title) {
+  return /^(New (Claude |Codex |Gemini |Antigravity )?chat|Claude chat|Codex chat|Gemini chat|Antigravity chat)$/i.test(String(title || '').trim());
+}
+function sanitizeTitle(title, max = 60) {
+  let s = String(title || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  s = s.replace(/^["'`]+|["'`.!?]+$/g, '').replace(/^title:\s*/i, '').trim();
+  if (!s || isPlaceholderTitle(s)) return '';
+  return s.slice(0, max).trim();
+}
+const TITLE_STOP = new Set('a an and are as at be but by can could do does for from get have how i if in into is it like make me of on or our please should so that the this to we when with you your'.split(' '));
+function fallbackTitleFromPrompt(prompt) {
+  let s = String(prompt || '')
+    .replace(/^\[(Image|File) attached at .+?\]\s*/gmi, ' ')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[#>*_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  s = s
+    .replace(/^(please\s+)?(can|could|would)\s+you\s+/i, '')
+    .replace(/^i\s+(think|guess|want|wanna|would like)\s+/i, '')
+    .replace(/^let'?s\s+/i, '')
+    .trim();
+  const words = s.split(/\s+/)
+    .map((w) => w.replace(/^[^\w-]+|[^\w-]+$/g, ''))
+    .filter((w) => w && !TITLE_STOP.has(w.toLowerCase()));
+  const picked = (words.length ? words : s.split(/\s+/)).slice(0, 5);
+  const out = picked.map((w) => w ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
+  return sanitizeTitle(out || 'Codex chat');
+}
+async function aiTitleFromPrompt(prompt) {
+  if (!OPENAI_KEY || !String(prompt || '').trim()) return '';
+  try {
+    const r = await fetch(`${OPENAI_ENDPOINT}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_KEY}` },
+      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({
+        model: BOX_TITLE_MODEL,
+        temperature: 0.2,
+        max_tokens: 24,
+        messages: [
+          { role: 'system', content: 'Write a concise 2-5 word chat title. Output only the title, no quotes or punctuation.' },
+          { role: 'user', content: String(prompt || '').slice(0, 4000) },
+        ],
+      }),
+    });
+    if (!r.ok) return '';
+    const j = await r.json();
+    return sanitizeTitle(j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content);
+  } catch { return ''; }
+}
+function setCodexGeneratedTitle(id, title) {
+  const clean = sanitizeTitle(title);
+  if (!id || !clean) return false;
+  const names = loadNames();
+  if (names[id]) return false; // manual rename wins
+  const state = loadCodex();
+  const prev = state.sessions && state.sessions[id];
+  if (!prev) return false;
+  prev.title = clean;
+  prev.titleGeneratedAt = Date.now();
+  prev.updatedAt = new Date().toISOString();
+  state.sessions[id] = prev;
+  saveCodex(state);
+  return true;
+}
+function refreshCodexTitle(s, prompt, initialTitle) {
+  const fallback = sanitizeTitle(initialTitle) || fallbackTitleFromPrompt(prompt);
+  (async () => {
+    const title = (await aiTitleFromPrompt(prompt)) || fallback;
+    if (!title || title === fallback) return;
+    const apply = () => {
+      const realId = s.sessionId || null;
+      const id = realId || s.provKey || s.key;
+      if (!id || !setCodexGeneratedTitle(id, title)) return false;
+      s.title = title;
+      if (realId) bcast(s, { type: 'session', id: realId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title });
+      return true;
+    };
+    if (!apply()) setTimeout(apply, 1000);
+  })();
+}
 
 // Is the `codex` CLI installed? (Codex chats are optional.) Cached after first probe.
 let _codexAvail = null;
@@ -1577,21 +2591,128 @@ const LINEAR_ENABLED = !!((LINEAR_KEY_RAW || linearLite) && LINEAR_TEAM_ID);
 app.get('/api/config', requireAuth, (req, res) => res.json({
   home: HOME,
   ownerName: OWNER_NAME,
+  defaultCwd: DEFAULT_CWD,
+  appSettings: appSettingsPayload(),
   features: {
     linear: LINEAR_ENABLED,
     brain: !!findBrainDir(),
     voice: !!(ELEVEN_KEY || DEEPGRAM_KEY),
+    voiceAssistant: !!OPENAI_KEY,
+    slack: slackConfigured(cfg),
     codex: codexAvailable(),
     gemini: !!GEMINI_KEY,
     agy: agyAvailable(),
+    mac: macAvailable(),
   },
   // Display names for Automated-tab sub-buckets; a private overlay can add its own.
   subLabels: overlay.subLabels || {},
 }));
 
+// Live screenshot of the user's Mac (the composer "View screen" button) — proxies the
+// cu-bridge worker's /screenshot over the reverse tunnel; no agent, no cost. Only useful
+// when features.mac is on (bridge reachable).
+app.get('/api/mac/screenshot', requireAuth, (req, res) => {
+  macScreenshotStream((up) => {
+    if (up.statusCode !== 200) { res.status(502).json({ error: 'mac screenshot failed' }); up.resume(); return; }
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    up.pipe(res);
+  }, (e) => res.status(502).json({ error: String((e && e.message) || e) }));
+});
+app.get('/api/app-settings', requireAuth, (req, res) => res.json(appSettingsPayload()));
+app.post('/api/app-settings', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const next = { ...APP_SETTINGS };
+  if (Object.prototype.hasOwnProperty.call(body, 'defaultCwd')) {
+    const dir = expandUserPath(body.defaultCwd);
+    if (!dir) delete next.defaultCwd;
+    else {
+      if (!validateDirectory(dir)) return res.status(400).json({ error: 'directory not found' });
+      next.defaultCwd = dir;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'defaultAgent')) {
+    const agent = String(body.defaultAgent || '').trim().toLowerCase();
+    if (!agent) delete next.defaultAgent;
+    else if (VALID_APP_AGENTS.has(agent)) next.defaultAgent = agent;
+    else return res.status(400).json({ error: 'invalid default agent' });
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'codexSandbox')) {
+    const sandbox = String(body.codexSandbox || '').trim().toLowerCase();
+    if (!sandbox) delete next.codexSandbox;
+    else if (VALID_CODEX_SANDBOX.has(sandbox)) next.codexSandbox = sandbox;
+    else return res.status(400).json({ error: 'invalid Codex sandbox' });
+  }
+  APP_SETTINGS = normalizeAppSettings(next);
+  refreshRuntimeDefaults();
+  writeJsonAtomic(APP_SETTINGS_FILE, APP_SETTINGS);
+  res.json(appSettingsPayload());
+});
+app.get('/api/prompt-templates', requireAuth, (req, res) => res.json({ templates: promptTemplateList(), overridesFile: PROMPT_OVERRIDES_FILE }));
+app.post('/api/prompt-templates/:id', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  if (!PROMPT_TEMPLATES[id]) return res.status(404).json({ error: 'unknown prompt template' });
+  const value = String((req.body && req.body.value) || '').replace(/\r\n/g, '\n').trimEnd();
+  if (!value.trim()) return res.status(400).json({ error: 'template cannot be blank' });
+  PROMPT_OVERRIDES = { ...PROMPT_OVERRIDES, [id]: value };
+  writeJsonAtomic(PROMPT_OVERRIDES_FILE, PROMPT_OVERRIDES);
+  res.json({ ok: true, template: promptTemplateList().find((t) => t.id === id) });
+});
+app.post('/api/prompt-templates/:id/reset', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  if (!PROMPT_TEMPLATES[id]) return res.status(404).json({ error: 'unknown prompt template' });
+  if (Object.prototype.hasOwnProperty.call(PROMPT_OVERRIDES, id)) {
+    const next = { ...PROMPT_OVERRIDES }; delete next[id]; PROMPT_OVERRIDES = next;
+    writeJsonAtomic(PROMPT_OVERRIDES_FILE, PROMPT_OVERRIDES);
+  }
+  res.json({ ok: true, template: promptTemplateList().find((t) => t.id === id) });
+});
+app.get('/api/hooks', requireAuth, (req, res) => res.json({ hooks: HOOK_SPECS.map(hookPayload) }));
+app.post('/api/hooks/:id', requireAuth, (req, res) => {
+  const spec = hookSpec(String(req.params.id || ''));
+  if (!spec) return res.status(404).json({ error: 'unknown hook' });
+  const value = String((req.body && req.body.content) || '').replace(/\r\n/g, '\n').trimEnd() + '\n';
+  if (!value.trim()) return res.status(400).json({ error: 'hook cannot be blank' });
+  const live = liveHookPath(spec);
+  mkdirSync(dirname(live), { recursive: true });
+  writeFileSync(live, value);
+  try { chmodSync(live, 0o755); } catch {}
+  res.json({ ok: true, hook: hookPayload(spec) });
+});
+app.post('/api/hooks/:id/reset', requireAuth, (req, res) => {
+  const spec = hookSpec(String(req.params.id || ''));
+  if (!spec) return res.status(404).json({ error: 'unknown hook' });
+  const fallback = defaultHookPath(spec);
+  if (!existsSync(fallback)) return res.status(404).json({ error: 'default hook missing' });
+  const live = liveHookPath(spec);
+  mkdirSync(dirname(live), { recursive: true });
+  writeFileSync(live, readFileSync(fallback, 'utf8'));
+  try { chmodSync(live, 0o755); } catch {}
+  res.json({ ok: true, hook: hookPayload(spec) });
+});
+
 // Let a private overlay register extra routes / run init (business endpoints, etc.).
 if (overlay.routes) { try { overlay.routes(app, { requireAuth, HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.routes failed:', e && e.message); } }
 if (overlay.onReady) { try { overlay.onReady({ HOME, DEFAULT_CWD }); } catch (e) { console.error('[box] overlay.onReady failed:', e && e.message); } }
+
+// Realtime voice assistant: browser ↔ OpenAI Realtime over WebRTC; every tool call the
+// model makes executes HERE with the box's own powers (sessions, Linear, research, brain…).
+try {
+  registerVoiceAssistant(app, {
+    requireAuth, cfg, HOME, STATE_DIR, PORT, authToken: AUTH_TOKEN, ownerName: OWNER_NAME,
+    defaultCwd: () => DEFAULT_CWD, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
+    macAvailable, loadCodexMessages, codexHome: CODEX_HOME, codexMessagePath: codexMsgFile,
+    transcribe: transcribeBuffer, // for voice-memory re-transcription (recover a garbled clip)
+    voiceSttEnabled: !!(ELEVEN_KEY || DEEPGRAM_KEY),
+    runAdapterTurn: runVoiceAdapterTurn,
+    adapterSessionInfo: (key, sessionId = '') => {
+      // `sessionId` is the durable Codex id recovered from the voice transcript.
+      // It is required after a Box restart, when the in-memory call-id alias is gone.
+      const s = rt(sessionId || key);
+      return { sessionId: s.sessionId || '', agent: s.agent || '', busy: !!s.running || s.queue.length > 0 };
+    },
+  });
+} catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
 async function linearGql(query, variables) {
   if (linearLite) return linearLite.gql(query, variables); // local SQLite-backed clone
@@ -1732,7 +2853,9 @@ app.get('/api/linear/:id/detail', requireAuth, async (req, res) => {
       state: it.state, assignee: it.assignee ? it.assignee.displayName : null,
       labels: (it.labels.nodes || []).map((l) => ({ name: l.name, color: l.color })),
       comments: (it.comments.nodes || []).map((c) => ({ body: c.body, createdAt: c.createdAt, user: c.user ? c.user.displayName : 'someone' })),
+      attachments: (it.attachments.nodes || []).map((a) => ({ url: a.url, title: a.title })),
       delegations: loadDelegations()[it.identifier] || [],
+      meetingContext: renderMeetingContextForIssue(it),
       pr,
     });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
@@ -1819,7 +2942,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
   const rec = {
     sessionId: b.sessionId ? String(b.sessionId) : null,
     sessionTitle: (b.sessionTitle || '').toString().slice(0, 120),
-    agent: b.agent === 'codex' ? 'codex' : 'claude',
+    agent: VALID_APP_AGENTS.has(String(b.agent || '')) ? String(b.agent) : 'claude',
     kind: b.kind === 'resume' ? 'resume' : 'new',
     ts: Date.now(),
   };
@@ -1840,7 +2963,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
       const det = await linearGql(`{ issues(filter:{ number:{ eq:${issueNum(inc)} }${TEAM_KEY_FILTER} }){ nodes { id state{ type } labels{ nodes{ id } } } } }`);
       const it = (det.issues.nodes || [])[0];
       if (it) {
-        const agentName = rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : 'Claude';
+        const agentName = rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : rec.agent === 'mac' ? 'Computer Use' : 'Claude';
         const verb = rec.kind === 'resume' ? 'Resumed in' : 'Delegated to';
         const body = `🤖 ${verb} a box ${agentName} agent${rec.sessionTitle ? ` — “${rec.sessionTitle}”` : ''}.`
           + (rec.sessionId ? `\n<!-- box-session:${rec.sessionId} -->` : '');
@@ -1938,7 +3061,7 @@ app.get('/api/linear/:id/sessions', requireAuth, (req, res) => {
   // codex sessions live in one JSON store keyed by id
   try {
     for (const [sid, s] of Object.entries(loadCodex().sessions || {})) {
-      const n = (JSON.stringify(s.messages || '').match(new RegExp(id, 'g')) || []).length;
+      const n = codexSessionMentionCount(s, id);
       if (n) counts[sid] = (counts[sid] || 0) + n;
     }
   } catch {}
@@ -1965,7 +3088,7 @@ app.get('/api/linear/:id/sessions', requireAuth, (req, res) => {
     if (sid === exclude) continue;
     if (codex[sid]) {
       const c = codex[sid];
-      sessions.push({ id: sid, title: names[sid] || c.title || 'Codex session', agent: 'codex', cwd: c.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: c.updatedAt ? Date.parse(c.updatedAt) : 0, mentions: counts[sid] });
+      sessions.push({ id: sid, title: names[sid] || c.title || 'Codex session', agent: 'codex', cwd: c.cwd || DEFAULT_CWD, category: 'main', subcat: null, mtime: codexSessionMtime(c), mentions: counts[sid] });
       continue;
     }
     if (gemini[sid]) {
@@ -2034,8 +3157,8 @@ function sessionIssueCounts(file) {
 function sessionIssueCountsFromMessages(messages, counts) {
   for (const m of messages || []) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
-    const parts = Array.isArray(m.parts) ? m.parts : [];
-    const text = parts.map((p) => (p && p.t === 'text' ? p.text || '' : '')).join('\n').trim();
+    const text = codexMessageText(m);
+    if (m.role === 'user' && (INC_INJECT_RE.test(text) || /New since your last turn|Needs your input/.test(text))) continue;
     if (text) tallyIssues(text, counts);
   }
 }
@@ -2095,6 +3218,23 @@ app.get('/api/fs', requireAuth, (req, res) => {
   } catch (e) { res.status(404).json({ error: String(e.message || e) }); }
 });
 
+app.post('/api/resolve-paths', requireAuth, (req, res) => {
+  const cwd = expandUserPath(req.body && req.body.cwd) || DEFAULT_CWD;
+  const paths = Array.isArray(req.body && req.body.paths) ? req.body.paths.slice(0, 80) : [];
+  const results = {};
+  for (const raw of paths) {
+    const token = cleanPathToken(raw);
+    if (!token) continue;
+    const expanded = expandLocalPathToken(token, cwd);
+    if (!expanded && !FILE_SEARCH_EXT_RE.test(token)) {
+      results[token] = { found: false };
+      continue;
+    }
+    results[token] = resolveLocalFileReference(token, cwd);
+  }
+  res.json({ results });
+});
+
 // image upload (for the camera/library attach, and pasted clipboard images on web)
 const imgExtForMime = (m = '') =>
   /png/.test(m) ? '.png' : /jpe?g/.test(m) ? '.jpg' : /gif/.test(m) ? '.gif' :
@@ -2116,7 +3256,9 @@ app.post('/api/upload', requireAuth, upload.array('images', 6), (req, res) =>
 app.get('/api/img', requireAuth, (req, res) => {
   const p = resolve(req.query.path || '');
   if (!p.startsWith(UPLOAD_DIR + '/')) return res.status(403).end();
-  res.sendFile(p, (e) => { if (e && !res.headersSent) res.status(404).end(); });
+  // uploads get a random-prefixed filename at write time → content-addressed enough to
+  // cache hard; without this every chat re-open re-downloaded every attachment in full
+  res.sendFile(p, { maxAge: 7 * 24 * 3600 * 1000, immutable: true }, (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
 // serve any file on the box (token-gated, personal use) — for the media viewer
@@ -2124,7 +3266,9 @@ app.get('/api/raw', requireAuth, (req, res) => {
   const p = resolve(req.query.path || '');
   try { if (!statSync(p).isFile()) return res.status(404).end(); } catch { return res.status(404).end(); }
   if (req.query.dl) res.setHeader('Content-Disposition', `attachment; filename="${basename(p)}"`);
-  res.sendFile(p, (e) => { if (e && !res.headersSent) res.status(404).end(); });
+  // short freshness window + ETag revalidation after: chat re-renders re-request the same
+  // inline previews many times; without any Cache-Control each one was a full re-download
+  res.sendFile(p, { maxAge: 5 * 60 * 1000 }, (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
 // ---- voice transcription (bilingual EN+中文) -------------------------------
@@ -2223,7 +3367,21 @@ app.get('/api/retranscribe', requireAuth, async (req, res) => {
   } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
 
+// LiveKit's browser SDK is served from the pinned npm dependency rather than a CDN so
+// voice mode keeps working through poor cellular coverage and has a reproducible build.
+app.get('/vendor/livekit-client.umd.js', (_req, res) => {
+  res.sendFile(join(ROOT, 'node_modules', 'livekit-client', 'dist', 'livekit-client.umd.js'), {
+    maxAge: '7d', immutable: true,
+  });
+});
 app.use(express.static(PUBLIC));
+// Box is a client-side app, but its screens use real pathname routes so chats and
+// issues can be bookmarked/shared and browser navigation reads naturally. Serve the
+// shell for those route URLs; API and static-file requests retain normal 404 behavior.
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/') || extname(req.path)) return next();
+  res.sendFile(join(PUBLIC, 'index.html'));
+});
 
 // ---- per-session queue workers --------------------------------------------
 // Each session has a server-side queue + worker that runs turns sequentially,
@@ -2348,6 +3506,20 @@ function scanRecentImages(sessionId) {
   } catch {}
   return results.slice(-8).reverse(); // newest first, cap at 8 batches
 }
+function agentDisplayName(agent) {
+  return agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
+}
+function recentImagesForHistory(sessionId, hist) {
+  if (!hist || hist.agent === 'claude' || !hist.agent) return scanRecentImages(sessionId);
+  const out = [];
+  const IMG_RE = /\.(png|jpe?g|gif|webp|svg)$/i;
+  for (const m of [...(hist.messages || [])].reverse()) {
+    const paths = (m.parts || []).filter((p) => p && (p.t === 'image' || p.t === 'file') && IMG_RE.test(p.path || '') && existsSync(p.path)).map((p) => p.path);
+    if (paths.length) out.push({ paths, caption: '' });
+    if (out.length >= 8) break;
+  }
+  return out.reverse();
+}
 
 function triggerAttentionUpdate(s) {
   if (!s.sessionId || s._attnUpdating) return;
@@ -2367,10 +3539,11 @@ function triggerAttentionUpdate(s) {
   let existing = '';
   try { existing = readFileSync(attFile, 'utf8').trim(); } catch {}
   // Collect recent verification screenshots (SendUserFile image batches)
-  const recentImgs = scanRecentImages(s.sessionId);
+  const recentImgs = recentImagesForHistory(s.sessionId, hist);
+  const assistantName = agentDisplayName(hist.agent || s.agent || 'claude').toUpperCase();
   const turns = hist.messages.slice(-20).map((m) => {
     const text = m.parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ').slice(0, 2000);
-    return `[${m.role === 'user' ? 'USER' : 'CLAUDE'}]: ${text}`;
+    return `[${m.role === 'user' ? 'USER' : assistantName}]: ${text}`;
   }).join('\n\n---\n\n');
   const imgSection = recentImgs.length
     ? `RECENT VERIFICATION SCREENSHOTS (evidence of completed work — newest first):
@@ -2386,37 +3559,14 @@ ${recentImgs.map(({ paths, caption }) => `- ${paths.join(', ')}${caption ? `\n  
   const imgRule = allowedImgPaths.length
     ? `- For a "Done recently" item with a matching screenshot, you MAY embed ONE inline using a path copied EXACTLY from the RECENT VERIFICATION SCREENSHOTS list above: ![short description](EXACT_PATH_FROM_LIST). Use ONLY paths from that list. NEVER invent a path, NEVER put a website/http(s) URL inside ![](…) (those are not images), NEVER use a placeholder like /path/to/x.png. If no listed screenshot fits the item, omit the image.`
     : `- Do NOT embed any images: no screenshots are available. NEVER invent an image path and NEVER put a website/http(s) URL or a placeholder inside ![](…).`;
-  const prompt = `You are maintaining a morning-briefing status doc for ${OWNER_NAME} so ${OWNER_NAME} can orient after being away, without reading the full chat.
-
-${existing ? `EXISTING STATUS DOC (current best knowledge — refine it, don't discard it):
-${existing}
-
-` : ''}${imgSection}RECENT CONVERSATION (last 20 turns — use this to update the doc):
-${turns}
-
-Output ONLY the updated markdown — no preamble, no commentary. Rules:
-- KEEP existing "Needs your input" items unless the new conversation clearly resolves them
-- REMOVE or move to "Done recently" any item explicitly completed in the new turns
-- ADD new blocking items or decisions discovered in the new turns
-- If the new turns are just idle checks / heartbeats with no new information, output the existing doc mostly unchanged
-- Omit a section only if it genuinely has nothing to say
-${imgRule}
-
-## Needs your input
-For each open decision or question blocking progress, write:
-
-**[Topic label]**
-- *Question:* Exactly what needs to be decided or answered — specific, not vague
-- *Context:* 1–2 sentences: what's already done, what's at stake, what options exist if relevant
-- *Why now:* why it's blocking (skip if obvious)
-
-## In progress
-- [item] — [what specifically is happening and current state]
-
-## Done recently
-- [item] — [what was completed and its outcome]${allowedImgPaths.length ? '\n  ![description](exact path copied from the screenshots list above — omit this line entirely if none fits)' : ''}
-
-Be specific enough that ${OWNER_NAME} can act or reply without reading the chat. List all sub-questions under a topic, not just the topic label.`;
+  const prompt = renderTemplate('attention-status', {
+    ownerName: OWNER_NAME,
+    existingDocBlock: existing ? `EXISTING STATUS DOC (current best knowledge — refine it, don't discard it):\n${existing}\n\n` : '',
+    imageSection: imgSection,
+    recentTurns: turns,
+    imageRule: imgRule,
+    doneImageHint: allowedImgPaths.length ? '\n  ![description](exact path copied from the screenshots list above — omit this line entirely if none fits)' : '',
+  });
   // Generate via the OpenAI API (cheap model) instead of `claude -p` — saves Claude/Max
   // tokens on this high-frequency mundane refresh (the user 2026-06-22).
   (async () => {
@@ -2547,6 +3697,65 @@ function enqueue(extKey, msg) {
   runWorker(s);
   return msg.qid;
 }
+
+// A synchronous facade over the normal Box queue for the experimental voice adapter.
+// It deliberately uses the existing Claude/Codex turn runners: context, tool streaming,
+// sandbox settings, remote-control ownership, and session persistence stay identical to
+// a phone chat. Adapter callers may have only one outstanding spoken turn per session.
+function runVoiceAdapterTurn({ key, sessionId = '', text, agent = 'claude', cwd = DEFAULT_CWD, title = 'Voice adapter', interrupt = false, codexSettings = null, onStart, onSession, onText } = {}) {
+  // A call id is intentionally not the Codex session id.  The call may survive a
+  // Box deploy/restart, which clears RT/ALIAS, so resume from the durable Codex id
+  // recorded by the voice layer whenever it has one.
+  const s = rt(sessionId || key);
+  if (s.sessionId && s.agent && s.agent !== agent) return Promise.reject(new Error(`voice adapter session belongs to ${s.agent}; start a new call before switching agents`));
+  // A voice call owns a persistent thread, but its first turn should use the
+  // voice-specific latency profile. Do not silently change an already-running
+  // or resumed Codex session's model mid-conversation.
+  if (!s.sessionId && agent === 'codex' && codexSettings) {
+    s.settings = normalizeSettings({ ...s.settings, codex: { ...(s.settings || {}).codex, ...codexSettings } });
+  }
+  const busy = s.running || s.queue.length;
+  if (busy && !interrupt) return Promise.reject(new Error('voice adapter session is busy — wait for the current reply'));
+  // Codex CLI turns are atomic.  To accept a caller barge-in, end the current
+  // process and place the new instruction directly behind it in the SAME queue.
+  // The next resume retains its thread/tool context; it never creates a new chat.
+  if (busy && interrupt) cancelCurrent(s.key);
+  return new Promise((resolve) => {
+    enqueue(s.key, {
+      text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true, onStart, onSession, onText,
+      // A Codex turn can emit a progress note followed by its final answer.
+      // The Box chat retains both, but the voice bridge must speak only the
+      // final substantive agent message.
+      onComplete: (result) => resolve(result),
+    });
+  });
+}
+app.post('/api/agent/enqueue', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const text = String(body.text || body.prompt || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const agent = String(body.agent || appDefaultAgent() || 'claude').trim().toLowerCase();
+  if (!VALID_APP_AGENTS.has(agent)) return res.status(400).json({ error: `unknown agent ${agent}` });
+  const rawKey = String(body.key || `new-${randomBytes(4).toString('hex')}`).trim();
+  const key = rawKey.replace(/[^\w.-]/g, '').slice(0, 80) || `new-${randomBytes(4).toString('hex')}`;
+  const cwd = validateDirectory(expandUserPath(body.cwd || '')) ? expandUserPath(body.cwd) : DEFAULT_CWD;
+  const title = sanitizeTitle(body.title || '') || text.replace(/\s+/g, ' ').slice(0, 72);
+  if (body.dryRun || body.dry_run) return res.json({ ok: true, dry_run: true, key, agent, cwd, title });
+  if (agent === 'mac' && !macAvailable()) return res.status(409).json({ error: 'mac bridge unavailable' });
+  const qid = enqueue(key, {
+    text,
+    displayText: body.displayText,
+    images: Array.isArray(body.images) ? body.images : [],
+    mode: body.mode === 'bash' ? 'bash' : 'normal',
+    agent,
+    cwd,
+    title,
+    parentId: body.parentId || null,
+    parentTitle: body.parentTitle || '',
+    force: !!body.force,
+  });
+  res.json({ ok: true, key, qid, agent, cwd, title });
+});
 function dequeue(extKey, qid) {
   const s = rt(extKey);
   const idx = s.queue.findIndex((q, i) => q.qid === qid && !(i === 0 && s.running));
@@ -2588,16 +3797,22 @@ async function runWorker(s) {
     if (msg.parentId) s.parentId = msg.parentId;
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
-    s.curText = ''; s.curTools = []; s.curParts = []; s.canceled = false; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
-    if (s.sessionId) { RUNNING.add(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
+    s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
+    if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
+    if (typeof msg.onStart === 'function') { try { msg.onStart({ sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude' }); } catch {} }
     await runTurn(s, msg);
+    if (typeof msg.onComplete === 'function') {
+      const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
+      const text = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
+      try { msg.onComplete({ text, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
+    }
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
-  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; if (s.sessionId) RUNNING.delete(s.sessionId); bcast(s, { type: 'idle' });
+  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
 // Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
@@ -2622,6 +3837,7 @@ function runTurn(s, msg) {
     if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
+    if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
 	    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
     let prompt = msg.text || '';
     if (Array.isArray(msg.images) && msg.images.length) {
@@ -2666,7 +3882,7 @@ function runTurn(s, msg) {
         if (!s.sessionId) {
           await rec.session_p;                 // real id appears once the JSONL is created
           s.sessionId = rec.sessionId;
-          ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+          ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
           if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
           persist(s);
           // If this chat was started with an EXPLICIT title (e.g. delegating a Linear
@@ -2682,7 +3898,8 @@ function runTurn(s, msg) {
           ensureFirstPromptLanded(s, rec, prompt); // re-inject if a still-settling TUI dropped the first paste
         }
       } catch (e) {
-        bcast(s, { type: 'error', msg: String(e && e.message || e).slice(-400) });
+        s.lastTurnError = String(e && e.message || e).slice(-400);
+        bcast(s, { type: 'error', msg: s.lastTurnError });
         finish();
       }
     })();
@@ -2698,6 +3915,11 @@ function runCodexTurn(s, msg, resolve) {
   s.cxLastFlush = 0;
   let lastError = '';
   const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
+  const isNewCodexSession = !s.sessionId;
+  const explicitTitle = isNewCodexSession ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNewCodexSession ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNewCodexSession && initialTitle) s.title = initialTitle;
   // PROVISIONAL REGISTRATION — make a brand-new Codex chat durable + visible the instant the user
   // hits send, before (or even if never) codex emits `thread.started`. Keyed by the box's internal
   // `new-…` key, carrying the user's message and shown as "working" (RUNNING). On `thread.started`
@@ -2706,9 +3928,10 @@ function runCodexTurn(s, msg, resolve) {
   // a resume already has s.sessionId, so it's untouched.
   if (!s.sessionId) {
     s.provKey = s.key;
-    ensureCodexSession(s.provKey, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-    appendCodexMessage(s.provKey, 'user', userText);
-    RUNNING.add(s.provKey);
+    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+    appendCodexMessage(s.provKey, 'user', userText, { parts: userParts });
+    addRunning(s.provKey);
+    if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
   const finish = () => {
     if (done) return; done = true;
@@ -2727,9 +3950,10 @@ function runCodexTurn(s, msg, resolve) {
       // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
       // entry already holds the user's message, so the chat stays in the list and is retryable in
       // place; clear its "working" state and leave a note explaining what happened.
-      RUNNING.delete(s.provKey);
+      deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
+    if (s.sessionId && !s.canceled) triggerAttentionUpdate(s);
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
@@ -2747,17 +3971,18 @@ function runCodexTurn(s, msg, resolve) {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;
         s.sessionId = ev.id; s.agent = 'codex';
-        ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+        ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
         // Migrate the provisional entry (and its already-appended user message) onto the real
         // thread id, then drop its working marker. provKey is cleared so finish() treats this as a
         // normal (registered) turn.
-        if (provKey && provKey !== s.sessionId) { RUNNING.delete(provKey); migrateCodexSession(provKey, s.sessionId); }
+        if (provKey && provKey !== s.sessionId) { deleteRunning(provKey); migrateCodexSession(provKey, s.sessionId); }
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText); // provisional path already appended it
+        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts }); // provisional path already appended it
         persist(s);
-        bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '' });
+        if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'codex' }); } catch {} }
+        bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
       } else if (ev.type === 'text') {
         // Codex streams each agent_message as a complete, self-contained chunk. When
         // two arrive back-to-back (no tool between) we must separate them with a blank
@@ -2766,6 +3991,10 @@ function runCodexTurn(s, msg, resolve) {
         // being text — right after a tool the client opens a fresh text element, so a
         // leading separator there would render a stray empty paragraph.
         const raw = ev.delta || '';
+        if (msg.voiceOnly && raw.trim()) s.voiceFinalText = raw;
+        if (msg.voiceOnly && typeof msg.onText === 'function' && raw.trim()) {
+          try { msg.onText(raw); } catch {}
+        }
         const last = s.curParts[s.curParts.length - 1];
         const delta = ((last && last.t === 'text' && last.text) ? '\n\n' : '') + raw;
         pushTextPart(s, delta);
@@ -2795,69 +4024,101 @@ function runCodexTurn(s, msg, resolve) {
         const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
         bcast(s, ev);
       } else if (ev.type === 'notice' || ev.type === 'error') {
-        if (ev.type === 'error') lastError = cleanCodexError(ev.msg);
+      if (ev.type === 'error') { lastError = cleanCodexError(ev.msg); s.lastTurnError = lastError; }
         bcast(s, ev);
       }
     },
   });
 s.proc.on('close', finish);
-  s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); bcast(s, { type: 'error', msg: lastError }); finish(); });
+  s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
+// Gemini now runs as a REAL agent via the `gemini` CLI (see gemini-exec-engine.mjs), so a
+// turn streams the same {session,text,tool,tool_result,context} events Codex does — handle
+// them the same way (live tool chips + persisted {text|tool} parts + a live context meter).
+// Session continuity is the CLI's: the box mints the id and the engine does --session-id /
+// --resume, so we no longer replay box-side history into the prompt.
 function runGeminiTurn(s, msg, resolve) {
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
-  const sid = s.sessionId || randomUUID();
+  let done = false;
+  let lastError = '';
+  s.gmTurnId = `${Date.now()}-${++GEMINI_TURN_SEQ}`;
+  s.gmLastFlush = 0;
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
   const isNew = !s.sessionId;
+  const sid = s.sessionId || randomUUID();
+  const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNew && initialTitle) s.title = initialTitle;
   const session = ensureGeminiSession(sid, {
     cwd: s.cwd,
-    title: msg.title || (msg.text || '').slice(0, 80),
+    title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
     lastUsed: Date.now(),
     settings: s.settings,
     parentId: msg.parentId || s.parentId || null,
     parentTitle: msg.parentTitle || s.parentTitle || '',
   });
-  const history = [...(session.messages || [])];
-  appendGeminiMessage(sid, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
+  appendGeminiMessage(sid, 'user', userText, { parts: userParts });
   s.sessionId = sid;
   s.agent = 'gemini';
-  ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+  ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
   if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-  if (isNew) persist(s);
+  persist(s);
 
-  let done = false;
-  let assistantText = '';
   const finish = () => {
     if (done) return; done = true;
     clearTimeout(s.turnTimer); s.proc = null;
-    if (assistantText.trim()) appendGeminiMessage(s.sessionId, 'assistant', assistantText);
+    if (s.sessionId) {
+      flushGeminiAssistant(s, { finalize: true });
+      // Persist a terminal error so reopening the chat shows the failure, not silence.
+      if (lastError && !s.canceled) appendGeminiMessage(s.sessionId, 'assistant', `⚠️ Gemini error: ${lastError}`);
+    }
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
+  // Agentic Gemini turns can run long (tool loops / many minutes) like Codex — give them the
+  // same generous safety net rather than the short chat timeout.
   s.turnTimer = setTimeout(() => {
     if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
     finish();
-  }, TURN_TIMEOUT_MS);
+  }, CODEX_TURN_TIMEOUT_MS);
   bcast(s, { type: 'session', id: s.sessionId, agent: 'gemini', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || session.title || '' });
   s.proc = geminiEngine.run({
     sessionId: s.sessionId,
+    isNew,
     cwd: s.cwd,
     prompt: msg.text || '',
     images: msg.images || [],
-    history,
     settings: (s.settings || {}).gemini || DEFAULT_SETTINGS.gemini,
     apiKey: GEMINI_KEY,
     onEvent: (ev) => {
-      if (ev.type === 'text') {
-        assistantText += (assistantText ? '\n\n' : '') + (ev.delta || '');
+      if (ev.type === 'session') {
+        // gemini echoes the id we minted; we already registered it, so nothing to migrate.
+        return;
+      } else if (ev.type === 'text') {
+        pushTextPart(s, ev.delta || '');
+        if (s.sessionId) { s.gmLastFlush = Date.now(); flushGeminiAssistant(s); }
         bcast(s, { type: 'text', delta: ev.delta || '' });
+      } else if (ev.type === 'context') {
+        s.context = updateGeminiContext(s.sessionId, ev.info);
+        persist(s);
+        bcast(s, { type: 'context', context: s.context });
+      } else if (ev.type === 'tool') {
+        s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        const now = Date.now();
+        if (s.sessionId && (!s.gmLastFlush || now - s.gmLastFlush > 2000)) { s.gmLastFlush = now; flushGeminiAssistant(s); }
+        bcast(s, ev);
+      } else if (ev.type === 'tool_result') {
+        const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
+        bcast(s, ev);
       } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = String(ev.msg || '').slice(0, 300);
         bcast(s, ev);
       }
     },
   });
-  Promise.resolve(s.proc && s.proc.promise ? s.proc.promise : s.proc).then(finish).catch((e) => {
-    bcast(s, { type: 'error', msg: String(e && e.message || e).slice(-400) });
-    finish();
-  });
+  s.proc.on('close', finish);
+  s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
 function runAgyTurn(s, msg, resolve) {
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
@@ -2875,7 +4136,7 @@ function runAgyTurn(s, msg, resolve) {
   appendAgyMessage(sid, 'user', msg.displayText != null ? msg.displayText : (msg.text || ''));
   s.sessionId = sid;
   s.agent = 'agy';
-  ALIAS.set(s.sessionId, s.key); RUNNING.add(s.sessionId);
+  ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
   if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
   if (isNew) persist(s);
 
@@ -2913,6 +4174,94 @@ function runAgyTurn(s, msg, resolve) {
   s.proc.on('close', finish);
   s.proc.on('error', (e) => { bcast(s, { type: 'error', msg: String(e.message || e) }); finish(); });
 }
+// Computer Use turn: runs codex ON THE MAC (cu-bridge) with the SAME streamed {session,text,
+// tool,tool_result} events Codex emits — so tool chips + live text + multi-turn resume all
+// work. Modeled on runCodexTurn (id arrives via `session`), persisted in the Mac store.
+function runMacTurn(s, msg, resolve) {
+  if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  let done = false;
+  s.macTurnId = `${Date.now()}-${++MAC_TURN_SEQ}`;
+  let lastError = '';
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
+  const isNew = !s.sessionId;
+  const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNew && initialTitle) s.title = initialTitle;
+  // Provisional registration (like Codex): show the chat + hold the user's message the instant
+  // they hit send, keyed by the box's internal `new-…` key; migrate onto the real codex thread
+  // id when `session` arrives. If the Mac never answers, the message stays as a retryable chat.
+  if (isNew) {
+    s.provKey = s.key;
+    ensureMacSession(s.provKey, { cwd: s.cwd, title: initialTitle || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '' });
+    appendMacMessage(s.provKey, 'user', userText, { parts: userParts });
+    addRunning(s.provKey);
+  }
+  const finish = () => {
+    if (done) return; done = true;
+    clearTimeout(s.turnTimer); s.proc = null;
+    if (s.sessionId) {
+      flushMacAssistant(s, { finalize: true });
+      if (lastError && !s.canceled) appendMacMessage(s.sessionId, 'assistant', `⚠️ Computer Use error: ${lastError}`);
+    } else if (s.provKey) {
+      deleteRunning(s.provKey);
+      if (!s.canceled) appendMacMessage(s.provKey, 'assistant', lastError ? `⚠️ Computer Use didn't start: ${lastError}` : "⚠️ Computer Use didn't start — is your Mac connected (cu-bridge)? Send again to retry.");
+    }
+    bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
+    resolve();
+  };
+  s.turnTimer = setTimeout(() => {
+    if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
+    finish();
+  }, CODEX_TURN_TIMEOUT_MS);
+  s.proc = macEngine.run({
+    sessionId: s.sessionId,
+    cwd: s.cwd,
+    prompt: msg.text || '',
+    images: msg.images || [],
+    settings: (s.settings || {}).mac || DEFAULT_SETTINGS.mac,
+    onEvent: (ev) => {
+      if (ev.type === 'session' && ev.id) {
+        const provKey = s.provKey || null;
+        s.sessionId = ev.id; s.agent = 'mac';
+        ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+        if (provKey && provKey !== s.sessionId) {
+          const st = loadMac(); const rec = st.sessions[provKey];
+          if (rec) { rec.id = s.sessionId; st.sessions[s.sessionId] = rec; delete st.sessions[provKey]; saveMac(st); }
+          deleteRunning(provKey);
+        }
+        s.provKey = null;
+        if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+        ensureMacSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '' });
+        if (!provKey) appendMacMessage(s.sessionId, 'user', userText, { parts: userParts });
+        persist(s);
+        bcast(s, { type: 'session', id: s.sessionId, agent: 'mac', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
+      } else if (ev.type === 'text') {
+        const raw = ev.delta || '';
+        const last = s.curParts[s.curParts.length - 1];
+        const delta = ((last && last.t === 'text' && last.text) ? '\n\n' : '') + raw;
+        pushTextPart(s, delta);
+        if (s.sessionId) flushMacAssistant(s);
+        bcast(s, { type: 'text', delta });
+      } else if (ev.type === 'tool') {
+        s.curTools.push(ev);
+        s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        if (s.sessionId) flushMacAssistant(s);
+        bcast(s, ev);
+      } else if (ev.type === 'tool_result') {
+        const t = s.curTools.find((x) => x.id === ev.id); if (t) t.result = ev.content;
+        const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
+        bcast(s, ev);
+      } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = String(ev.msg || '').slice(0, 300);
+        bcast(s, ev);
+      }
+      // 'context' events are ignored for Computer Use v1 (codex rollout lives on the Mac).
+    },
+  });
+  s.proc.on('close', finish);
+  s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
+}
 // resume persisted, non-empty queues on startup (after a restart) so a queued message is never
 // lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
 // message was queued before its session was created (keyed by the filename, e.g. `new-abc123`) —
@@ -2940,11 +4289,13 @@ const wss = new WebSocketServer({ noServer: true });
 const sttWss = new WebSocketServer({ noServer: true });
 
 // Deepgram realtime: raw PCM frames go straight onto the socket (binary), JSON control
-// messages flush/close. Maps interim→partial, is_final→committed for the client, which
-// has its own seal/dedup logic (sealCommitted/isSameUtterance) over those segments.
+// messages flush/close. `is_final` seals an STT segment; `speech_final` is Deepgram's
+// actual end-of-speech signal, forwarded separately so voice-adapter can hand one
+// complete transcript to a CLI agent instead of guessing from browser volume.
 function sttDeepgram(client, rate) {
   const dgUrl = `wss://api.deepgram.com/v1/listen?model=${encodeURIComponent(DG_MODEL)}&language=multi`
-    + `&encoding=linear16&sample_rate=${rate}&channels=1&interim_results=true&smart_format=true&punctuate=true`;
+    + `&encoding=linear16&sample_rate=${rate}&channels=1&interim_results=true&smart_format=true&punctuate=true`
+    + `&endpointing=500&utterance_end_ms=1000`;
   const dg = new WSClient(dgUrl, { headers: { Authorization: `Token ${DEEPGRAM_KEY}` } });
   let dgOpen = false; const queue = [];
   // keep the stream alive across short pauses (Deepgram closes after ~10s of silence)
@@ -2952,10 +4303,11 @@ function sttDeepgram(client, rate) {
   dg.on('open', () => { dgOpen = true; for (const b of queue) { try { dg.send(b); } catch {} } queue.length = 0; try { client.send(JSON.stringify({ type: 'ready' })); } catch {} });
   dg.on('message', (data) => {
     let o; try { o = JSON.parse(data.toString()); } catch { return; }
+    if (o.type === 'UtteranceEnd') { try { client.send(JSON.stringify({ type: 'endpoint' })); } catch {} return; }
     if (o.type !== 'Results') return;
     const text = (o.channel && o.channel.alternatives && o.channel.alternatives[0] && o.channel.alternatives[0].transcript || '').trim();
-    if (!text) return;
-    try { client.send(JSON.stringify({ type: o.is_final ? 'committed' : 'partial', text })); } catch {}
+    if (text) { try { client.send(JSON.stringify({ type: o.is_final ? 'committed' : 'partial', text })); } catch {} }
+    if (o.speech_final) { try { client.send(JSON.stringify({ type: 'endpoint', text })); } catch {} }
   });
   dg.on('error', (e) => { try { client.send(JSON.stringify({ type: 'error', msg: String(e.message || e) })); } catch {} });
   dg.on('close', () => { clearInterval(keepAlive); try { client.close(); } catch {} });
@@ -3027,18 +4379,21 @@ wss.on('connection', (ws) => {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
     } else if (m.type === 'settings') {
       const s = rt(m.key);
       s.settings = normalizeSettings(m.settings || s.settings || {});
+      const nextCwd = expandUserPath(m.cwd);
+      if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;
       persist(s);
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
-      bcast(s, { type: 'settings', settings: s.settings });
+      if (s.sessionId && s.agent === 'mac') ensureMacSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      bcast(s, { type: 'settings', settings: s.settings, cwd: s.cwd || null });
     } else if (m.type === 'dequeue') { dequeue(m.key, m.qid); }
     else if (m.type === 'cancel') { cancelCurrent(m.key); }
     else if (m.type === 'answer_waiting') { answerWaiting(m.key, m.sel || {}); }
@@ -3090,9 +4445,11 @@ server.listen(PORT, () => {
 });
 
 // one-time: learn the real skill/command list from a claude init (kill before it answers)
-if (!META.skills || !META.skills.length) {
+if (process.env.BOX_SKIP_META_PROBE !== '1' && (!META.skills || !META.skills.length)) {
   try {
+    execSync('command -v claude', { stdio: 'ignore' });
     const p = spawn('claude', ['-p', 'hi', '--output-format', 'stream-json', '--verbose'], { cwd: DEFAULT_CWD, env: childEnv() });
+    p.on('error', () => {});
     const rl2 = createInterface({ input: p.stdout });
     rl2.on('line', (line) => { let o; try { o = JSON.parse(line); } catch { return; } if (o.type === 'system' && o.subtype === 'init') { captureMeta(o); try { p.kill('SIGTERM'); } catch {} } });
     setTimeout(() => { try { p.kill('SIGTERM'); } catch {} }, 20000);

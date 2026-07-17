@@ -95,7 +95,8 @@ async function main() {
   ].filter(Boolean).join("\n") + "\n";
   fs.writeFileSync(OUT, body, { mode: 0o600 });
   console.log(`\n✅ Wrote ${OUT}${email ? ` for ${email}` : ""}`);
-  console.log(`   Test it:  node harness/google${account ? " " + account : ""} gmail list "is:unread" 5`);
+  console.log(`   Test it:  google${account ? " " + account : ""} status`);
+  console.log(`             google${account ? " " + account : ""} gmail list "is:unread" 5`);
 }
 
 main().catch((e) => { console.error(String(e?.stack || e)); process.exit(1); });

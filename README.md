@@ -12,7 +12,7 @@ managed one-repo sandbox.
 
 <br>
 
-<img src="docs/demo.gif" alt="Box on a phone — browse sessions, open a chat, type" width="280">
+<img src="docs/demo.gif" alt="Box on a phone — open the task board, delegate a Linear ticket to an agent, watch it work, and file a follow-up ticket" width="280">
 
 <br>
 
@@ -128,6 +128,11 @@ sets everything up.
 
 `--yes` (non-interactive), `--no-harness`, `--no-cron`, `--no-start`, `--port N`. Idempotent —
 safe to re-run.
+
+Google power-up flags: `--with-google` starts the Gmail/Calendar/Drive OAuth flow during
+install, and `--google-client-json /path/client_secret.json` uses a downloaded Google
+OAuth desktop-client JSON. Add `--google-account work` to save a named account as
+`~/.config/box/google-work.env`.
 </details>
 
 ## Requirements
@@ -151,7 +156,7 @@ respawns it):
 |---|---|
 | `CC_AUTH_TOKEN` | The password you type to log in. Auto-generated if blank. |
 | `PORT` | Server port (default `7321`). |
-| `CC_WORKSPACE` | Default directory for new chats / where `/skills` are scanned. |
+| `CC_WORKSPACE` | Install-time fallback for the default directory new chats open in. You can override this later in the app's Settings sheet. |
 | `OWNER_NAME` | Your name, used in the per-session morning brief. |
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
 | `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). |
@@ -159,9 +164,17 @@ respawns it):
 | `LINEAR_API_KEY` + `LINEAR_TEAM_ID` | Drive a REAL Linear workspace instead of the local clone (optional). `LINEAR_LOCAL=off` disables the Board entirely. |
 | `OPENAI_API_KEY` + `OPENAI_ENDPOINT` | Enable cheap per-session attention/status summaries (optional). |
 | `BRAIN_DIR` | Surface recent meetings, emails/signals, and durable notes from a local brain folder (optional). |
+| `SLACK_USER_TOKEN` / `SLACK_BOT_TOKEN` / `SLACK_TOKEN` | Enable read-only Slack context for agents and the voice assistant. `SLACK_USER_TOKEN` is needed for Slack search; bot tokens can read channels/DMs they can access. |
+| `SLACK_COOKIE` / `SLACK_COOKIE_D` | Optional Slack web-session `d` cookie for an extracted `xoxc-...` `SLACK_USER_TOKEN`. Prefer a real OAuth user token when available; this fallback expires with the browser session. |
+| `SLACK_CHANNELS` | Optional comma-separated Slack channel names/ids to scope recent-message context, e.g. `#ops,C1234567890`. |
 | `DREAM_LOG` | Surface decisions from an external scheduled-agent / issue-filing loop (optional). |
 
 When an integration isn't configured, its UI hides itself — Box stays a clean chat app.
+Runtime defaults that are safe to change live, including default workspace, default agent,
+and Codex permission mode, are also available from the in-app Settings sheet.
+The same Settings sheet includes **Prompts & hooks** for viewing/editing the built-in
+dispatch/review/fork/status prompts and the known Box hook scripts. Prompt overrides live in
+`~/.cc-mobile/prompt-overrides.json`; hook edits are written to `~/.claude/hooks/`.
 
 ## The harness (optional, recommended)
 
@@ -185,12 +198,24 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
 
 - **Google access** — the bundled **`google`** CLI lets agents read & send your **Gmail**,
   check your **Calendar**, and read your **Drive**. One-time setup:
-  `node harness/google-auth.mjs` (full walkthrough, incl. the Google Cloud part for a
-  computer-use agent, in [`concierge/50-power-ups.md`](concierge/50-power-ups.md)).
+  `./install.sh --with-google` or
+  `./install.sh --google-client-json /path/client_secret.json`. If Box is already installed,
+  run `node harness/google-auth.mjs --from /path/client_secret.json` and verify with
+  `google status` (full walkthrough, incl. the Google Cloud part for a computer-use agent,
+  in [`concierge/50-power-ups.md`](concierge/50-power-ups.md)).
 - **Email yourself** — once Google access is on, a long autonomous run can `google gmail send
   you@example.com "done" "..."` to ping you when it finishes.
 - **A "brain"** — point `BRAIN_DIR` at a notes/markdown folder; agents read it for context,
   append durable facts, and let Box surface recent meetings / email signals beside the chats.
+- **Slack context** — set `SLACK_USER_TOKEN` (best: supports `search.messages`) or
+  `SLACK_BOT_TOKEN`, optionally scope it with `SLACK_CHANNELS`, then verify with
+  `node harness/slack.mjs recent 5`. If you use an extracted Slack web `xoxc-...`
+  token, also set `SLACK_COOKIE` or `SLACK_COOKIE_D` to the matching `xoxd-...`/`d=...` browser
+  cookie; this is a fallback and expires with the browser session. New agent
+  sessions get bounded recent Slack context, the voice assistant gets
+  `slack_recent` / `slack_search`, and `node harness/slack.mjs emit-recent` can
+  feed Slack messages into the Activity stream from cron or the
+  [`box-slack-events` systemd timer](docs/slack-events.md).
 - **An activity feed** — scheduled jobs can write events, lock state, and issue-filing
   decisions into local files; Box surfaces them so parallel agents and the human can stay
   oriented without reading every transcript.
@@ -199,6 +224,103 @@ These turn Box from "a coding agent" into an assistant that can *do things*:
   laptop when you want local work, box when you want always-on work, same files underneath.
 
 Agents are told about these in `harness/CLAUDE.md`, so they'll use them when it helps.
+
+## Agent launch API (for other agents)
+
+Agents running on the box can start a Box chat without speaking the WebSocket protocol:
+
+```bash
+node bin/box-enqueue.mjs --agent mac --title "Slack token setup" --text "Use the laptop browser..."
+```
+
+`--agent` accepts `claude`, `codex`, `gemini`, `agy`, or `mac` (Computer Use through the
+paired laptop bridge). The helper reads `CC_AUTH_TOKEN` from the environment or `.env` and
+POSTs to `POST /api/agent/enqueue`. Use `--dry-run` to validate routing without starting
+a session.
+
+## Voice mode (talk to your box like a phone call)
+
+With an `OPENAI_API_KEY` set, a 🎙 button appears in the header: a **realtime,
+hands-free voice assistant** built for situations where you can talk but not type —
+a long drive, a walk, cooking. It is not dictation: it's a live call with an agent
+that holds the box's controls.
+
+- **Realtime**: browser ↔ OpenAI Realtime API over WebRTC (sub-second turnarounds,
+  natural pauses, optional barge-in). The server never proxies audio — it mints a short-lived
+  token whose instructions carry a live snapshot of your box (active agents, board,
+  open decisions), and it executes every tool call the model makes.
+- **It can actually do things**: list/check/steer sessions, start new Claude/Codex
+  agents or Mac Computer Use sessions, delegate a Linear ticket to a fresh agent,
+  create/update issues, quick web search and multi-minute **deep research** (Parallel
+  API), search your brain and Slack, take notes, email you, read your calendar. Long
+  tasks run in the background and the assistant **announces them when they finish** —
+  mid-conversation.
+- **Reads the whole conversation, not just the last reply**: ask "what did that agent
+  and I decide earlier?" and it reads the session's **persisted transcript** directly
+  (`read_session_history`, paginated) instead of messaging the agent to summarize itself.
+  Secrets are auto-redacted before anything is spoken or emailed, long threads paginate,
+  and every result carries a reliable `transcript_ref` (+ an email path for the complete
+  conversation) ([`docs/voice-session-history.md`](docs/voice-session-history.md), INC-1134).
+- **Built for bad cellular**: sessions auto-rotate before OpenAI's 60-minute cap and
+  auto-reconnect after dead zones, folding the recent transcript into the new session
+  so the conversation just continues.
+- **Won't hear itself**: on a loud car speaker the mic can pick up the assistant's own
+  TTS. Half-duplex mic gating mutes the outgoing mic while the assistant speaks (re-opening
+  after playback), and a self-echo guard drops any "user" turn that matches what it just
+  said — so it never cuts itself off or replies to its own voice
+  ([`docs/voice-half-duplex.md`](docs/voice-half-duplex.md), INC-1088).
+- Config: `VOICE_ASSISTANT_MODEL` / `VOICE_ASSISTANT_FALLBACK_MODEL` / `VOICE_ASSISTANT_VOICE` / `VOICE_ASSISTANT_VAD` /
+  `VOICE_ASSISTANT_RESPONSE_STYLE` / `VOICE_ASSISTANT_INTERRUPT_RESPONSE` /
+  `VOICE_ASSISTANT_HALF_DUPLEX` / `VOICE_ASSISTANT_ECHO_GUARD` in `.env`
+  (see `.env.example`); optional `PARALLEL_API_KEY` for the research tools. Browser
+  diagnostics for API events, WebRTC audio stats, playback stalls, and pipeline/tool
+  injections are written under `~/.cc-mobile/voice-assistant/diagnostics/`.
+- Tests: `npm run smoke:voice` (API + tools + a live realtime round-trip) and
+  `npm run e2e:voice` (a real Chromium with a fake microphone that speaks a question
+  and asserts the spoken answer) — both against an isolated test instance; see
+  `CLAUDE.md` for the isolated-HOME pattern.
+
+### Experimental CLI adapter mode
+
+`adapter` is the default `VOICE_ASSISTANT_MODE`; set `VOICE_ASSISTANT_MODE=realtime` to
+return to the original OpenAI Realtime path. `VOICE_ADAPTER_TRANSPORT=livekit` is the
+new default adapter transport: a persistent LiveKit WebRTC room carries microphone and
+speaker audio, **Deepgram nova-3** streams interim text, Silero VAD plus LiveKit's
+hosted semantic turn detector finalizes the turn, and **Cartesia Sonic 3** speaks the
+answer. A local LiveKit Agent worker posts only the final transcript to the existing
+persistent Box **Codex** (or Claude Code) session; it does not get new tool authority.
+Cartesia is primary and OpenAI `gpt-4o-mini-tts` is an automatic TTS-provider fallback.
+`VOICE_ADAPTER_AGENT=codex|claude` chooses the engine; Codex is the default for the
+lower-latency interactive path.
+
+The adapter deliberately reuses the normal Box session runners, so session context,
+tool visibility, Codex sandbox settings, Claude remote-control ownership, and existing
+tool safeguards remain in force. It adds a voice-aware prompt: concise spoken answers,
+read-only handling for status/explanation requests, and explicit confirmation before
+destructive, external, privacy-sensitive, financial, deployment, or irreversible work.
+
+This is a turn-based experiment, not a streaming duplex call. LiveKit begins the turn
+detector after roughly 1.2 s of silence and caps waiting around 4.5 s; the remaining
+latency is Codex/tool work and then TTS, so a simple Codex response still takes several
+seconds and a tool-heavy turn can take much longer. One call has one in-flight turn;
+after `VOICE_ADAPTER_MAX_TURN_MS` (default 180s), it speaks a pending status while the
+same CLI session continues. Keep spoken answers under `VOICE_ADAPTER_MAX_RESPONSE_CHARS`
+(default 1400) to avoid slow TTS and context bloat. The persistent CLI session still
+accumulates its full provider context; the response cap limits what is spoken, not the
+agent's context window. Start a new call when changing subjects after a long session, or
+before switching `VOICE_ADAPTER_AGENT`.
+
+The LiveKit adapter keeps one media connection open for the entire call: it never tears
+down/recreates a browser audio graph between Codex turns. The microphone is disabled
+only while Cartesia plays, then re-enabled on that same track. Interim transcripts are
+rendered live. If the worker or LiveKit is unavailable, set
+`VOICE_ADAPTER_TRANSPORT=legacy` to return to the previous authenticated browser PCM
+relay (including its OpenAI HTTP TTS behavior).
+
+Run `npm run test:voice-adapter`, `npm run test:voice-livekit`, and
+`cd voice-runtime && uv run pytest` for the configuration and worker helpers. The existing
+`smoke:voice` is Realtime-WebSocket specific; adapter integration should be exercised
+against an isolated-HOME server with a real or fixture WAV, never the production state.
 
 ## Concierge (let a computer-use agent do the boring setup)
 

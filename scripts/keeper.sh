@@ -30,15 +30,60 @@ TUN_LOG="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/url.txt"
 
 # Single-instance guard (cron tick + manual launch dedupe).
-exec 9>"$STATE_DIR/keeper.lock"
-flock -n 9 || { echo "keeper already running; exiting"; exit 0; }
+# flock is Linux-only (util-linux); fall back to a PID-file lock on macOS/BSD.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$STATE_DIR/keeper.lock"
+  flock -n 9 || { echo "keeper already running; exiting"; exit 0; }
+else
+  PIDFILE="$STATE_DIR/keeper.pid"
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+    echo "keeper already running; exiting"; exit 0
+  fi
+  echo $$ > "$PIDFILE"
+  trap 'rm -f "$PIDFILE"' EXIT
+fi
 
 # Claude Code must use your full login credentials, not an inference-only token that
 # might be injected into the environment — otherwise remote-control is disallowed.
 unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_OAUTH_TOKEN ANTHROPIC_API_KEY
 
-server_up() { pgrep -f "node server/index.mjs" >/dev/null 2>&1; }
-start_server() { nohup node server/index.mjs >>"$SRV_LOG" 2>&1 9>&- & }
+# A process's cwd, portably: /proc on Linux, lsof on macOS/BSD (no /proc there).
+proc_cwd() {
+  local p="$1"
+  if [ -r "/proc/$p/cwd" ]; then
+    readlink "/proc/$p/cwd" 2>/dev/null
+  else
+    lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+  fi
+}
+server_pids() {
+  local p cwd
+  pgrep -f "node server/index.mjs" 2>/dev/null | while read -r p; do
+    [ -n "$p" ] || continue
+    cwd="$(proc_cwd "$p")"
+    [ "$cwd" = "$APP_DIR" ] && echo "$p"
+  done
+}
+server_up() { [ -n "$(server_pids | head -n 1)" ]; }
+ensure_node_pty() {
+  if node -e 'require("node-pty")' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "$(date -u +%FT%TZ) node-pty native module unavailable; rebuilding" >>"$SRV_LOG"
+  if npm rebuild node-pty >>"$SRV_LOG" 2>&1 \
+    && node -e 'require("node-pty")' >/dev/null 2>&1; then
+    echo "$(date -u +%FT%TZ) node-pty native module rebuilt successfully" >>"$SRV_LOG"
+    return 0
+  fi
+
+  echo "$(date -u +%FT%TZ) node-pty rebuild failed; server not started" >>"$SRV_LOG"
+  return 1
+}
+start_server() {
+  ensure_node_pty || return 1
+  nohup node server/index.mjs >>"$SRV_LOG" 2>&1 9>&- &
+}
 
 tunnel_up()  { pgrep -f "cloudflared tunnel" >/dev/null 2>&1; }
 start_tunnel() {

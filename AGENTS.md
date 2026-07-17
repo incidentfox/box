@@ -38,6 +38,17 @@ what to do — most likely the user just told you to **"install this."**
 - `install.sh` defaults the harness to `bypassPermissions` (so the box can work hands-off);
   mention this to the user — they can dial it back in `~/.claude/settings.json`.
 
+## Contributing — `main` is protected: **PR-only**
+
+`main` on `incidentfox/box` is a **protected branch** — direct pushes are rejected (admins
+included), force-pushes/deletions blocked. **Never push to `main`; ship every change through a
+pull request.** No approval is required (0 reviewers), so you can merge your own PR; the gate just
+enforces that a PR was used, and there's no CI to wait on. Branch off the latest `main` (ideally a
+worktree), then `gh pr create --fill && gh pr merge --auto --squash --delete-branch` (auto-merge is
+enabled; squash convention → `box: … (#N)`). For deploying server changes to a live host (reconcile
+the canonical checkout + restart so the keeper respawns), see the **Contributing** section of
+`CLAUDE.md`.
+
 ## If you're just exploring the code
 
 See `README.md` for the architecture: `server/index.mjs` is the backend, `public/` the

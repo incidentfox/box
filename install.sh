@@ -8,6 +8,8 @@
 #    ./install.sh --no-harness    # skip installing the Claude Code harness
 #    ./install.sh --no-cron       # don't add the @reboot keeper cron line
 #    ./install.sh --no-start      # set up everything but don't start the server
+#    ./install.sh --with-google   # also run Gmail/Calendar/Drive OAuth setup
+#    ./install.sh --google-client-json /path/client_secret.json
 #    ./install.sh --port 7321     # override the port
 #
 #  Safe to re-run. It never overwrites your .env or an existing ~/.claude/settings.json.
@@ -18,14 +20,18 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP_DIR"
 
 # ---- args -------------------------------------------------------------------
-ASSUME_YES=0; DO_HARNESS=1; DO_CRON=1; DO_START=1; PORT_OVERRIDE=""; NEED_CLAUDE_LOGIN=0
+ASSUME_YES=0; DO_HARNESS=1; DO_CRON=1; DO_START=1; DO_GOOGLE_AUTH=0
+PORT_OVERRIDE=""; NEED_CLAUDE_LOGIN=0; GOOGLE_ACCOUNT=""; GOOGLE_CLIENT_JSON=""
 while [ $# -gt 0 ]; do case "$1" in
   --yes|-y) ASSUME_YES=1 ;;
   --no-harness) DO_HARNESS=0 ;;
   --no-cron) DO_CRON=0 ;;
   --no-start) DO_START=0 ;;
+  --with-google) DO_GOOGLE_AUTH=1 ;;
+  --google-account) shift; GOOGLE_ACCOUNT="${1:-}" ;;
+  --google-client-json) shift; GOOGLE_CLIENT_JSON="${1:-}"; DO_GOOGLE_AUTH=1 ;;
   --port) shift; PORT_OVERRIDE="${1:-}" ;;
-  -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
   *) echo "unknown flag: $1" >&2; exit 1 ;;
 esac; shift; done
 
@@ -38,6 +44,26 @@ ask(){ # ask "prompt" "default" -> echoes answer (default if --yes or no TTY)
   if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ]; then echo "$d"; return; fi
   read -r -p "$p" a < /dev/tty || a=""
   echo "${a:-$d}"
+}
+google_cred_file(){ # google_cred_file [account]
+  local a="${1:-}"
+  if [ -z "$a" ] || [ "$a" = "default" ] || [ "$a" = "me" ]; then
+    printf '%s/.config/box/google.env' "$HOME"
+  else
+    printf '%s/.config/box/google-%s.env' "$HOME" "$a"
+  fi
+}
+google_cli(){ # google_cli [account] <command...>
+  local a="${1:-}"; shift || true
+  if [ -z "$a" ] || [ "$a" = "default" ]; then "$APP_DIR/harness/google" "$@"
+  else "$APP_DIR/harness/google" "$a" "$@"
+  fi
+}
+run_google_auth(){
+  local account="${1:-}" json="${2:-}" args=(harness/google-auth.mjs)
+  [ -n "$account" ] && args+=(--account "$account")
+  [ -n "$json" ] && args+=(--from "$json")
+  node "${args[@]}"
 }
 
 bold "📦 Installing Box in $APP_DIR"
@@ -109,7 +135,10 @@ fi
 if command -v claude >/dev/null 2>&1; then
   ok "claude CLI present ($(claude --version 2>/dev/null | head -1))"
   # Logged in? Box drives the user's logged-in CLI (no API key needed on a subscription).
-  if [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  # Creds live in ~/.claude/.credentials.json on Linux, but in the macOS Keychain on Mac —
+  # so a file-only check gives a false "not logged in" on macOS. Check the Keychain too.
+  if [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     || { [ "$OS" = "Darwin" ] && security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1; }; then
     ok "claude appears logged in"
   else
     warn "claude is installed but NOT logged in"
@@ -147,6 +176,14 @@ else
   warn "npm install failed — last lines (full log: $NPM_LOG):"
   tail -n 15 "$NPM_LOG" | sed 's/^/      /'
 fi
+# prebuild-install can unpack node-pty's `spawn-helper` without its execute bit, so every
+# PTY spawn then fails at runtime with "posix_spawnp failed" (the whole app looks dead).
+# Restore +x on whichever prebuilt/built helper exists (idempotent, both arches).
+_fixed_sh=0
+for sh in node_modules/node-pty/prebuilds/*/spawn-helper node_modules/node-pty/build/Release/spawn-helper; do
+  [ -f "$sh" ] && { chmod +x "$sh" 2>/dev/null; _fixed_sh=1; }
+done
+[ "$_fixed_sh" = 1 ] && ok "node-pty spawn-helper executable"
 # node-pty is the ONE native dependency and the usual point of failure. Verify it
 # actually loads (a swallowed build error otherwise surfaces later as a dead app).
 if node -e 'require("node-pty")' >/dev/null 2>&1; then
@@ -213,22 +250,60 @@ fi
 [ -n "$PORT_OVERRIDE" ] && { grep -q '^PORT=' .env && sed -i.bak "s|^PORT=.*|PORT=$PORT_OVERRIDE|" .env || echo "PORT=$PORT_OVERRIDE" >> .env; rm -f .env.bak; ok "port set to $PORT_OVERRIDE"; }
 echo
 
+# ---- Google CLI power-up ----------------------------------------------------
+bold "4) Installing Google CLI power-up (optional)"
+mkdir -p "$HOME/.local/bin"
+chmod +x "$APP_DIR/harness/google" "$APP_DIR/harness/google.mjs" "$APP_DIR/harness/google-auth.mjs" 2>/dev/null || true
+ln -sfn "$APP_DIR/harness/google" "$HOME/.local/bin/google"
+ok "google CLI → ~/.local/bin/google"
+case ":$PATH:" in *":$HOME/.local/bin:"*) :;; *) info "add ~/.local/bin to your PATH to use 'google' directly";; esac
+
+GOOGLE_CRED="$(google_cred_file "$GOOGLE_ACCOUNT")"
+if [ -f "$GOOGLE_CRED" ]; then
+  ok "Google credentials present ($GOOGLE_CRED)"
+elif [ "$DO_GOOGLE_AUTH" = 1 ]; then
+  if [ -z "$GOOGLE_CLIENT_JSON" ] && [ ! -t 0 ]; then
+    warn "--with-google needs a TTY, or pass --google-client-json /path/client_secret.json"
+  else
+    info "Starting Google OAuth setup for Gmail/Calendar/Drive"
+    run_google_auth "$GOOGLE_ACCOUNT" "$GOOGLE_CLIENT_JSON" || warn "Google OAuth setup did not complete — retry later: node harness/google-auth.mjs"
+  fi
+elif [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+  GG="$(ask '  Set up Gmail/Calendar/Drive now? Requires a Google OAuth desktop-client JSON. [y/N]: ' 'n')"
+  case "$GG" in
+    y|Y|yes|YES)
+      GA="$(ask '  Account nickname for these Google creds (blank/default, e.g. work): ' "$GOOGLE_ACCOUNT")"
+      GJ="$(ask '  Path to downloaded client_secret_*.json (blank to paste id/secret): ' '')"
+      GOOGLE_ACCOUNT="$GA"; GOOGLE_CLIENT_JSON="$GJ"; GOOGLE_CRED="$(google_cred_file "$GOOGLE_ACCOUNT")"
+      run_google_auth "$GOOGLE_ACCOUNT" "$GOOGLE_CLIENT_JSON" || warn "Google OAuth setup did not complete — retry later: node harness/google-auth.mjs"
+      ;;
+    *) info "Google auth skipped — enable later: node harness/google-auth.mjs --from /path/client_secret.json" ;;
+  esac
+else
+  info "Google auth not configured yet — enable later: node harness/google-auth.mjs --from /path/client_secret.json"
+fi
+
+GOOGLE_CRED="$(google_cred_file "$GOOGLE_ACCOUNT")"
+if [ -f "$GOOGLE_CRED" ]; then
+  if google_cli "$GOOGLE_ACCOUNT" token >/dev/null 2>&1; then
+    ok "Google access verified (Gmail/Calendar/Drive ready)"
+  else
+    warn "Google credentials exist but token refresh failed — run: google${GOOGLE_ACCOUNT:+ $GOOGLE_ACCOUNT} status"
+  fi
+fi
+echo
+
 # ---- harness ----------------------------------------------------------------
 if [ "$DO_HARNESS" = 1 ]; then
-  bold "4) Installing the Claude Code harness (hooks + needs-you helper)"
+  bold "5) Installing the Claude Code harness (hooks + needs-you helper)"
   mkdir -p "$HOME/.claude/hooks"
-  for h in _skip-automated.sh inject-time.sh surface-attention.sh; do
+  for h in _skip-automated.sh inject-time.sh surface-attention.sh surface-slack.sh; do
     cp "harness/hooks/$h" "$HOME/.claude/hooks/$h" && chmod +x "$HOME/.claude/hooks/$h"
   done
   ok "hooks → ~/.claude/hooks/"
   # make the harness scripts reachable for the SessionStart hook
   ln -sfn "$APP_DIR/harness" "$HOME/.claude/box-harness"
   ok "harness → ~/.claude/box-harness (symlink)"
-  # put the `google` CLI on PATH (Gmail/Calendar/Drive power-up; needs OAuth setup later)
-  mkdir -p "$HOME/.local/bin"
-  ln -sfn "$APP_DIR/harness/google" "$HOME/.local/bin/google"
-  ok "google CLI → ~/.local/bin/google (run 'node harness/google-auth.mjs' to enable — see concierge/50-power-ups.md)"
-  case ":$PATH:" in *":$HOME/.local/bin:"*) :;; *) info "add ~/.local/bin to your PATH to use 'google' directly";; esac
 
   if [ -f "$HOME/.claude/settings.json" ]; then
     cp "harness/settings.json.example" "$HOME/.claude/settings.box.json"
@@ -244,7 +319,7 @@ fi
 
 # ---- cron -------------------------------------------------------------------
 if [ "$DO_CRON" = 1 ]; then
-  bold "5) Always-on (keeper @reboot)"
+  bold "6) Always-on (keeper @reboot)"
   KEEPER_LINE="@reboot $APP_DIR/scripts/keeper.sh >> \$HOME/.cc-mobile/keeper.log 2>&1"
   if crontab -l 2>/dev/null | grep -Fq "$APP_DIR/scripts/keeper.sh"; then
     ok "keeper already in crontab"
@@ -259,7 +334,7 @@ fi
 
 # ---- start ------------------------------------------------------------------
 if [ "$DO_START" = 1 ]; then
-  bold "6) Starting Box"
+  bold "7) Starting Box"
   if pgrep -f "node server/index.mjs" >/dev/null 2>&1; then
     ok "server already running"
   else
@@ -281,9 +356,15 @@ if [ "$DO_START" = 1 ]; then
   [ "$NEED_CLAUDE_LOGIN" = 1 ] && bold "│   ⚠ LAST STEP: run 'claude' on this machine and log in (one-time browser sign-in)."
   echo "└──────────────────────────────────────────────────────────────"
   info "Voice + a Linear board are optional — add keys to .env and restart (pkill -f 'node server/index.mjs') to enable."
+  if [ -f "$(google_cred_file "$GOOGLE_ACCOUNT")" ]; then
+    info "Google is ready: agents can run 'google gmail list', 'google cal list', and 'google drive list'."
+  else
+    info "Google CLI is bundled but not authorized yet: run 'node harness/google-auth.mjs --from /path/client_secret.json', then 'google status'."
+  fi
 else
   bold "✅ Setup complete (not started)."
   echo "   Start it with:  ./scripts/keeper.sh &   (or reboot — the @reboot cron will)."
+  [ -f "$(google_cred_file "$GOOGLE_ACCOUNT")" ] || info "Google CLI is bundled but not authorized yet: run 'node harness/google-auth.mjs --from /path/client_secret.json', then 'google status'."
 fi
 
 echo

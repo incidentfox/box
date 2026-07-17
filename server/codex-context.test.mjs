@@ -4,7 +4,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
+import {
+  codexUserPromptsFromMessages,
+  findCodexRollout,
+  readCodexSessionHistory,
+  readCodexTokenInfo,
+} from './codex-context.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'codex-ctx-'));
 try {
@@ -54,6 +59,52 @@ try {
   assert.equal(findCodexRollout(root, 'does-not-exist'), null);
   assert.equal(readCodexTokenInfo(null), null);
   assert.equal(readCodexTokenInfo(join(day, 'nope.jsonl')), null);
+
+  // 5. full-history helper reads ordered user prompts from the rollout first. It logs
+  //    exactly which root/path was queried and declares read-only permissions.
+  const historyId = '019f1059-6b3c-7922-959d-a4c5d4e86abc';
+  const historyFile = join(day, `rollout-2026-06-28T23-00-00-${historyId}.jsonl`);
+  writeFileSync(historyFile, [
+    JSON.stringify({ timestamp: '2026-06-28T23:00:01.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'first request', local_images: ['/tmp/a.png'], local_files: [] } }),
+    JSON.stringify({ timestamp: '2026-06-28T23:00:02.000Z', type: 'event_msg', payload: { type: 'agent_message', message: 'ignored assistant text' } }),
+    JSON.stringify({ timestamp: '2026-06-28T23:00:03.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second request' }] } }),
+  ].join('\n') + '\n');
+  const hist = await readCodexSessionHistory({
+    sessionId: historyId,
+    codexHome: root,
+    query: 'history test',
+    messages: [{ role: 'user', parts: [{ t: 'text', text: 'sidecar fallback only' }] }],
+    sidecarPath: join(root, 'codex-messages', `${historyId}.json`),
+  });
+  assert.equal(hist.source, 'codex_rollout');
+  assert.deepEqual(hist.prompts.map((p) => p.text), ['first request', 'second request']);
+  assert.equal(hist.prompts[0].attachments.images, 1);
+  assert.equal(hist.audit.permission.mode, 'read-only');
+  assert.equal(hist.audit.permission.writes, false);
+  assert.ok(hist.audit.queries.some((q) => q.query === 'history test' && q.source === 'codex_rollout'));
+  assert.ok(hist.audit.paths.some((p) => p.path === historyFile && p.readable));
+
+  // 6. when rollout storage is absent, the helper falls back to the Box sidecar messages
+  //    and still records the exact checked path for audit/repeatability.
+  const sidecarMessages = [
+    { role: 'assistant', parts: [{ t: 'text', text: 'not a prompt' }], ts: 1 },
+    { role: 'user', parts: [{ t: 'text', text: 'fallback prompt' }], ts: 2 },
+  ];
+  const fallback = await readCodexSessionHistory({
+    sessionId: 'missing-rollout-id',
+    codexHome: root,
+    messages: sidecarMessages,
+    sidecarPath: join(root, 'codex-messages', 'missing-rollout-id.json'),
+  });
+  assert.equal(fallback.source, 'box_sidecar');
+  assert.deepEqual(fallback.prompts.map((p) => p.text), ['fallback prompt']);
+  assert.equal(codexUserPromptsFromMessages(sidecarMessages).total, 1);
+
+  // 7. storage unavailable is explicit and non-throwing.
+  const missing = await readCodexSessionHistory({ sessionId: 'no-history-anywhere', codexHome: root });
+  assert.equal(missing.source, 'unavailable');
+  assert.equal(missing.count, 0);
+  assert.match(missing.unavailable, /no readable/i);
 
   console.log('✅ codex-context.test.mjs passed');
 } finally {

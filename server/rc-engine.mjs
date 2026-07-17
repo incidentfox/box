@@ -23,6 +23,48 @@ const require = createRequire(import.meta.url);
 const pty = require('node-pty');
 const { execSync } = require('child_process');
 
+// ── Cross-platform process helpers ───────────────────────────────────────────
+// Box runs on both Linux servers and macOS. A few of the process inspections below
+// rely on tools whose flags/paths differ across platforms; these wrappers pick the
+// portable path so behaviour is identical on both.
+//
+// `pgrep -a` (print the full command line) is GNU/procps-only — macOS pgrep prints just
+// the PID — so get the PID list with portable `pgrep -f`, then read each command line via
+// portable `ps -o command=`. Returns the same "PID<space>command\n…" text the old
+// `pgrep -af` produced, so every caller's line-parsing is unchanged.
+export function pgrepFull(pattern) {
+  const q = `'${String(pattern).replace(/'/g, `'\\''`)}'`;
+  let pids = [];
+  try {
+    pids = execSync(`pgrep -f -- ${q} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 })
+      .split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch {}
+  const lines = [];
+  for (const pid of pids) {
+    let cmd = '';
+    try { cmd = execSync(`ps -p ${Number(pid)} -o command= 2>/dev/null`, { encoding: 'utf8', timeout: 2000 }).trim(); } catch {}
+    if (cmd) lines.push(`${pid} ${cmd}`);
+  }
+  return lines.join('\n');
+}
+// A process's current working directory, portably: /proc on Linux, `lsof` on macOS/BSD
+// (which have no /proc). Returns '' if it can't be determined.
+export function pidCwd(pid) {
+  try { return fs.readlinkSync(`/proc/${pid}/cwd`); } catch {}
+  try {
+    const out = execSync(`lsof -a -p ${Number(pid)} -d cwd -Fn 2>/dev/null`, { encoding: 'utf8', timeout: 2000 });
+    const n = out.split('\n').find((l) => l.startsWith('n'));
+    if (n) return n.slice(1);
+  } catch {}
+  return '';
+}
+// Is any process holding this socket/file open? `fuser` is Linux-only; `lsof` covers macOS/BSD.
+function fileInUse(p) {
+  try { execSync(`fuser ${JSON.stringify(p)} 2>/dev/null`, { timeout: 2000 }); return true; } catch {}
+  try { return !!execSync(`lsof -t -- ${JSON.stringify(p)} 2>/dev/null || true`, { encoding: 'utf8', timeout: 2000 }).trim(); } catch {}
+  return false;
+}
+
 const HOME = homedir();
 const CWD = process.env.CC_WORKSPACE || HOME;
 const PROJECTS_BASE = path.join(HOME, '.claude', 'projects');
@@ -70,16 +112,31 @@ const rcSockPath = (sessionId, name) => {
 
 // Search all project dirs for a session's JSONL (sessions live under their
 // start cwd, which may differ from PROJ_DIR for cross-project sessions).
+//
+// A session id can have MULTIPLE JSONL copies across project dirs: cross-project
+// box sessions, pooled-account config dirs (~/.claude-<id>), and — when ~/.claude is
+// synced between machines — a copy under the OTHER machine's cwd (e.g. a laptop's
+// "-Users-…" dir beside the box's "-home-…" dir). The first-enumerated copy is NOT
+// reliably the live one: a stale synced copy would pin the chat to OLD history. So
+// pick the most-recently-written copy (the machine actively appending right now),
+// tie-breaking toward the box's own project dir so its live session wins over a
+// foreign snapshot.
 function findJsonl(sessionId) {
+  let best = null;
   for (const base of projectsBases()) {
     try {
       for (const d of fs.readdirSync(base)) {
         const cand = path.join(base, d, sessionId + '.jsonl');
-        if (fs.existsSync(cand)) return cand;
+        let mtime;
+        try { mtime = fs.statSync(cand).mtimeMs; } catch { continue; } // missing → skip
+        const preferred = cand.startsWith(PROJ_DIR + path.sep);
+        if (!best || mtime > best.mtime || (mtime === best.mtime && preferred && !best.preferred)) {
+          best = { cand, mtime, preferred };
+        }
       }
     } catch {}
   }
-  return path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback (primary)
+  return best ? best.cand : path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback (primary)
 }
 
 function childEnv() {
@@ -95,6 +152,28 @@ function childEnv() {
   delete e.CLAUDE_CODE_CHILD_SESSION;
   delete e.CODEX_COMPANION_SESSION_ID;
   return e;
+}
+
+// Claude Code shows a one-time "Do you trust this folder?" dialog the first time it
+// runs in a directory. It's a pre-TUI screen our boot detector can't distinguish from a
+// ready input box, so the first pasted prompt gets swallowed and the chat looks dead.
+// Pre-seed trust for the cwd in ~/.claude.json (the same store the dialog writes) so the
+// dialog never shows. Only writes when not already trusted (so steady state never touches
+// the file); atomic rename + best-effort.
+function trustCwd(cwd) {
+  try {
+    if (!cwd) return;
+    const p = path.join(homedir(), '.claude.json');
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    j.projects = j.projects || {};
+    const cur = j.projects[cwd] || {};
+    if (cur.hasTrustDialogAccepted === true) return; // already trusted — no write, no race
+    cur.hasTrustDialogAccepted = true;
+    j.projects[cwd] = cur;
+    const tmp = p + '.box.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(j, null, 2));
+    fs.renameSync(tmp, p); // atomic swap; readers never see a torn file
+  } catch { /* never block a spawn on trust bookkeeping */ }
 }
 
 // Wrap text in a bracketed-paste so embedded newlines / special chars land in
@@ -181,7 +260,7 @@ export class RCEngine extends EventEmitter {
         if (!sm) return null;
         const sock = sm[1];
         if (!fs.existsSync(sock)) return null;
-        try { execSync(`fuser ${sock} 2>/dev/null`, { timeout: 2000 }); return sock; } catch { return null; }
+        return fileInUse(sock) ? sock : null;
       } catch { return null; }
     };
 
@@ -190,10 +269,7 @@ export class RCEngine extends EventEmitter {
     // the interactive `cnew` wrapper for a fresh RC session). The filters below still
     // require a real `claude --remote-control` process, so a bare id match can't false-hit.
     try {
-      const out = execSync(
-        `pgrep -af -- '${sessionId}' 2>/dev/null || true`,
-        { encoding: 'utf8', timeout: 2000 },
-      );
+      const out = pgrepFull(sessionId);
       for (const line of out.split('\n')) {
         const m = line.match(/^(\d+)\s+(.*)$/);
         if (!m) continue;
@@ -214,14 +290,15 @@ export class RCEngine extends EventEmitter {
     // share a cwd (see argvOnly above) — never use it to pick a socket to inject into.
     if (argvOnly) return null;
     try {
-      const all = execSync(`pgrep -af -- '--remote-control' 2>/dev/null || true`, { encoding: 'utf8', timeout: 2000 });
+      const all = pgrepFull('--remote-control');
       for (const line of all.split('\n')) {
         const m = line.match(/^(\d+)\s+(.*)$/);
         if (!m) continue;
         const [, pid, cmd] = m;
         if (!/\bclaude\b/.test(cmd) || /^dtach\b/.test(cmd) || /\bbash -c\b/.test(cmd)) continue;
         try {
-          const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+          const cwd = pidCwd(pid);
+          if (!cwd) continue;
           const proj = projectDirFor(cwd);
           const jf = path.join(proj, sessionId + '.jsonl');
           const st = fs.statSync(jf);
@@ -306,11 +383,12 @@ export class RCEngine extends EventEmitter {
     const cwd = opts.cwd || CWD;
     // Wrap the RC process in dtach so it survives server restarts and SSH disconnects.
     // dtach -A creates the socket+process if absent, or reattaches if it exists (idempotent).
-    const claudeArgs = ['--remote-control', name, '--dangerously-skip-permissions'];
+    const claudeArgs = ['--remote-control', name, '--permission-mode', 'auto'];
     if (opts.settings && opts.settings.model) claudeArgs.push('--model', opts.settings.model);
     if (opts.settings && opts.settings.effort) claudeArgs.push('--effort', opts.settings.effort);
     if (sessionId) claudeArgs.push('--resume', sessionId);
     else claudeArgs.push('--session-id', newId);   // deterministic id for a fresh chat
+    trustCwd(cwd); // pre-accept the folder-trust dialog so the first prompt isn't eaten
     const term = pty.spawn('dtach', ['-A', sock, '-r', 'winch', '-z', 'claude', ...claudeArgs], {
       name: 'xterm-256color', cols: 100, rows: 40, cwd, env: childEnv(),
     });

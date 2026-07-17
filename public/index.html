@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="/vendor/hljs-light.css" />
 <link rel="stylesheet" href="/style.css" />
 <script src="/vendor/highlight.min.js" defer></script>
+<script src="/vendor/livekit-client.umd.js" defer></script>
 </head>
 <body>
 
@@ -34,12 +35,16 @@
 <section id="sessions" class="screen hidden">
   <header class="bar sbar">
     <strong class="apptitle">Box</strong><span class="ver" id="ver"></span>
+    <button id="sidebarCollapseBtn" class="iconbtn ghost sidebarToggle" title="collapse sidebar" data-icon="sidebar-collapse"></button>
     <div class="spacer"></div>
     <button id="sessSearchBtn" class="iconbtn ghost" title="search chats" data-icon="search"></button>
+    <button id="settingsBtn" class="iconbtn ghost" title="settings" data-icon="settings"></button>
     <button id="themeBtn" class="iconbtn ghost" title="theme" data-icon="moon"></button>
     <button id="boardBtn" class="iconbtn ghost" title="Linear board" data-icon="board"></button>
     <button id="pipesBtn" class="iconbtn ghost" title="pipelines" data-icon="pulse"></button>
-    <button id="newBtn" class="compose" title="new chat" data-icon="plus"></button>
+    <button id="voiceBtn" class="iconbtn ghost hidden" title="voice assistant" data-icon="mic"></button>
+    <button id="sessionMenuBtn" class="iconbtn ghost sessionMenu" title="more workspace actions" aria-label="more workspace actions" data-icon="more"></button>
+    <button id="newBtn" class="compose" title="new chat" aria-label="new chat" data-icon="plus"></button>
   </header>
   <div id="sessSearch" class="boardSearch hidden">
     <span class="boardSearchIc" data-icon="search"></span>
@@ -51,6 +56,11 @@
   <div id="sessionList" class="list"></div>
   <div id="sessResults" class="list sessResults hidden"></div>
 </section>
+
+<button id="sidebarRestoreBtn" class="iconbtn ghost sidebarRestore" title="expand sidebar" data-icon="sidebar-expand"></button>
+
+<!-- VOICE ASSISTANT (contents built by voice.js on first open) -->
+<section id="voice" class="screen hidden"></section>
 
 <section id="pipelines" class="screen hidden">
   <header class="bar">
@@ -117,14 +127,11 @@
 
 <!-- CHAT -->
 <section id="chat" class="screen hidden">
-  <header class="bar">
+  <header class="bar chatBar">
     <button id="backBtn" class="iconbtn ghost" data-icon="back"></button>
-    <strong id="chatTitle" class="ctitle">New chat</strong>
-    <div class="spacer"></div>
+    <button id="chatTitle" class="ctitle titleBtn" type="button">New chat</button>
     <button id="filesBtn" class="iconbtn ghost" title="files" data-icon="folder"></button>
-    <button id="renameBtn" class="iconbtn ghost" title="rename" data-icon="pencil"></button>
     <button id="myMsgsBtn" class="iconbtn ghost" title="my messages" data-icon="list"></button>
-    <button id="copyChatBtn" class="iconbtn ghost" title="copy last 10 turns" data-icon="copy"></button>
     <button id="archiveBtn" class="iconbtn ghost" title="Archive this conversation" data-icon="archive"></button>
     <button id="attnBtn" class="iconbtn ghost" title="needs attention" style="position:relative"><span id="attnBadge" class="attnBadge hidden"></span></button>
   </header>
@@ -138,9 +145,8 @@
   <div id="attnPanel" class="messages hidden">
     <div class="attnBar">
       <div class="attnSeg">
-        <button id="attnTabInput" class="attnSegBtn active">Needs input</button>
-        <button id="attnTabStatus" class="attnSegBtn">Status</button>
-        <button id="attnTabLinear" class="attnSegBtn">Linear</button>
+        <button id="attnTabLinear" class="attnSegBtn active">Linear</button>
+        <button id="attnTabStatus" class="attnSegBtn">Brief</button>
       </div>
     </div>
     <div id="attnList"></div>
@@ -161,6 +167,7 @@
 	        <button id="modeChip" class="chip"><span data-icon="code"></span><span id="modeLabel">normal</span></button>
 	        <button id="agentChip" class="chip agent"><span id="agentDot"></span><span id="agentLabel">Claude</span></button>
 	        <div class="spacer"></div>
+        <button id="viewScreenBtn" class="iconbtn hidden" title="View my Mac screen" data-icon="laptop"></button>
         <button id="copyInputBtn" class="iconbtn" title="copy message" data-icon="clipboard"></button>
         <button id="attachBtn" class="iconbtn" title="attach" data-icon="paperclip"></button>
         <button id="micBtn" class="iconbtn" title="voice" data-icon="mic"></button>
@@ -186,9 +193,13 @@
     <div class="spacer"></div>
     <button id="expUp" class="iconbtn ghost" title="up" data-icon="arrow-up-dir"></button>
   </header>
+  <form id="expJump" class="expJump">
+    <input id="expJumpInput" autocomplete="off" spellcheck="false" placeholder="/tmp/file.png or ~/development" />
+    <button type="submit">Open</button>
+  </form>
   <div id="expList" class="list"></div>
   <div id="expReader" class="reader hidden">
-    <div class="readerBar"><button id="readerBack" class="iconbtn ghost" data-icon="back"></button><strong id="readerName"></strong><div class="spacer"></div><button id="readerAt" class="chip small"><span data-icon="at"></span>insert</button></div>
+    <div class="readerBar"><button id="readerBack" class="iconbtn ghost" data-icon="back"></button><strong id="readerName"></strong><div class="spacer"></div><button id="readerDownload" class="iconbtn ghost" title="download" data-icon="arrow-down"></button><button id="readerAt" class="chip small"><span data-icon="at"></span>insert</button></div>
     <div id="readerBody"></div>
   </div>
 </div>
@@ -216,7 +227,7 @@
     <button id="myMsgsClose" class="iconbtn ghost" data-icon="back"></button>
     <strong class="ctitle">My messages</strong>
     <div class="spacer"></div>
-    <button id="myMsgsCopyAll" class="chip small">Copy all</button>
+    <button id="myMsgsCopyAll" class="chip small">Copy</button>
     <button id="myMsgsDownload" class="iconbtn ghost" title="download full conversation" data-icon="arrow-down"></button>
   </header>
   <div id="myMsgsList" class="list myMsgsList"></div>
@@ -234,5 +245,7 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/voice-notify-queue.js"></script>
+<script src="/voice.js"></script>
 </body>
 </html>

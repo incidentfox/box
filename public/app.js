@@ -6,9 +6,10 @@ let ws = null;
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.5', reasoningEffort: 'high' },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
+  mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'opus', effort: 'xhigh' },
 };
 const AGENT_META = {
@@ -16,24 +17,30 @@ const AGENT_META = {
   codex: { label: 'Codex', icon: '◆' },
   gemini: { label: 'Gemini', icon: '✦' },
   agy: { label: 'Antigravity', icon: '△' },
+  mac: { label: 'Computer Use', icon: '🖥️' },
 };
 const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) => [k, v.label]));
-const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000 };
+const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000, mac: 258400 };
+function defaultContextWindow(agent) {
+  const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
+  if ((agent === 'codex' || agent === 'mac') && (!model || model.startsWith('gpt-5.6'))) return 1050000;
+  return DEFAULT_CONTEXT_WINDOW[agent];
+}
 const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
 const agentIcon = (agent) => (AGENT_META[agent] && AGENT_META[agent].icon) || '⌘';
-const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy') ? agent : 'claude';
-const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : 'claude');
+const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy' || agent === 'mac') ? agent : 'claude';
+const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : agent === 'mac' ? 'mac' : 'claude');
 const agentModelLabel = (agent, rawModel) => {
   const raw = String(rawModel || '');
   if (!raw) return '';
-  const found = (agent === 'codex' ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
+  const found = ((agent === 'codex' || agent === 'mac') ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
   if (found) return found.label;
   if (agent === 'agy') return raw ? raw.replace(/-/g, ' ') : 'Antigravity default';
   if (agent === 'gemini') return raw.replace(/^gemini-/, 'Gemini ').replace(/-/g, ' ');
-  if (agent === 'codex') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
+  if (agent === 'codex' || agent === 'mac') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
   return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
 };
-let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
+let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -58,7 +65,13 @@ applyVV();
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
 /* ---------- helpers ---------- */
-function show(id) { ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
+const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew', 'voice'];
+const desktopMq = window.matchMedia ? window.matchMedia('(min-width: 900px)') : null;
+const isDesktopShell = () => !!(desktopMq && desktopMq.matches);
+function show(id) {
+  document.body.dataset.view = id;
+  TOP_SCREENS.forEach((s) => $(s).classList.toggle('hidden', s !== id));
+}
 
 /* ---------- history-synced navigation (browser Back / Forward) ---------- */
 // The app is one page that toggles top-level <section> "screens" (plus the chat's
@@ -68,17 +81,63 @@ function show(id) { ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue',
 // Back/Forward buttons, the in-app back arrows, and swipe-back all walk one stack.
 let navSuppress = false;   // true while restoring a popped route, so the render itself doesn't re-push
 const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || ''].join('|') : '');
+const safeRoutePart = (value) => encodeURIComponent(String(value || '').trim());
+function routeSlug(value, fallback = '') {
+  const slug = String(value || '').toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 72);
+  return slug || fallback;
+}
+function routeUrl(state) {
+  const s = state || { view: 'sessions', filter: 'all' };
+  switch (s.view) {
+    case 'board': return '/board';
+    case 'issue': return `/issues/${safeRoutePart(s.id)}${routeSlug(s.title) ? `/${routeSlug(s.title)}` : ''}`;
+    case 'issueNew': return '/issues/new';
+    case 'pipelines': return '/pipelines';
+    case 'voice': return '/voice';
+    case 'chat': return s.id
+      ? `/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}`
+      : '/sessions/new';
+    case 'sessions': {
+      const filter = s.filter || 'all';
+      return filter === 'all' ? '/sessions' : `/sessions?filter=${encodeURIComponent(filter)}`;
+    }
+    case 'login':
+    default: return '/';
+  }
+}
+function routeFromLocation() {
+  const parts = location.pathname.split('/').filter(Boolean).map((part) => {
+    try { return decodeURIComponent(part); } catch { return part; }
+  });
+  const filter = new URLSearchParams(location.search).get('filter') || 'all';
+  if (parts[0] === 'board' && parts.length === 1) return { view: 'board' };
+  if (parts[0] === 'issues' && parts[1] === 'new') return { view: 'issueNew' };
+  if (parts[0] === 'issues' && parts[1]) return { view: 'issue', id: parts[1] };
+  if (parts[0] === 'pipelines') return { view: 'pipelines' };
+  if (parts[0] === 'voice') return { view: 'voice' };
+  if (parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true };
+  if (parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1] };
+  if (parts[0] === 'sessions') return { view: 'sessions', filter };
+  return { view: 'sessions', filter: 'all' };
+}
 function navTo(state, { replace = false } = {}) {
   if (navSuppress) return;                       // we're rendering a popped route — don't push
   const prev = history.state;
+  // Closing a sheet by tapping its backdrop/row queues the sheet entry for removal.
+  // If that tap immediately navigates, replace the sheet entry with the destination
+  // instead of leaving a dead entry that makes the next Back appear to do nothing.
+  if (pendingSheetHistory) { pendingSheetHistory = null; replace = true; }
   // Replace (don't grow the stack) for: first entry, an explicit replace, the same
   // screen re-rendering (e.g. re-filtering the list / refresh), or stepping off the
   // login screen — so Back from the list leaves the app instead of flashing login.
   if (!prev || replace || routeKey(prev) === routeKey(state) || prev.view === 'login') {
-    try { history.replaceState(state, ''); } catch {}
+    try { history.replaceState(state, '', routeUrl(state)); } catch {}
     return;
   }
-  try { history.pushState(state, ''); } catch {}
+  try { history.pushState(state, '', routeUrl(state)); } catch {}
 }
 function renderRoute(s) {
   navSuppress = true;
@@ -91,12 +150,14 @@ function renderRoute(s) {
       case 'login':     show('login'); break;
       case 'pipelines': openPipelines(); break;
       case 'board':     openBoard(); break;
+      case 'voice':     if (typeof openVoice === 'function') openVoice(); else openSessions(); break;
       case 'issue':     openIssue(s.id); break;
       case 'issueNew':  openIssueNew(); break;
       case 'chat':
         if (s.id && cur.id === s.id && chatVisible()) { if (attnMode) closeAttention(); break; } // just closing the overlay
         if (attnMode) closeAttention();
         if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent });
+        else if (s.new) openChat({ id: null, title: 'New chat', cwd: defaultCwd, agent: configuredDefaultAgent() });
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
         else openSessions();
         break;
@@ -111,7 +172,13 @@ function renderRoute(s) {
     }
   } finally { navSuppress = false; }
 }
-window.addEventListener('popstate', (e) => renderRoute(e.state));
+window.addEventListener('popstate', (e) => {
+  // A bottom sheet is open: the Back gesture / browser Back should dismiss the sheet
+  // (it pushed its own history entry in showSheet) and leave the screen underneath
+  // untouched — not navigate away and strand the drawer on top of the next screen.
+  if (!$('sheet').classList.contains('hidden')) { closeSheet({ fromHistory: true }); return; }
+  renderRoute(e.state);
+});
 function toast(m, ms = 2200, action) {
   const t = $('toast'); t.innerHTML = '';
   const label = document.createElement('span'); label.textContent = m; t.appendChild(label);
@@ -122,24 +189,58 @@ function toast(m, ms = 2200, action) {
   }
   t.classList.remove('hidden'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add('hidden'), ms);
 }
-const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const isPlaceholderChatTitle = (s) => /^New (Claude |Codex )?chat$/i.test(String(s || '').trim());
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
   if (r.status === 401) { throw new Error('unauthorized'); }   // never auto-logout — token is long & annoying to re-enter
   return r;
 }
+function setChatTitle(title) {
+  const t = $('chatTitle'); if (!t) return;
+  t.textContent = title || 'New chat';
+  t.title = title || 'New chat';
+}
+function cleanCopyText(text) {
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00a0/g, ' ')
+    .trim();
+}
+async function writeClipboardText(text, label = 'Copied') {
+  const clean = cleanCopyText(text);
+  if (!clean) { toast('Nothing to copy'); return false; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(clean);
+    else throw new Error('clipboard unavailable');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = clean; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  toast(label);
+  return true;
+}
 // Client bootstrap (filled from /api/config): $HOME for path-shortening + which optional
 // integrations are wired, so we can hide the Board / Linear UI when they aren't set up.
-let CFG = { home: '', ownerName: 'you', features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false } };
+let CFG = { home: '', ownerName: 'you', defaultCwd: '', appSettings: { defaultCwd: '', envDefaultCwd: '', defaultAgent: 'claude', codexSandbox: 'off' }, features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false }, promptTemplates: [], hooks: [] };
 async function loadConfig() {
   try { CFG = await (await api('/api/config')).json(); } catch {}
+  try { CFG.promptTemplates = (await (await api('/api/prompt-templates')).json()).templates || []; } catch { CFG.promptTemplates = []; }
+  try { CFG.hooks = (await (await api('/api/hooks')).json()).hooks || []; } catch { CFG.hooks = []; }
   applyConfig();
 }
 function applyConfig() {
   const f = (CFG && CFG.features) || {};
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   setVis('boardBtn', !!f.linear);       // header Linear-board button
-  setVis('attnTabLinear', !!f.linear);  // "Linear" sub-tab in the needs-attention panel
+  setVis('attnTabLinear', !!f.linear);  // Linear tab in the needs-attention panel
+  if (CFG.defaultCwd) defaultCwd = CFG.defaultCwd;
+  if (CFG.appSettings && CFG.appSettings.codexSandbox) DEFAULT_SETTINGS.codex.sandbox = CFG.appSettings.codexSandbox;
+  if (!LS.getItem('box_agent') && cur && !cur.id) { cur.agent = configuredDefaultAgent(); refreshAgentChip(); }
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
 function atBottom() { const m = $('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
@@ -230,16 +331,26 @@ const ICONS = {
   sun: SVG('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>', { w: 2 }),
   clipboard: SVG('<rect x="9" y="2" width="6" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>', { w: 2 }),
   copy: SVG('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', { w: 2 }),
+  branch: SVG('<path d="M6 3v7a4 4 0 0 0 4 4h8"/><path d="M18 9l4 5-4 5"/><circle cx="6" cy="3" r="2"/><circle cx="6" cy="21" r="2"/><path d="M6 10v9"/>', { w: 1.9 }),
   trash: SVG('<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h2a2 2 0 0 1 2 2v2"/>', { w: 1.9 }),
   archive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>', { w: 1.9 }),
+  unarchive: SVG('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M12 17v-6M8.5 14.5L12 11l3.5 3.5"/>', { w: 1.9 }),
+  star: SVG('<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>', { w: 1.8 }),
+  'star-filled': SVG('<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>', { fill: 'currentColor' }),
   bell: SVG('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>', { w: 2 }),
   list: SVG('<path d="M8 6h13M8 12h13M8 18h11"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/>', { w: 2 }),
+  'list-check': SVG('<path d="M10 6h11M10 12h11M10 18h9"/><path d="M3 6.5l1.5 1.5L8 4.5M3 12.5l1.5 1.5L8 10.5M3 18.5l1.5 1.5L8 16.5"/>', { w: 2 }),
   board: SVG('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>', { w: 1.9 }),
+  'sidebar-collapse': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M16 9l-3 3 3 3"/>', { w: 1.9 }),
+  'sidebar-expand': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9l3 3-3 3"/>', { w: 1.9 }),
   search: SVG('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', { w: 2 }),
+  more: SVG('<circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/>'),
+  settings: SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1A1.7 1.7 0 0 0 10 3V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1A1.7 1.7 0 0 0 21 10h0a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', { w: 1.8 }),
 };
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { if (!el._painted) { el.innerHTML = ICONS[el.dataset.icon] || ''; el._painted = 1; } }); }
 
 const THEME_KEY = 'box_theme';
+const SIDEBAR_COLLAPSED_KEY = 'box_sidebar_collapsed';
 const themeMq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
 function resolveTheme(theme) { return theme === 'dark' || (theme !== 'light' && themeMq && themeMq.matches) ? 'dark' : 'light'; }
 function applyTheme(theme = LS.getItem(THEME_KEY) || 'auto') {
@@ -260,7 +371,213 @@ if (themeMq) {
 }
 applyTheme();
 
+function updateSidebarButtons() {
+  const collapsed = document.body.classList.contains('sidebarCollapsed');
+  const collapseBtn = $('sidebarCollapseBtn');
+  if (collapseBtn) {
+    collapseBtn.dataset.icon = collapsed ? 'sidebar-expand' : 'sidebar-collapse';
+    collapseBtn.title = collapsed ? 'expand sidebar' : 'collapse sidebar';
+    collapseBtn.setAttribute('aria-label', collapseBtn.title);
+    collapseBtn._painted = 0; collapseBtn.innerHTML = '';
+  }
+  const restoreBtn = $('sidebarRestoreBtn');
+  if (restoreBtn) {
+    restoreBtn.title = 'expand sidebar';
+    restoreBtn.setAttribute('aria-label', restoreBtn.title);
+    restoreBtn._painted = 0; restoreBtn.innerHTML = '';
+  }
+  paintIcons(document);
+}
+function applySidebarCollapsed() {
+  const collapsed = isDesktopShell() && LS.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  document.body.classList.toggle('sidebarCollapsed', collapsed);
+  updateSidebarButtons();
+}
+function setSidebarCollapsed(collapsed) {
+  if (collapsed) LS.setItem(SIDEBAR_COLLAPSED_KEY, '1');
+  else LS.removeItem(SIDEBAR_COLLAPSED_KEY);
+  applySidebarCollapsed();
+}
+function toggleSidebarCollapsed() {
+  if (!isDesktopShell()) return;
+  setSidebarCollapsed(!document.body.classList.contains('sidebarCollapsed'));
+}
+if (desktopMq) {
+  const syncSidebarCollapse = () => applySidebarCollapsed();
+  if (desktopMq.addEventListener) desktopMq.addEventListener('change', syncSidebarCollapse);
+  else if (desktopMq.addListener) desktopMq.addListener(syncSidebarCollapse);
+}
+
 /* ---------- markdown (compact, for chat bubbles) ---------- */
+const ABS_PATH_RE = /(^|[\s([])((?:~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))[^\s<>"'`)]{2,})/g;
+const PREVIEW_IMG_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)(?:[?#].*)?$/i;
+const PDF_EXT_RE = /\.pdf(?:[?#].*)?$/i;
+const LOCAL_PATH_RE = /^(~|\/(?:tmp|home|opt|var|run|mnt|Volumes|Users))(?:\/|$)/;
+// Extensions worth auto-linking when an agent mentions a *relative* path in chat. Deliberately
+// excludes code exts (js/ts/py/…) — those are noisy in technical prose and already shown via
+// Edit/Write tool chips. Focused on deliverables: docs, data, media.
+const REL_FILE_EXTS = 'png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?|pdf|csv|tsv|xls|xlsx|xlsm|xlsb|ods|docx?|pptx?|txt|log|md|markdown|json|ya?ml|html?|xml|zip|tar|gz|tgz|mp4|mov|webm|m4v|mkv|mp3|wav|m4a|aac|ogg|flac';
+// A relative file token preceded by a word-boundary char. The (^|[\s([]) prefix keeps it from
+// matching inside generated HTML attributes or URLs (those are preceded by " or /, not a boundary).
+const REL_FILE_RE = new RegExp('(^|[\\s([])((?:\\.\\/)?(?:[\\w.-]+\\/)*[\\w.-]+\\.(?:' + REL_FILE_EXTS + '))\\b', 'gi');
+const REL_FILE_LONE_RE = new RegExp('^(?:\\.\\/)?(?:[\\w.-]+\\/)*[\\w.-]+\\.(?:' + REL_FILE_EXTS + ')$', 'i');
+// Resolve a relative path against the active session's working dir → absolute box path.
+function resolveRelPath(rel) {
+  const base = String((cur && cur.cwd) || (CFG && CFG.defaultCwd) || (CFG && CFG.home) || '').replace(/\/$/, '');
+  if (!base) return '';
+  return base + '/' + String(rel || '').replace(/^\.\//, '');
+}
+function cleanPreviewPath(raw) {
+  let path = String(raw || '');
+  let suffix = '';
+  while (/[.,;:!?]$/.test(path)) { suffix = path.slice(-1) + suffix; path = path.slice(0, -1); }
+  return { path, suffix };
+}
+function expandBoxPath(path) {
+  path = String(path || '').trim();
+  const home = (CFG && CFG.home) || '/home/factory';
+  if (path === '~') return home;
+  if (path.startsWith('~/')) return home + path.slice(1);
+  return path;
+}
+function decodePathMaybe(path) {
+  try { return decodeURIComponent(path); } catch { return path; }
+}
+function displayPath(path) {
+  const home = (CFG && CFG.home) || '/home/factory';
+  const s = String(path || '');
+  return s === home ? '~' : s.startsWith(home + '/') ? '~' + s.slice(home.length) : s;
+}
+const pathResolveCache = new Map();
+let pathResolveQueue = new Map();
+let pathResolveTimer = null;
+const pathResolveKey = (path, cwd = (cur && cur.cwd) || '') => String(cwd || '') + '\n' + cleanPreviewPath(path).path;
+function cacheResolvedPath(raw, result, cwd = (cur && cur.cwd) || '') {
+  const token = cleanPreviewPath(raw).path;
+  if (!token) return;
+  const value = result && result.found && result.path ? { found: true, path: result.path } : { found: false };
+  pathResolveCache.set(pathResolveKey(token, cwd), value);
+  if (value.found) pathResolveCache.set(pathResolveKey(value.path, cwd), value);
+}
+function verifiedPath(raw) {
+  const token = cleanPreviewPath(raw).path;
+  if (!token) return null;
+  const cached = pathResolveCache.get(pathResolveKey(token));
+  if (cached) return cached.found ? cached.path : null;
+  queuePathResolve(token);
+  return null;
+}
+function queuePathResolve(raw) {
+  const token = cleanPreviewPath(raw).path;
+  if (!token || pathResolveCache.has(pathResolveKey(token))) return;
+  pathResolveQueue.set(pathResolveKey(token), token);
+  clearTimeout(pathResolveTimer);
+  pathResolveTimer = setTimeout(() => {
+    const cwd = (cur && cur.cwd) || '';
+    const refs = [...pathResolveQueue.values()];
+    pathResolveQueue = new Map();
+    resolvePathRefs(refs, cwd).then((changed) => { if (changed) rerenderResolvedMarkdown(Array.isArray(changed) ? changed : null); }).catch(() => {});
+  }, 80);
+}
+async function resolvePathRefs(refs, cwd = (cur && cur.cwd) || '') {
+  const paths = [...new Set((refs || []).map((r) => cleanPreviewPath(r).path).filter(Boolean))].slice(0, 80);
+  const missing = paths.filter((p) => !pathResolveCache.has(pathResolveKey(p, cwd)));
+  if (!missing.length) return false;
+  let data;
+  try {
+    data = await (await api('/api/resolve-paths', { method: 'POST', body: JSON.stringify({ cwd, paths: missing }) })).json();
+  } catch {
+    return false;
+  }
+  const results = data && data.results || {};
+  for (const p of missing) cacheResolvedPath(p, results[p], cwd);
+  return missing;   // truthy (non-empty) — callers pass it to rerenderResolvedMarkdown to scope the re-render
+}
+function collectLocalPathRefs(text) {
+  const refs = [];
+  const add = (p) => { const token = cleanPreviewPath(p).path; if (token) refs.push(token); };
+  const s = String(text || '');
+  for (const m of s.matchAll(/\[([^\]]*)\]\(([^)\s]+)\)/g)) {
+    const href = decodePathMaybe(m[2].trim());
+    if (LOCAL_PATH_RE.test(expandBoxPath(href))) add(href);
+  }
+  for (const m of s.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+    const src = decodePathMaybe(m[1].trim());
+    if (LOCAL_PATH_RE.test(expandBoxPath(src))) add(src);
+  }
+  ABS_PATH_RE.lastIndex = 0;
+  for (const m of s.matchAll(ABS_PATH_RE)) add(m[2]);
+  if ((cur && cur.cwd)) {
+    REL_FILE_RE.lastIndex = 0;
+    for (const m of s.matchAll(REL_FILE_RE)) add(m[2]);
+  }
+  for (const m of s.matchAll(/`([^`]+)`/g)) {
+    const raw = m[1].trim();
+    if (LOCAL_PATH_RE.test(expandBoxPath(raw)) || REL_FILE_LONE_RE.test(raw)) add(raw);
+  }
+  return refs;
+}
+function messagePathRefs(m) {
+  if (!m || m.role === 'user') return [];
+  return (m.parts || []).filter((p) => p && p.t === 'text').flatMap((p) => collectLocalPathRefs(p.text || ''));
+}
+// Re-render only the blocks that actually mention a newly-resolved path. Re-rendering
+// every .mdBlock nuked and rebuilt the whole chat's DOM (aborting in-flight <img> loads,
+// then re-downloading them) each time one path resolved.
+function rerenderResolvedMarkdown(paths) {
+  const names = (paths || []).map((p) => String(p).split('/').filter(Boolean).pop() || String(p));
+  const touches = (txt) => !paths || paths.some((p, i) => txt.includes(p) || (names[i] && txt.includes(names[i])));
+  for (const el of document.querySelectorAll('.mdBlock')) {
+    if (el._rawMdText != null && el._rawMdText && touches(el._rawMdText)) el.innerHTML = md(el._rawMdText);
+  }
+  if (live && live.textEl && live.raw && touches(live.raw)) {
+    liveMdCache = { cut: -1, html: '' };   // cached prefix may now render differently
+    live.textEl.innerHTML = md(live.raw);
+    maybeScroll();
+  }
+}
+// One renderer for any local file reference in chat. Images preview inline; PDFs get a compact
+// "PDF · name" card (tap → full viewer); everything else is a file chip. All open via the
+// delegated .pathPreview click handler → openFile() → media viewer.
+function filePreviewChip(absPath, label) {
+  const expanded = expandBoxPath(absPath);
+  const shown = label != null ? String(label) : displayPath(expanded);
+  const name = shown.split('/').filter(Boolean).pop() || shown;
+  if (PREVIEW_IMG_EXT_RE.test(expanded)) {
+    return `<span class="pathPreview pathPreviewImg" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+      `<img src="${esc(rawFileUrl(expanded))}" alt="${esc(name)}" loading="lazy" decoding="async" onerror="this.closest('.pathPreview').classList.add('pathMissing')">` +
+      `<span class="pathPreviewText">${esc(shown)}</span></span>`;
+  }
+  if (PDF_EXT_RE.test(expanded)) {
+    return `<span class="pathPreview pathPreviewPdf" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+      `<span class="pdfBadge">PDF</span><span class="pathPreviewText">${esc(shown)}</span></span>`;
+  }
+  return `<span class="pathPreview" data-path="${esc(expanded)}" title="${esc(expanded)}">` +
+    `<span class="pathPreviewIcon">${ICONS.file}</span><span class="pathPreviewText">${esc(shown)}</span></span>`;
+}
+function pathPreviewHtml(rawPath) {
+  const { path, suffix } = cleanPreviewPath(rawPath);
+  if (!path || path.length < 3) return esc(rawPath || '');
+  const hit = verifiedPath(path);
+  return (hit ? filePreviewChip(hit, displayPath(path)) : path) + suffix;
+}
+function localPathLinkHtml(label, href) {
+  const path = expandBoxPath(decodePathMaybe(String(href || '')));
+  if (!LOCAL_PATH_RE.test(path)) return null;
+  const lbl = String(label || '').trim();
+  const hit = verifiedPath(path);
+  return hit ? filePreviewChip(hit, lbl || (path.split('/').filter(Boolean).pop() || path)) : (lbl || esc(displayPath(path)));
+}
+// A lone backticked token that is just a file path → clickable chip instead of plain <code>.
+// Agents very often write paths in backticks (`output/report.pdf`); this makes those tappable.
+function lonePathChip(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s || /\s/.test(s) || s.length < 3) return null;
+  const exp = expandBoxPath(s);
+  if (LOCAL_PATH_RE.test(exp)) { const hit = verifiedPath(exp); return hit ? filePreviewChip(hit, displayPath(s)) : null; }
+  if (cur && cur.cwd && REL_FILE_LONE_RE.test(s)) { const hit = verifiedPath(s); return hit ? filePreviewChip(hit, s) : null; }
+  return null;
+}
 function md(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
   let html = '', i = 0, list = null;
@@ -281,16 +598,29 @@ function md(src) {
       // status model mistook for an image) → render as a labelled link, not a broken <img>.
       if (isHttp && !looksImg) return `<a href="${esc(src)}" target="_blank">${esc(alt || src)}</a>`;
       // A relative/placeholder path (path/to/x.png — no leading slash) never resolves → its label.
-      if (!isHttp && !src.startsWith('/')) return alt ? esc(alt) : '';
-      const url = isHttp ? src : rawFileUrl(src);
+      if (!isHttp && !LOCAL_PATH_RE.test(src)) return alt ? esc(alt) : '';
+      const hit = isHttp ? src : verifiedPath(src);
+      if (!hit) return alt ? esc(alt) : esc(src);
+      const url = isHttp ? src : rawFileUrl(hit);
       // onerror: a missing/stale file should vanish, not leave a broken-image placeholder box.
-      return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" onerror="this.style.display='none'">`;
+      return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.style.display='none'">`;
     });
-    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+    t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+      const local = localPathLinkHtml(label, href);
+      if (local) return local;
+      return `<a href="${esc(href)}" target="_blank" rel="noopener">${label}</a>`;
+    });
     t = t.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
     t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     t = t.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank">$2</a>');
-    return t.replace(/(\d+)/g, (_, n) => `<code>${safeEsc(codes[+n] ?? '')}</code>`);
+    t = t.replace(ABS_PATH_RE, (_, pre, path) => pre + pathPreviewHtml(path));
+    // Relative file mentions (output/report.pdf, report.csv) → resolve against the session cwd.
+    // Gated on a known cwd; the boundary prefix keeps it out of HTML attrs / URLs built above.
+    if (cur && cur.cwd) t = t.replace(REL_FILE_RE, (m, pre, rel) => {
+      const hit = verifiedPath(rel);
+      return hit ? pre + filePreviewChip(hit, rel) : pre + rel;
+    });
+    return t.replace(/(\d+)/g, (_, n) => { const c = codes[+n] ?? ''; const chip = lonePathChip(c); return chip != null ? chip : `<code>${safeEsc(c)}</code>`; });
   };
   const isTableRow = (ln) => /^\|.+\|$/.test(ln.trim());
   const isSepRow  = (ln) => /^\|[-|: ]+\|$/.test(ln.trim());
@@ -337,26 +667,54 @@ async function login() {
   const token = $('tokenInput').value.trim(); if (!token) return;
   const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
   if (!r.ok) { $('loginErr').textContent = 'Wrong token'; return; }
-  TOKEN = token; LS.setItem('cc_token', token); loadConfig(); openSessions();
+  TOKEN = token; LS.setItem('cc_token', token);
+  const initialRoute = (history.state && history.state.returnTo) || routeFromLocation();
+  navTo(initialRoute, { replace: true });
+  loadConfig(); renderRoute(initialRoute);
 }
 function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); navTo({ view: 'login' }, { replace: true }); show('login'); }
 
 /* ---------- sessions ---------- */
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
 let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
-const STATUS_TABS = [['all', 'All'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+let chatRenderSeq = 0;
+let sessionRefreshTimer = null;
+let lastSessionFetchAt = 0;
+let bulkMode = false;
+const bulkSelected = new Set();
+const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
 
 async function openSessions(filter = 'all') { navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter); }
+let lastSessionRenderSig = '';
 async function fetchSessions(filter) {
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + curFilter)).json();
+  lastSessionFetchAt = Date.now();
   defaultCwd = d.defaultCwd; cur.cwd = cur.cwd || d.defaultCwd;
   allSessions = d.sessions || [];
+  for (const id of [...bulkSelected]) if (!allSessions.some((s) => s.id === id)) bulkSelected.delete(id);
   sessionCounts = d.counts || { all: allSessions.length };
-  renderTabs(); renderSessionList(); paintIcons($('sessions'));
+  // The feed re-fetches on every turn_start/idle of the open chat plus a heartbeat; most
+  // of those return byte-identical data. Skip the full DOM rebuild (cards + listeners +
+  // layout) when nothing changed — just keep the relative times fresh.
+  const sig = curFilter + '\x1f' + JSON.stringify(d.sessions) + '\x1f' + JSON.stringify(d.counts);
+  if (sig === lastSessionRenderSig && $('sessionList').childElementCount) { refreshSessionListTimes(); return; }
+  lastSessionRenderSig = sig;
+  renderTabs(); renderBulkBar(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
+}
+function refreshSessionsSoon(delay = 350) {
+  if (!TOKEN) return;
+  clearTimeout(sessionRefreshTimer);
+  sessionRefreshTimer = setTimeout(() => {
+    sessionRefreshTimer = null;
+    fetchSessions(curFilter || 'all').catch(() => {});
+  }, delay);
+}
+function sessionListIsVisible() {
+  return document.body.dataset.view === 'sessions' || (isDesktopShell() && document.body.dataset.view !== 'login');
 }
 function renderTabs() {
   const c = sessionCounts; const wrap = $('tabs'); wrap.innerHTML = '';
@@ -393,6 +751,79 @@ function renderTabs() {
     }
   }
 }
+function isActiveSession(s) {
+  return !!(s && (s.live || s.status === 'working' || s.status === 'needs_input' || s.status === 'live'));
+}
+function keepActiveFavoriteCount() {
+  const active = Number(sessionCounts.live || 0) + Number(sessionCounts.working || 0) + Number(sessionCounts.needs_input || 0);
+  const fav = Number(sessionCounts.favorites || 0);
+  const overlap = allSessions.filter((s) => isActiveSession(s) && s.favorite && !s.archived).length;
+  return Math.max(0, active + fav - overlap);
+}
+function selectedSessions() {
+  return allSessions.filter((s) => bulkSelected.has(s.id));
+}
+function syncBulkButton() {
+  const btn = $('bulkBtn'); if (!btn) return;
+  btn.title = bulkMode ? 'done selecting' : 'select chats';
+  btn.setAttribute('aria-label', btn.title);
+  btn.classList.toggle('on', bulkMode);
+  btn.dataset.icon = bulkMode ? 'check' : 'list-check';
+  btn._painted = 0; btn.innerHTML = '';
+  paintIcons(btn.parentElement || document);
+}
+function setBulkMode(on) {
+  bulkMode = !!on;
+  if (!bulkMode) bulkSelected.clear();
+  document.body.classList.toggle('bulkMode', bulkMode);
+  syncBulkButton();
+  renderBulkBar();
+  renderSessionList();
+  paintIcons($('sessions'));
+}
+function toggleBulkSelection(id, on) {
+  if (!id) return;
+  if (on) bulkSelected.add(id); else bulkSelected.delete(id);
+  renderBulkBar();
+  const card = $('sessionList') && [...$('sessionList').querySelectorAll('.sCard')].find((c) => c.dataset.sid === id);
+  if (card) {
+    card.classList.toggle('selected', bulkSelected.has(id));
+    const cb = card.querySelector('.sSelect input');
+    if (cb) cb.checked = bulkSelected.has(id);
+  }
+}
+function selectVisibleSessions() {
+  const target = curFilter === 'archived'
+    ? allSessions
+    : allSessions.filter((s) => !s.archived && !isActiveSession(s) && !s.favorite);
+  for (const s of target) if (s.id) bulkSelected.add(s.id);
+  renderBulkBar(); renderSessionList(); paintIcons($('sessions'));
+}
+function clearBulkSelection() {
+  bulkSelected.clear();
+  renderBulkBar(); renderSessionList(); paintIcons($('sessions'));
+}
+function renderBulkBar() {
+  const bar = $('bulkBar'); if (!bar) return;
+  const count = bulkSelected.size;
+  const canBulkStale = curFilter !== 'archived' && curFilter !== 'favorites' && curFilter !== 'auto' && !curFilter.startsWith('auto:');
+  const keepCount = keepActiveFavoriteCount();
+  const allCount = Number(sessionCounts.all || 0);
+  const staleEstimate = Math.max(0, allCount - keepCount);
+  bar.classList.toggle('hidden', !bulkMode);
+  if (!bulkMode) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `
+    <div class="bulkMeta">${count ? `${count} selected` : 'Select chats to archive'}</div>
+    <button id="bulkSelectVisible" class="bulkChip" type="button">${curFilter === 'archived' ? 'Select visible' : 'Select stale visible'}</button>
+    <button id="bulkClear" class="bulkChip" type="button" ${count ? '' : 'disabled'}>Clear</button>
+    <button id="bulkArchiveSelected" class="bulkChip danger" type="button" ${count ? '' : 'disabled'}>${curFilter === 'archived' ? 'Unarchive selected' : 'Archive selected'}</button>
+    ${canBulkStale ? `<button id="bulkArchiveStale" class="bulkChip primary" type="button" ${staleEstimate ? '' : 'disabled'}>Archive stale (${staleEstimate})</button>` : ''}
+  `;
+  $('bulkSelectVisible').onclick = selectVisibleSessions;
+  $('bulkClear').onclick = clearBulkSelection;
+  $('bulkArchiveSelected').onclick = () => bulkArchiveSelected(curFilter === 'archived' ? false : true);
+  if ($('bulkArchiveStale')) $('bulkArchiveStale').onclick = bulkArchiveStale;
+}
 function timeGroup(ms) {
   const now = new Date(), d = new Date(ms);
   const sameDay = (a, b) => a.toDateString() === b.toDateString();
@@ -408,6 +839,13 @@ function relTime(ms) {
   if (s < 86400) return Math.floor(s / 3600) + 'h'; if (s < 7 * 86400) return Math.floor(s / 86400) + 'd';
   return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
+function refreshSessionListTimes() {
+  const list = $('sessionList'); if (!list) return;
+  for (const el of list.querySelectorAll('[data-rel-time]')) {
+    const ms = Number(el.dataset.relTime || 0);
+    el.textContent = relTime(ms);
+  }
+}
 // In the Archived view, sort/group/label by WHEN it was archived (so a chat you just
 // archived shows up at the very top under "Today"), falling back to last-activity for
 // legacy archives. Everywhere else, last-activity time.
@@ -418,21 +856,33 @@ function renderSessionList() {
   if (!items.length) { list.innerHTML = '<p class="empty">No chats here.</p>'; return; }
   let group = null;
   for (const s of items) {
-    // Pinned (live) sessions are sorted to the top by the server. Group them ALL under
-    // one "Live" header instead of letting them fall into time buckets — otherwise a
-    // pinned "Today" item and a non-pinned "Today" item each emit their own header,
-    // duplicating Today/This week/Earlier down the list (the reported bug).
-    const g = s.pinned ? 'Live' : timeGroup(cardTime(s));
+    // Favorites and live sessions are sorted to the top by the server. Group them
+    // before time buckets so "Today" does not repeat between pinned and regular cards.
+    const g = s.favorite && !s.archived ? 'Favorites' : s.pinned ? 'Live' : timeGroup(cardTime(s));
     if (g !== group) { group = g; const h = document.createElement('div'); h.className = 'grouphd'; h.textContent = g; list.appendChild(h); }
     list.appendChild(sessionCard(s));
   }
 }
+// Keep the sidebar's "currently-viewing" highlight on the open chat. sessionCard()
+// only sets .current at render time, but on desktop the sidebar persists while you
+// switch chats — so without this the highlight stays stuck on the chat you left.
+// Re-target it from the live cur.id whenever the open chat changes.
+function syncCurrentCard() {
+  const list = $('sessionList'); if (!list) return;
+  for (const c of list.querySelectorAll('.sCard')) {
+    c.classList.toggle('current', !!(cur && cur.id) && c.dataset.sid === cur.id);
+  }
+}
 function sessionCard(s) {
   const el = document.createElement('div'); el.className = 'sCard';
+  el.dataset.sid = s.id || '';   // lets syncCurrentCard() re-target the .current highlight without a re-render
+  if (cur && cur.id && s.id === cur.id) el.classList.add('current');
+  if (bulkSelected.has(s.id)) el.classList.add('selected');
   const agent = s.agent || 'claude';
   const sub = s.parentId ? `Fork of ${s.parentTitle || s.parentId.slice(0, 8)}` : (s.note ? s.note : shortCwd(s.cwd));
   const label = STATUS_LABEL[s.status];
   const arch = s.archived;
+  const when = cardTime(s) || 0;
   el.innerHTML =
     `<div class="sActions">
        <button class="sAct edit" type="button"><span class="sActIc">✎</span>Edit</button>
@@ -440,9 +890,10 @@ function sessionCard(s) {
      </div>
      <div class="sCardFront">
        <div class="srow">
+         <label class="sSelect" title="Select chat"><input type="checkbox" ${bulkSelected.has(s.id) ? 'checked' : ''}><span></span></label>
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
-	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time">${relTime(cardTime(s))}</span><button class="sMore" type="button" title="More actions (rename / archive)" aria-label="More actions">⋯</button></div>
+	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time" data-rel-time="${when}">${relTime(when)}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
            <div class="sl"></div>
          </div>
        </div>
@@ -460,9 +911,12 @@ function sessionCard(s) {
   const cw = document.createElement('span'); cw.className = 'cwd'; cw.textContent = sub; sl.appendChild(cw);
   if (s.preview) front.querySelector('.preview').textContent = stripMd(s.preview);
   const swipe = attachSwipeActions(el, front, s);
+  el.querySelector('.sSelect input').addEventListener('change', (e) => { e.stopPropagation(); toggleBulkSelection(s.id, e.target.checked); });
+  el.querySelector('.sSelect').addEventListener('click', (e) => e.stopPropagation());
   // swipe-left action buttons (revealed behind the front)
   el.querySelector('.sAct.edit').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); renameChat(s, () => fetchSessions(curFilter)); });
-  el.querySelector('.archBtn').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); confirmArchive(s); });
+  el.querySelector('.archBtn').addEventListener('click', (e) => { e.stopPropagation(); swipe.close(); doArchive(s, !s.archived); });
+  el.querySelector('.sFav').addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); swipe.close(); doFavorite(s, !s.favorite); });
   // web/desktop has no swipe and no touch long-press: a visible ⋯ button (shown on
   // hover-capable devices, see .sMore in CSS) opens the same Rename/Archive sheet on a
   // plain click. Right-click anywhere on the row opens it too, as a power-user shortcut.
@@ -478,9 +932,10 @@ function attachSwipeActions(card, front, s) {
   const MAX = 132;            // reveal width = two 66px buttons
   let sx = 0, sy = 0, dx = 0, dragging = false, horiz = false, decided = false, open = false, moved = false;
   const setX = (x) => { front.style.transform = `translateX(${x}px)`; };
-  const close = () => { open = false; front.classList.remove('dragging'); setX(0); if (closeOpenSwipe === close) closeOpenSwipe = null; };
-  const openIt = () => { if (closeOpenSwipe && closeOpenSwipe !== close) closeOpenSwipe(); open = true; front.classList.remove('dragging'); setX(-MAX); closeOpenSwipe = close; };
+  const close = () => { open = false; front.classList.remove('dragging'); card.classList.remove('swiping'); setX(0); if (closeOpenSwipe === close) closeOpenSwipe = null; };
+  const openIt = () => { if (closeOpenSwipe && closeOpenSwipe !== close) closeOpenSwipe(); open = true; front.classList.remove('dragging'); card.classList.add('swiping'); setX(-MAX); closeOpenSwipe = close; };
   front.addEventListener('touchstart', (e) => {
+    if (bulkMode) return;
     if (e.touches.length !== 1) return;
     const t = e.touches[0]; sx = t.clientX; sy = t.clientY; dx = 0; dragging = true; decided = false; horiz = false; moved = false;
     front.classList.add('dragging');
@@ -492,6 +947,7 @@ function attachSwipeActions(card, front, s) {
       if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
       decided = true; horiz = Math.abs(dx) > Math.abs(dy) * 1.2;
       if (!horiz) front.classList.remove('dragging'); // vertical → let the list scroll
+      else card.classList.add('swiping');             // horizontal → reveal the action buttons
     }
     if (!horiz) return;
     moved = true; e.preventDefault();             // own the horizontal gesture
@@ -505,6 +961,7 @@ function attachSwipeActions(card, front, s) {
   front.addEventListener('touchend', end);
   front.addEventListener('touchcancel', end);
   front.addEventListener('click', (e) => {
+    if (bulkMode) { e.preventDefault(); e.stopPropagation(); toggleBulkSelection(s.id, !bulkSelected.has(s.id)); return; }
     if (open) { e.preventDefault(); e.stopPropagation(); close(); return; }   // tap front to dismiss
     if (moved && horiz) { e.preventDefault(); return; }                       // was a swipe, not a tap
     openChat(s);
@@ -512,26 +969,300 @@ function attachSwipeActions(card, front, s) {
   return { close, isOpen: () => open };
 }
 function confirmArchive(s) {
-  // No confirm dialog (it got annoying) — archive immediately; the Undo toast is the safety net.
-  doArchive(s, !s.archived);
+  if (s.archived) return doArchive(s, false);
+  openArchiveConfirm(s);
 }
 function openArchiveSheet(s) {
   openSheet(s.title, [
+    s.favorite
+      ? { ic: '★', label: 'Unpin', desc: 'Remove from Favorites', fn: () => doFavorite(s, false) }
+      : { ic: '☆', label: 'Pin', desc: 'Keep at the top of the chat list', fn: () => doFavorite(s, true) },
     { ic: '✎', label: 'Rename', desc: 'Edit this chat’s name', fn: () => renameChat(s, () => fetchSessions(curFilter)) },
     s.archived
       ? { ic: '📤', label: 'Unarchive', fn: () => doArchive(s, false) }
-      : { ic: '🗄', label: 'Archive', desc: 'Hide from your list', fn: () => confirmArchive(s) },
+      : { ic: '🗄', label: 'Archive', desc: 'Hide from your list', fn: () => doArchive(s, true) },
   ]);
 }
 async function doArchive(s, on) {
-  try { await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) }); } catch {}
-  s.archived = on;
-  if (on) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
-  else toast('📤 Unarchived');
+  let j = null;
+  try {
+    const r = await api(`/api/sessions/${s.id}/archive`, { method: 'POST', body: JSON.stringify({ archived: on }) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'archive failed');
+  } catch {
+    toast(on ? 'Archive failed' : 'Unarchive failed', 2600);
+    return null;
+  }
+  s.archived = !!j.archived;
+  if (cur && cur.id === s.id) { cur.archived = s.archived; updateArchiveButton(); }
+  if (s.archived) toast('🗄 Archived', 6000, { label: 'Undo', fn: () => doArchive(s, false) });
+  else toast(j.restored && j.restored.started ? '📤 Unarchived and reconnected' : '📤 Unarchived');
   fetchSessions(curFilter);
+  return j;
+}
+async function bulkArchiveSelected(on = true) {
+  const ids = [...bulkSelected];
+  if (!ids.length) return;
+  const action = on ? 'Archive' : 'Unarchive';
+  if (!confirm(`${action} ${ids.length} selected chat${ids.length === 1 ? '' : 's'}?`)) return;
+  await bulkArchive({
+    ids,
+    archived: on,
+    success: (j) => `${on ? 'Archived' : 'Unarchived'} ${j.changed || ids.length} chat${(j.changed || ids.length) === 1 ? '' : 's'}`,
+  });
+}
+async function bulkArchiveStale() {
+  const keep = selectedSessions().map((s) => s.title || s.id).slice(0, 8);
+  const keepMsg = keep.length ? `\n\nAlso keep selected:\n${keep.map((s) => `- ${s}`).join('\n')}` : '';
+  const keepCount = keepActiveFavoriteCount() + bulkSelected.size;
+  if (!confirm(`Archive every inactive, non-favorite chat in ${curFilter === 'all' ? 'All' : curFilter}? This keeps Working, Needs input, Live, Favorites, and your selected chats (${keepCount} kept).${keepMsg}`)) return;
+  await bulkArchive({
+    filter: curFilter || 'all',
+    archived: true,
+    preserveActive: true,
+    preserveFavorites: true,
+    preserveIds: [...bulkSelected],
+    success: (j) => `Archived ${j.changed || 0} stale chat${(j.changed || 0) === 1 ? '' : 's'}`,
+  });
+}
+async function bulkArchive(payload) {
+  let j = null;
+  try {
+    const r = await api('/api/sessions/bulk-archive', { method: 'POST', body: JSON.stringify(payload) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'bulk archive failed');
+  } catch {
+    toast('Bulk archive failed', 3200);
+    return null;
+  }
+  bulkSelected.clear();
+  toast(payload.success ? payload.success(j) : 'Updated chats');
+  await fetchSessions(curFilter === 'archived' && payload.archived ? 'all' : curFilter);
+  if (j && j.changed === 0) renderBulkBar();
+  return j;
+}
+async function doFavorite(s, on) {
+  if (!s || !s.id) return null;
+  let j = null;
+  try {
+    const r = await api(`/api/sessions/${s.id}/favorite`, { method: 'POST', body: JSON.stringify({ favorite: on }) });
+    j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j && j.error) || 'favorite failed');
+  } catch {
+    toast(on ? 'Pin failed' : 'Unpin failed', 2600);
+    return null;
+  }
+  s.favorite = !!j.favorite;
+  if (cur && cur.id === s.id) { cur.favorite = s.favorite; updateFavoriteButton(); }
+  toast(s.favorite ? 'Pinned to Favorites' : 'Removed from Favorites');
+  fetchSessions(curFilter);
+  return j;
 }
 const stripMd = (t) => (t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`>#]/g, '').replace(/^\s*[-•]\s*/gm, '').replace(/\s+/g, ' ').trim();
 const shortCwd = (c) => { let s = c || ''; const h = CFG && CFG.home; if (h && (s === h || s.startsWith(h + '/'))) s = '~' + s.slice(h.length); return s; };
+const agentEnabled = (agent) => agent === 'claude' || agent === 'codex' || !!((CFG.features || {})[agent]);
+function configuredDefaultAgent() {
+  const raw = (CFG && CFG.appSettings && CFG.appSettings.defaultAgent) || 'claude';
+  const agent = agentType(raw);
+  return agentEnabled(agent) ? agent : 'claude';
+}
+const CODEX_SANDBOXES = [
+  { id: 'off', label: 'Box YOLO', desc: 'Full access, no approval prompts' },
+  { id: 'workspace-write', label: 'Workspace write', desc: 'Constrain Codex to the workspace' },
+  { id: 'read-only', label: 'Read only', desc: 'Inspect without editing files' },
+];
+function sandboxLabel(id) {
+  const hit = CODEX_SANDBOXES.find((s) => s.id === id);
+  return hit ? hit.label : (id || 'Box YOLO');
+}
+function templateById(id) {
+  return ((CFG && CFG.promptTemplates) || []).find((t) => t.id === id);
+}
+function renderPromptTemplate(id, fallback, vars = {}) {
+  const tpl = templateById(id);
+  const raw = (tpl && tpl.value) || fallback || '';
+  return raw.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => String(vars[key] ?? ''));
+}
+async function refreshPromptConfig() {
+  try { CFG.promptTemplates = (await (await api('/api/prompt-templates')).json()).templates || []; } catch {}
+  try { CFG.hooks = (await (await api('/api/hooks')).json()).hooks || []; } catch {}
+}
+async function saveAppSettings(patch) {
+  const r = await api('/api/app-settings', { method: 'POST', body: JSON.stringify(patch) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'settings save failed');
+  CFG.appSettings = j; CFG.defaultCwd = j.defaultCwd;
+  defaultCwd = j.defaultCwd || defaultCwd;
+  DEFAULT_SETTINGS.codex.sandbox = j.codexSandbox || 'off';
+  return j;
+}
+function openTextEditor({ title, text, meta, save, reset, resetLabel = 'Reset to default' }) {
+  const inner = $('sheetInner'); inner.innerHTML = `<h3>${esc(title)}</h3>`;
+  if (meta) { const p = document.createElement('p'); p.className = 'sheetText'; p.textContent = meta; inner.appendChild(p); }
+  const ta = document.createElement('textarea'); ta.className = 'sheetTextarea'; ta.value = text || ''; ta.spellcheck = false; ta.autocomplete = 'off'; inner.appendChild(ta);
+  const err = document.createElement('p'); err.className = 'err sheetErr'; inner.appendChild(err);
+  const row = document.createElement('div'); row.className = 'sheetRow sel'; row.innerHTML = '<span class="ic">✓</span><div>Save</div>';
+  row.onclick = async () => {
+    err.textContent = '';
+    try { await save(ta.value); closeSheet(); }
+    catch (e) { err.textContent = String(e.message || e); }
+  };
+  inner.appendChild(row);
+  if (reset) {
+    const rr = document.createElement('div'); rr.className = 'sheetRow'; rr.innerHTML = `<span class="ic"></span><div>${esc(resetLabel)}</div>`;
+    rr.onclick = async () => {
+      err.textContent = '';
+      try { await reset(); closeSheet(); }
+      catch (e) { err.textContent = String(e.message || e); }
+    };
+    inner.appendChild(rr);
+  }
+  showSheet();
+  setTimeout(() => ta.focus(), 0);
+}
+function promptVarDesc(t) {
+  return (t.vars && t.vars.length) ? `Variables: ${t.vars.map((v) => `{{${v}}}`).join(', ')}` : 'No variables.';
+}
+async function openPromptTemplateEditor(t) {
+  openTextEditor({
+    title: t.title,
+    text: t.value || t.default || '',
+    meta: `${t.desc || ''} ${promptVarDesc(t)}`.trim(),
+    save: async (value) => {
+      const r = await api(`/api/prompt-templates/${encodeURIComponent(t.id)}`, { method: 'POST', body: JSON.stringify({ value }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'prompt save failed');
+      await refreshPromptConfig();
+      toast('Prompt saved');
+    },
+    reset: t.overridden ? async () => {
+      const r = await api(`/api/prompt-templates/${encodeURIComponent(t.id)}/reset`, { method: 'POST', body: '{}' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'prompt reset failed');
+      await refreshPromptConfig();
+      toast('Prompt reset');
+    } : null,
+  });
+}
+async function openPromptTemplateList() {
+  await refreshPromptConfig();
+  const rows = (CFG.promptTemplates || []).map((t) => ({
+    ic: t.overridden ? '✓' : '',
+    label: t.title,
+    desc: `${t.overridden ? 'Edited' : 'Default'} · ${t.desc || ''}`,
+    fn: () => openPromptTemplateEditor(t),
+  }));
+  openSheet('Prompt templates', rows);
+}
+function openHookEditor(h) {
+  openTextEditor({
+    title: h.title,
+    text: h.content || '',
+    meta: `${h.event} · ${h.path}`,
+    save: async (content) => {
+      const r = await api(`/api/hooks/${encodeURIComponent(h.id)}`, { method: 'POST', body: JSON.stringify({ content }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'hook save failed');
+      await refreshPromptConfig();
+      toast('Hook saved');
+    },
+    reset: h.overridden ? async () => {
+      const r = await api(`/api/hooks/${encodeURIComponent(h.id)}/reset`, { method: 'POST', body: '{}' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'hook reset failed');
+      await refreshPromptConfig();
+      toast('Hook reset');
+    } : null,
+  });
+}
+async function openHookList() {
+  await refreshPromptConfig();
+  const rows = (CFG.hooks || []).map((h) => ({
+    ic: h.overridden ? '✓' : '',
+    label: h.title,
+    desc: `${h.overridden ? 'Edited' : h.source} · ${h.file}`,
+    fn: () => openHookEditor(h),
+  }));
+  openSheet('Hooks', rows);
+}
+function openPromptHub() {
+  openSheet('Prompts & hooks', [
+    { ic: '', label: 'Prompt templates', desc: 'Linear dispatch, fork/switch, review, status brief', fn: openPromptTemplateList },
+    { ic: '', label: 'Hooks', desc: 'Known Claude hook scripts installed by Box', fn: openHookList },
+  ]);
+}
+function openPathSheet(title, value, placeholder, onSave, opts = {}) {
+  const inner = $('sheetInner'); inner.innerHTML = `<h3>${esc(title)}</h3>`;
+  if (opts.text) { const p = document.createElement('p'); p.className = 'sheetText'; p.textContent = opts.text; inner.appendChild(p); }
+  const inp = document.createElement('input'); inp.className = 'sheetInput'; inp.value = value || ''; inp.placeholder = placeholder || '~/development'; inp.autocomplete = 'off'; inp.spellcheck = false;
+  inner.appendChild(inp);
+  const err = document.createElement('p'); err.className = 'err sheetErr'; inner.appendChild(err);
+  const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div>Save</div>';
+  save.onclick = async () => {
+    err.textContent = '';
+    try { await onSave(inp.value.trim()); closeSheet(); }
+    catch (e) { err.textContent = String(e.message || e); }
+  };
+  inner.appendChild(save);
+  if (opts.resetLabel && opts.onReset) {
+    const reset = document.createElement('div'); reset.className = 'sheetRow'; reset.innerHTML = `<span class="ic"></span><div><div>${esc(opts.resetLabel)}</div>${opts.resetDesc ? `<div class="muted" style="font-size:12.5px">${esc(opts.resetDesc)}</div>` : ''}</div>`;
+    reset.onclick = async () => { err.textContent = ''; try { await opts.onReset(); closeSheet(); } catch (e) { err.textContent = String(e.message || e); } };
+    inner.appendChild(reset);
+  }
+  showSheet();
+  setTimeout(() => { inp.focus(); inp.select(); }, 0);
+}
+function openDefaultWorkspaceSheet() {
+  const s = (CFG && CFG.appSettings) || {};
+  openPathSheet('Default workspace', s.defaultCwd || defaultCwd, '~/development', async (path) => {
+    const next = await saveAppSettings({ defaultCwd: path });
+    if (!cur.cwd) cur.cwd = next.defaultCwd;
+    toast(`Default workspace: ${shortCwd(next.defaultCwd)}`);
+    fetchSessions(curFilter);
+  }, {
+    text: 'New chats start here. Existing chats keep their own workspace.',
+    resetLabel: s.envDefaultCwd && s.defaultCwd !== s.envDefaultCwd ? 'Use install default' : '',
+    resetDesc: s.envDefaultCwd ? shortCwd(s.envDefaultCwd) : '',
+    onReset: async () => { const next = await saveAppSettings({ defaultCwd: '' }); toast(`Default workspace: ${shortCwd(next.defaultCwd)}`); fetchSessions(curFilter); },
+  });
+}
+function openDefaultAgentSheet() {
+  const curDefault = configuredDefaultAgent();
+  const rows = ['claude', 'codex', 'gemini', 'agy', 'mac'].filter(agentEnabled).map((agent) => ({
+    ic: agentIcon(agent),
+    label: agentLabel(agent),
+    desc: agent === curDefault ? 'Current default for new chats' : 'Use for new chats',
+    sel: agent === curDefault,
+    fn: () => saveAppSettings({ defaultAgent: agent }).then(() => {
+      LS.setItem('box_agent', agent);
+      setAgent(agent);
+      toast(`Default agent: ${agentLabel(agent)}`);
+    }).catch((e) => toast(String(e.message || e))),
+  }));
+  openSheet('Default agent', rows);
+}
+function openDefaultCodexSandboxSheet() {
+  const active = ((CFG && CFG.appSettings && CFG.appSettings.codexSandbox) || DEFAULT_SETTINGS.codex.sandbox || 'off');
+  openSheet('Default Codex permissions', CODEX_SANDBOXES.map((s) => ({
+    ic: s.id === active ? '✓' : '',
+    label: s.label,
+    desc: s.desc,
+    sel: s.id === active,
+    fn: () => saveAppSettings({ codexSandbox: s.id }).then(() => {
+      toast(`Codex default: ${s.label}`);
+    }).catch((e) => toast(String(e.message || e))),
+  })));
+}
+function openAppSettings() {
+  const s = (CFG && CFG.appSettings) || {};
+  openSheet('Settings', [
+    { ic: '⌂', label: 'Default workspace', desc: shortCwd(s.defaultCwd || defaultCwd), fn: openDefaultWorkspaceSheet },
+    { ic: agentIcon(configuredDefaultAgent()), label: 'Default agent', desc: agentLabel(configuredDefaultAgent()), fn: openDefaultAgentSheet },
+    { ic: '◆', label: 'Codex permissions', desc: sandboxLabel(s.codexSandbox || DEFAULT_SETTINGS.codex.sandbox || 'off'), fn: openDefaultCodexSandboxSheet },
+    { ic: '', label: 'Prompts & hooks', desc: 'View and edit built-in prompt text and hook scripts', fn: openPromptHub },
+    { ic: document.documentElement.dataset.theme === 'dark' ? '☀' : '☾', label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Dark' : 'Light', fn: toggleTheme },
+  ]);
+}
 function fmtTokens(n) {
   n = Math.max(0, Math.round(Number(n) || 0));
   if (n >= 1000000) return (n / 1000000).toFixed(n < 10000000 ? 1 : 0).replace(/\.0$/, '') + 'M';
@@ -539,9 +1270,9 @@ function fmtTokens(n) {
   return String(n);
 }
 function currentContext() {
-  const agent = cur.agent === 'codex' ? 'codex' : 'claude';
+  const agent = agentType(cur.agent);
   const cx = cur.context || {};
-  const win = Number(cx.windowTokens) || DEFAULT_CONTEXT_WINDOW[agent];
+  const win = Number(cx.windowTokens) || defaultContextWindow(agent);
   const used = Math.max(0, Math.round(Number(cx.usedTokens) || 0));
   return {
     usedTokens: used,
@@ -559,13 +1290,41 @@ function renderContextMeter() {
   el.title = `${cx.usedTokens.toLocaleString()} / ${cx.windowTokens.toLocaleString()} tokens${estimated ? ' (estimated)' : ''}`;
   el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
 }
-$('newBtn').onclick = () => openSheet('New chat', [
-  { ic: '◆', label: 'Codex', desc: 'Run Codex on the box', fn: () => { setAgent('codex'); openChat({ id: null, title: 'New Codex chat', cwd: defaultCwd, agent: 'codex' }); } },
-  { ic: '⌘', label: 'Claude', desc: 'Remote-control Claude Code', fn: () => { setAgent('claude'); openChat({ id: null, title: 'New Claude chat', cwd: defaultCwd, agent: 'claude' }); } },
-  { ic: '✦', label: 'Gemini', desc: 'Run Gemini on the box', fn: () => { setAgent('gemini'); openChat({ id: null, title: 'New Gemini chat', cwd: defaultCwd, agent: 'gemini' }); } },
-  { ic: '△', label: 'Antigravity', desc: 'Use the local agy CLI / AI Pro route', fn: () => { setAgent('agy'); openChat({ id: null, title: 'New Antigravity chat', cwd: defaultCwd, agent: 'agy' }); } },
-]);
+function openSessionMenu() {
+  const voiceAvailable = $('voiceBtn') && !$('voiceBtn').classList.contains('hidden');
+  const rows = [
+    { ic: ICONS.settings, label: 'Settings', desc: 'Workspace, agent, and permissions', fn: openAppSettings },
+    { ic: document.documentElement.dataset.theme === 'dark' ? ICONS.sun : ICONS.moon, label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Switch to light' : 'Switch to dark', fn: toggleTheme },
+    { ic: ICONS.pulse, label: 'Pipelines', desc: 'Automation and inbox health', fn: openPipelines },
+  ];
+  if (CFG.features && CFG.features.linear) rows.splice(2, 0, { ic: ICONS.board, label: 'Linear board', desc: 'Open your work queue', fn: openBoard });
+  if (voiceAvailable && typeof openVoice === 'function') rows.push({ ic: ICONS.mic, label: 'Voice assistant', desc: 'Talk to your box hands-free', fn: openVoice });
+  openSheet('Workspace', rows);
+}
+$('newBtn').onclick = () => {
+  const labels = {
+    codex: ['Run Codex on the box', 'New Codex chat'],
+    claude: ['Remote-control Claude Code', 'New Claude chat'],
+    gemini: ['Run Gemini on the box', 'New Gemini chat'],
+    agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
+    mac: ['Drive your Mac (Computer Use)', 'New Computer Use chat'],
+  };
+  const def = configuredDefaultAgent();
+  const order = [def, 'codex', 'claude', 'gemini', 'agy', 'mac'].filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
+  const rows = order.map((agent) => ({
+    ic: agentIcon(agent),
+    label: agentLabel(agent),
+    desc: agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0],
+    fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: defaultCwd, agent }); },
+  }));
+  openSheet('New chat', rows);
+};
+if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
+if ($('sessionMenuBtn')) $('sessionMenuBtn').onclick = openSessionMenu;
+if ($('bulkBtn')) $('bulkBtn').onclick = () => setBulkMode(!bulkMode);
 $('themeBtn').onclick = toggleTheme;
+if ($('sidebarCollapseBtn')) $('sidebarCollapseBtn').onclick = toggleSidebarCollapsed;
+if ($('sidebarRestoreBtn')) $('sidebarRestoreBtn').onclick = () => setSidebarCollapsed(false);
 if ($('contextMeter')) $('contextMeter').onclick = openStatusSheet;
 
 /* ---------- session search — full-text across ALL chats (title/summary/cwd/transcript)
@@ -593,7 +1352,7 @@ function setSessQuery(q) {
   const results = $('sessResults'), list = $('sessionList');
   if (!q) {
     results.classList.add('hidden'); results.innerHTML = '';
-    list.classList.remove('hidden'); renderTabs();   // restores #tabs/#subtabs for the current filter
+    list.classList.remove('hidden'); renderTabs(); renderBulkBar();   // restores #tabs/#subtabs/bulk bar for the current filter
     return;
   }
   $('tabs').classList.add('hidden'); $('subtabs').classList.add('hidden'); list.classList.add('hidden');
@@ -605,7 +1364,9 @@ async function runSessSearch() {
   const seq = ++sessSearchSeq;
   const box = $('sessResults'); box.innerHTML = '<p class="empty">Searching…</p>';
   let results = [];
-  try { results = (await (await api('/api/session-search?q=' + encodeURIComponent(q))).json()).results || []; } catch {}
+  const params = new URLSearchParams({ q });
+  if (cur.id) params.set('exclude', cur.id);
+  try { results = (await (await api('/api/session-search?' + params.toString())).json()).results || []; } catch {}
   if (seq !== sessSearchSeq || sessQuery !== q) return;   // a newer query already fired
   box.innerHTML = '';
   if (!results.length) { box.innerHTML = `<p class="empty">No chats match “${esc(q)}”.</p>`; return; }
@@ -623,10 +1384,14 @@ function sessResultRow(s) {
     + (s.preview ? `<div class="sresSnip"></div>` : '');
   row.querySelector('.sresTitle').textContent = s.title || 'session';
   row.querySelector('.sresAge').textContent = s.age || '';
-  row.querySelector('.sresMeta').textContent = shortCwd(s.cwd);
+  row.querySelector('.sresMeta').textContent = [shortCwd(s.cwd), searchMatchLabel(s)].filter(Boolean).join(' · ');
   if (s.preview) row.querySelector('.sresSnip').textContent = stripMd(s.preview);
   row.onclick = () => { sessSearchClose(); openChat({ id: s.id, title: s.title, agent, cwd: s.cwd }); };
   return row;
+}
+function searchMatchLabel(s) {
+  if (!s || !s.matchedQuery || s.matchKind === 'exact') return '';
+  return `matched ${s.matchKind}: ${s.matchedQuery}`;
 }
 
 /* ---------- pipelines health panel ---------- */
@@ -748,9 +1513,14 @@ function ticketCard(t) {
     const dg = t.delegation;
     const el = document.createElement('div'); el.className = 'tktDeleg';
     const who = dg.sessionTitle || `${agentLabel(dg.agent)} agent`;
-    el.innerHTML = `<span class="tktDelegIc">🤖</span><span class="tktDelegTxt"></span>${dg.sessionId ? '<span class="tktDelegGo">→</span>' : ''}`;
+    el.innerHTML = `<span class="tktDelegIc">🤖</span><span class="tktDelegTxt"></span><span class="tktDelegGo">→</span>`;
     el.querySelector('.tktDelegTxt').textContent = `delegated · ${who}`;
-    if (dg.sessionId) { el.classList.add('clk'); el.onclick = (e) => { e.stopPropagation(); openChat({ id: dg.sessionId, title: who, agent: dg.agent }); }; }
+    el.classList.add('clk');
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    el.title = 'Open delegated chat';
+    el.onclick = (e) => openDelegatedChat(dg, e, { issueId: t.id });
+    el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') openDelegatedChat(dg, e, { issueId: t.id }); };
     card.appendChild(el);
   }
   card.onclick = () => { if (card._justDragged) return; issueOrigin = { kind: 'board' }; openIssue(t.id); };
@@ -1001,7 +1771,13 @@ async function openIssue(id) {
   try { d = await (await api(`/api/linear/${id}/detail`)).json(); }
   catch { $('issueScroll').innerHTML = '<p class="empty">Could not load issue.</p>'; return; }
   if (d.error) { $('issueScroll').innerHTML = `<p class="empty">${esc(d.error)}</p>`; return; }
-  curIssue = d; renderIssue(d);
+  curIssue = d;
+  // The ticket title is available only after the detail fetch. Replace the route
+  // in place so a copied URL is readable without creating another Back entry.
+  if (!navSuppress && history.state && history.state.view === 'issue' && history.state.id === id) {
+    navTo({ ...history.state, title: d.title || '' }, { replace: true });
+  }
+  renderIssue(d);
   // find sessions that filed/worked this ticket (so the user can jump back in)
   curIssueSessions = [];
   try {
@@ -1029,6 +1805,52 @@ function renderIssueSessions(list) {
 }
 // The current (most recent) delegation record for an open issue, or null.
 function latestDeleg(arr) { return (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null; }
+function pickDelegatedSession(dg, sessions) {
+  const list = Array.isArray(sessions) ? sessions.filter((s) => s && s.id) : [];
+  if (!list.length) return null;
+  const sid = dg && dg.sessionId;
+  if (sid) return list.find((s) => s.id === sid) || { id: sid };
+  const title = String((dg && dg.sessionTitle) || '').trim();
+  const agent = String((dg && dg.agent) || '').trim();
+  const main = list.filter((s) => s.category !== 'auto');
+  return (title && list.find((s) => s.title === title))
+    || (title && list.find((s) => s.title && (s.title.startsWith(title) || title.startsWith(s.title))))
+    || (agent && main.find((s) => s.agent === agent))
+    || (agent && list.find((s) => s.agent === agent))
+    || main[0]
+    || list[0];
+}
+async function resolveDelegatedSession(dg, issueId) {
+  const sid = dg && dg.sessionId;
+  let related = sid ? (curIssueSessions || []).find((s) => s.id === sid) : pickDelegatedSession(dg, curIssueSessions);
+  if (!related && issueId) {
+    try {
+      const d = await (await api(`/api/linear/${issueId}/sessions`)).json();
+      related = pickDelegatedSession(dg, d.sessions || []);
+    } catch {}
+  }
+  if (!related && sid) related = { id: sid };
+  return related || null;
+}
+async function openDelegatedChat(dg, ev, opts = {}) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  const issueId = opts.issueId || (curIssue && curIssue.identifier) || '';
+  const related = await resolveDelegatedSession(dg, issueId);
+  const sessionId = related && related.id;
+  if (!sessionId) return toast('No delegated chat found yet');
+  const fallbackTitle = dg.sessionTitle || related.title || `${agentLabel(dg.agent)} agent`;
+  let hist = {};
+  try { hist = await (await api(`/api/sessions/${sessionId}/history`)).json(); } catch {}
+  await openChat({
+    id: sessionId,
+    title: related.title || fallbackTitle,
+    cwd: related.cwd || hist.cwd || defaultCwd,
+    agent: agentType(hist.agent || related.agent || dg.agent),
+    settings: hist.settings,
+    parentId: hist.parentId || null,
+    parentTitle: hist.parentTitle || '',
+  });
+}
 function renderIssue(d) {
   $('issueId').textContent = d.identifier;
   const [plabel, pcolor] = PRIO[d.priority] || [];
@@ -1050,11 +1872,14 @@ function renderIssue(d) {
   const dl = latestDeleg(d.delegations);
   if (dl) {
     const who = dl.sessionTitle || `${agentLabel(dl.agent)} agent`;
-    const card = document.createElement('div'); card.className = 'delegCard' + (dl.sessionId ? ' clk' : '');
-    card.innerHTML = `<div class="delegHd">🤖 Delegated to</div><div class="delegRow"><span class="sessIc">${agentIcon(dl.agent)}</span><div class="sessMain"><div class="delegName"></div><div class="delegSub"></div></div>${dl.sessionId ? '<span class="sessGo">→</span>' : ''}</div>`;
+    const card = document.createElement('button'); card.className = 'delegCard clk';
+    card.type = 'button';
+    card.title = 'Open delegated chat';
+    card.setAttribute('aria-label', `Open delegated chat: ${who}`);
+    card.innerHTML = `<div class="delegHd">🤖 Delegated to</div><div class="delegRow"><span class="sessIc">${agentIcon(dl.agent)}</span><div class="sessMain"><div class="delegName"></div><div class="delegSub"></div></div><span class="sessGo">→</span></div>`;
     card.querySelector('.delegName').textContent = who;
     card.querySelector('.delegSub').textContent = `${dl.agent}${dl.kind === 'resume' ? ' · resumed' : ''} · delegated ${relTime(dl.ts)}`;
-    if (dl.sessionId) card.onclick = () => openChat({ id: dl.sessionId, title: who, agent: dl.agent });
+    card.onclick = (e) => openDelegatedChat(dl, e, { issueId: d.identifier });
     wrap.appendChild(card);
   }
   if (d.pr) {
@@ -1133,8 +1958,8 @@ function delegateIssue(d) {
   }
   rows.push({ ic: agentIcon('claude'), label: 'New Claude agent', desc: 'Fresh Claude Code session', fn: () => spawnIssueAgent(d, 'claude') });
   rows.push({ ic: agentIcon('codex'), label: 'New Codex agent', desc: 'Fresh Codex session on the box', fn: () => spawnIssueAgent(d, 'codex') });
-  rows.push({ ic: agentIcon('gemini'), label: 'New Gemini agent', desc: 'Fresh Gemini session on the box', fn: () => spawnIssueAgent(d, 'gemini') });
-  rows.push({ ic: agentIcon('agy'), label: 'New Antigravity agent', desc: 'Fresh agy session on the box', fn: () => spawnIssueAgent(d, 'agy') });
+  if (agentEnabled('gemini')) rows.push({ ic: agentIcon('gemini'), label: 'New Gemini agent', desc: 'Fresh Gemini session on the box', fn: () => spawnIssueAgent(d, 'gemini') });
+  if (agentEnabled('agy')) rows.push({ ic: agentIcon('agy'), label: 'New Antigravity agent', desc: 'Fresh agy session on the box', fn: () => spawnIssueAgent(d, 'agy') });
   openSheet(`Delegate ${d.identifier}`, rows);
 }
 // Our own delegation breadcrumb comments — filtered out of the context we hand back to
@@ -1147,6 +1972,11 @@ function isDelegationMarker(body) {
 // loaded (description + every real comment + labels + the agents that touched it). This
 // gets baked into the delegation prompt so the agent doesn't have to go re-fetch the
 // Linear ticket and is GUARANTEED the context/comments we already hold.
+function fmtIssueDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString();
+}
 function buildIssueContext(d, sessions) {
   const L = [`# ${d.identifier} — ${d.title}`];
   const meta = [];
@@ -1156,20 +1986,41 @@ function buildIssueContext(d, sessions) {
   const labels = (d.labels || []).map((l) => l.name).filter((n) => !/^agent[:-]/.test(n));
   if (labels.length) meta.push(`Labels: ${labels.join(', ')}`);
   if (meta.length) L.push(meta.join(' · '));
+  const dates = [`Created: ${fmtIssueDate(d.createdAt) || d.createdAt || 'unknown'}`, `Updated: ${fmtIssueDate(d.updatedAt) || d.updatedAt || 'unknown'}`];
+  L.push(dates.join(' · '));
   if (d.url) L.push(`Linear: ${d.url}`);
   if (d.pr) L.push(`PR: ${d.pr.url} (${d.pr.state || 'open'})`);
   L.push('', '## Description', (d.description && d.description.trim()) ? d.description.trim() : '(no description)');
+  const attachments = (d.attachments || []).filter((a) => a && (a.url || a.title));
+  if (attachments.length) {
+    L.push('', `## Attachments (${attachments.length})`);
+    for (const a of attachments) L.push(`- ${a.title || a.url}${a.url && a.title ? `: ${a.url}` : ''}`);
+  }
+  if (d.meetingContext && String(d.meetingContext).trim()) {
+    L.push('', '## Meeting-Source Context', String(d.meetingContext).trim());
+  }
   const cmts = (d.comments || []).filter((c) => !isDelegationMarker(c.body));
   if (cmts.length) {
     L.push('', `## Comments (${cmts.length}) — context already gathered; read these before re-deriving anything`);
-    for (const c of cmts) L.push('', `### ${c.user || 'someone'} · ${relTime(Date.parse(c.createdAt))}`, (c.body || '').trim());
+    for (const c of cmts) L.push('', `### ${c.user || 'someone'} · ${fmtIssueDate(c.createdAt) || c.createdAt || 'unknown time'}`, (c.body || '').trim());
   }
   if (sessions && sessions.length) {
     L.push('', '## Agents that have already worked on this');
-    for (const s of sessions.slice(0, 8)) L.push(`- ${s.title} (${s.agent}, ${s.mentions}× mentions, last active ${relTime(s.mtime)})`);
+    for (const s of sessions.slice(0, 8)) L.push(`- ${s.title} (${s.agent}, ${s.mentions}× mentions, last active ${fmtIssueDate(s.mtime) || relTime(s.mtime)})`);
     L.push('If you are one of these, you already hold the full transcript — keep using that context.');
   }
   return L.join('\n');
+}
+function buildIssueDelegationPrompt(d, sessions, agent = 'claude') {
+  const slug = d.identifier.toLowerCase();
+  const issueContext = buildIssueContext(d, sessions);
+  return renderPromptTemplate('linear-delegation', `Work the Linear issue ${d.identifier}: "${d.title}".\n\n${issueContext}`, {
+    issueId: d.identifier,
+    issueTitle: d.title,
+    issueContext,
+    branchSlug: slug,
+    agentBranch: agentBranch(agent),
+  });
 }
 // Wait for a freshly-spawned chat's session id to resolve (the RC bridge reports it via
 // the {type:'session'} WS event a beat after spawn). Keyed to this chat so navigating
@@ -1198,38 +2049,25 @@ async function recordDelegation(inc, { agent, kind, sessionId, sessionTitle, key
 }
 // Resume the existing session that already has this issue's context and tell it to continue.
 async function resumeIssueSession(s, d) {
-  const cont = `Continue working on ${d.identifier}: "${d.title}".
-
-You worked on this earlier — pick up where you left off. The full CURRENT ticket context (description, every comment, and who else touched it) is included below so you don't need to re-fetch the Linear ticket:
-
-${buildIssueContext(d, curIssueSessions)}
-
-How to continue:
-- If you already have a worktree/branch for it, keep using it; otherwise create one off the latest default branch:
-  git worktree add ../${d.identifier.toLowerCase()} -b ${agentBranch(s.agent)}/${d.identifier.toLowerCase()} && cd ../${d.identifier.toLowerCase()}
-- Finish the work, open/refresh the PR, and post the PR link + a status comment on ${d.identifier}.`;
+  const issueContext = buildIssueContext(d, curIssueSessions);
+  const cont = renderPromptTemplate('linear-resume', `Continue working on ${d.identifier}: "${d.title}".\n\n${issueContext}`, {
+    issueId: d.identifier,
+    issueTitle: d.title,
+    issueContext,
+    branchSlug: d.identifier.toLowerCase(),
+    agentBranch: agentBranch(s.agent),
+  });
   await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
-  enqueueText(cont, { displayText: `↻ Continue ${d.identifier}: ${d.title}` });
+  enqueueText(cont);
   await recordDelegation(d.identifier, { agent: s.agent, kind: 'resume', sessionId: s.id, sessionTitle: s.title });
   toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
 }
 async function spawnIssueAgent(d, agent) {
-  const slug = d.identifier.toLowerCase();
-  const seed = `Work the Linear issue ${d.identifier}: "${d.title}".
-
-Everything you need about this ticket is below — description, every comment (the context we've already gathered), and the agents that already touched it. Read it before re-deriving anything; don't go re-fetch the Linear ticket.
-
-${buildIssueContext(d, curIssueSessions)}
-
-How to work it:
-- Do NOT edit a shared clone — create an isolated git worktree for your branch off the latest default branch:
-  git worktree add ../${slug} -b ${agentBranch(agent)}/${slug} && cd ../${slug}
-- Implement + verify it runs, open a PR, and post the PR link as a comment on ${d.identifier}.
-- When done, set ${d.identifier} to In Review (or comment your status / blockers).`;
+  const seed = buildIssueDelegationPrompt(d, curIssueSessions, agent);
   const title = `${d.identifier}: ${d.title}`.slice(0, 60);
   setAgent(agent);
   await openChat({ id: null, title, cwd: defaultCwd, agent });
-  enqueueText(seed, { displayText: `🤖 Work ${d.identifier}: ${d.title}`, title });
+  enqueueText(seed, { title });
   toast(`Dispatching ${AGENT_LABEL[agent]} agent...`);
   await recordDelegation(d.identifier, { agent, kind: 'new', sessionTitle: title, key: cur.key });
   toast(`Dispatched ${d.identifier} to ${AGENT_LABEL[agent]}`);
@@ -1268,7 +2106,7 @@ async function createIssue() {
 
 // Harness activity feed: the event stream (meetings/emails/Linear/locks/session-outcomes)
 // + active resource locks — what's happening across the agent fleet, where the user looks.
-const ACT_ICON = { meeting: '📋', email: '✉️', signal: '✉️', linear: '🔷', linear_comment: '💬', lock: '🔒', 'session-outcome': '✳️', project: '🧠', learning: '🧠', deal: '🤝', person: '👤', company: '🏢', note: '•' };
+const ACT_ICON = { meeting: '📋', email: '✉️', signal: '✉️', slack: '💬', linear: '🔷', linear_comment: '💬', lock: '🔒', 'session-outcome': '✳️', project: '🧠', learning: '🧠', deal: '🤝', person: '👤', company: '🏢', note: '•' };
 function activityCard(a) {
   const card = document.createElement('div'); card.className = 'pipeCard';
   const locks = a.locks || [], events = a.events || [];
@@ -1367,6 +2205,8 @@ async function openPipeDetail(path, title) {
 }
 
 /* ---------- chat ---------- */
+const INITIAL_HISTORY_RENDER_LIMIT = 120;
+const EARLIER_HISTORY_BATCH = 120;
 let wsLastMsg = 0, wsWatchdog = null;
 function resetWsWatchdog() {
   wsLastMsg = Date.now();
@@ -1396,34 +2236,73 @@ function connectWS() {
   ws.onerror = () => { try { ws.close(); } catch {} };
   ws.onclose = () => { if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
 }
+function setNewChatIntro(on) {
+  const chat = $('chat');
+  if (chat) chat.classList.toggle('newChatIntro', !!on);
+}
+function focusComposerSoon(delay = 60) {
+  setTimeout(() => { try { $('input').focus(); } catch {} }, delay);
+}
+function addHistoryLoader() {
+  const loader = document.createElement('div');
+  loader.className = 'histLoader';
+  loader.textContent = 'Loading…';
+  $('messages').appendChild(loader);
+  return loader;
+}
+function annotateHistoryMessages(messages, start = 0) {
+  return (messages || []).map((m, i) => ({ ...m, _idx: start + i }));
+}
 async function openChat(s) {
+  const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
+  syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
-  $('chatTitle').textContent = cur.title;
+  setChatTitle(cur.title);
+  updateFavoriteButton();
+  updateArchiveButton();
   renderContextMeter();
-  $('messages').innerHTML = ''; live = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
+  $('messages').innerHTML = ''; live = null; liveUser = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
+  setNewChatIntro(!s.id && !(s.carry && s.carry.length));
   // Linear-agent session → show an approval bar (merge PR / mark done / archive)
   const inc = (s.subcat === 'linear' || /linear-dispatch/.test(s.cwd || '')) && (String(s.cwd || '') + ' ' + (s.title || '')).match(/INC-\d+/);
   renderLinearBar(inc ? inc[0] : null, s.id);
-  cur.histCursor = 0; cur.hasMoreHistory = false; cur.loadingEarlier = false;
+  cur.histCursor = 0; cur.hasMoreHistory = false; cur.remoteHasMoreHistory = false; cur.loadingEarlier = false; cur.localEarlier = [];
+  refreshButton();
+  setAttnBadge(0); // reset badge on every new chat; refreshAttnBadge below will set the real count
+  focusComposerSoon();
   if (s.id) {
-    const h = await (await api(`/api/sessions/${s.id}/history`)).json();
-    cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
-    cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
-    cur.context = h.context || cur.context; renderContextMeter();
-    cur.histCursor = h.cursor || 0; cur.hasMoreHistory = !!h.hasMore;
-    for (const m of h.messages) addHistMessage(m);
-    scrollBottom();
+    const loader = addHistoryLoader();
+    try {
+      const h = await (await api(`/api/sessions/${s.id}/history`)).json();
+      if (renderSeq !== chatRenderSeq) return;
+      loader.remove();
+      cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
+      if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
+      if (typeof h.favorite === 'boolean') { cur.favorite = h.favorite; updateFavoriteButton(); }
+      cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
+      cur.context = h.context || cur.context; renderContextMeter();
+      cur.histCursor = h.cursor || 0; cur.remoteHasMoreHistory = !!h.hasMore;
+      const messages = annotateHistoryMessages(h.messages || []);
+      cur.localEarlier = messages.length > INITIAL_HISTORY_RENDER_LIMIT ? messages.slice(0, -INITIAL_HISTORY_RENDER_LIMIT) : [];
+      cur.hasMoreHistory = cur.remoteHasMoreHistory || cur.localEarlier.length > 0;
+      await renderHistoryBatch(messages.slice(-INITIAL_HISTORY_RENDER_LIMIT), renderSeq);
+      if (renderSeq !== chatRenderSeq) return;
+      scrollBottom();
+    } catch {
+      loader.textContent = 'Could not load history.';
+    }
   } else if (s.carry && s.carry.length) {
     // Agent switch: render the prior transcript inline so it reads as ONE continuous
     // conversation, capped to the last 40 messages for snappiness (the agent still gets
     // the fuller context via the seed prompt).
-    for (const m of s.carry.slice(-40)) addHistMessage(m);
+    await renderHistoryBatch(annotateHistoryMessages(s.carry.slice(-40)), renderSeq);
+    if (renderSeq !== chatRenderSeq) return;
     addSwitchDivider(s.carryFrom || 'previous agent', cur.agent === 'codex' ? 'Codex' : 'Claude');
     scrollBottom();
   } else {
@@ -1431,10 +2310,7 @@ async function openChat(s) {
     renderContextMeter();
   }
   connectWS();
-  refreshButton();
-  setAttnBadge(0); // reset badge on every new chat; refreshAttnBadge below will set the real count
   refreshAttnBadge();
-  setTimeout(() => $('input').focus(), 100);
 }
 async function renderLinearBar(inc, sessionId) {
   const bar = $('linearBar'); if (!bar) return;
@@ -1464,10 +2340,7 @@ async function renderLinearBar(inc, sessionId) {
     const r = await (await api(`/api/linear/${inc}/done`, { method: 'POST' })).json();
     toast(r.ok ? `✅ ${inc} → Done` : (r.error || 'failed'), 3000); renderLinearBar(inc, sessionId);
   });
-  if (sessionId) btn('Archive', 'arch', async () => {
-    try { await api(`/api/sessions/${sessionId}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-    toast('🗄 archived'); if (ws) ws.close(); openSessions();
-  });
+  if (sessionId) btn('Archive', 'arch', async () => openArchiveConfirm({ id: sessionId, title: cur.title, archived: false }, { leaveChat: true }));
   bar.appendChild(actions);
 }
 // Back from the chat, kept in lock-step with the browser history stack: the
@@ -1500,21 +2373,46 @@ function fmtTs(ts) {
   if (diff < 86400000) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
+function historyParts(m) {
+  if (!m || typeof m !== 'object') return [];
+  if (Array.isArray(m.parts)) return m.parts.filter((p) => p && typeof p === 'object');
+  if (typeof m.text === 'string') return [{ t: 'text', text: m.text }];
+  if (typeof m.content === 'string') return [{ t: 'text', text: m.content }];
+  if (Array.isArray(m.content)) {
+    return m.content.flatMap((p) => {
+      if (!p || typeof p !== 'object') return [];
+      if ((p.type === 'text' || p.type === 'input_text' || p.type === 'output_text') && p.text) return [{ t: 'text', text: p.text }];
+      return [];
+    });
+  }
+  return [];
+}
 function buildHistElement(m) {
-  const wrap = document.createElement('div'); wrap.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+  m = (m && typeof m === 'object') ? m : { role: 'assistant', parts: [{ t: 'text', text: String(m || '') }] };
+  const role = m.role === 'user' ? 'user' : 'assistant';
+  const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
+  if (m._idx != null) wrap.dataset.idx = String(m._idx);
+  if (m.live) wrap.dataset.historyLive = 'true';
   const body = document.createElement('div'); body.className = 'body';
   let rawText = '';
-  for (const p of m.parts) {
+  for (const p of historyParts(m)) {
     if (p.t === 'text') {
-      let text = p.text;
-      if (m.role === 'user') {
+      let text = String(p.text == null ? '' : p.text);
+      if (role === 'user') {
         const paths = [...text.matchAll(/\[Image attached at (.+?) —/g)].map((x) => x[1]);
         text = text.replace(/^\[Image attached at .+?\]\n?/gm, '').trim();
-        if (paths.length) { const r = document.createElement('div'); r.className = 'umgs'; paths.forEach((pp) => { const im = document.createElement('img'); im.src = imgUrl(pp); r.appendChild(im); }); body.appendChild(r); }
+        if (paths.length) body.appendChild(userAttachmentGrid(paths));
       }
       rawText += (rawText ? '\n' : '') + text;
-      if (text) { const d = document.createElement('div'); d.innerHTML = m.role === 'user' ? esc(text) : md(text); body.appendChild(d); }
-    } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.input }));
+      if (text) {
+        const d = document.createElement('div');
+        if (role === 'user') d.innerHTML = esc(text);
+        else { d.className = 'mdBlock'; d._rawMdText = text; d.innerHTML = md(text); }
+        body.appendChild(d);
+      }
+    } else if (role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
+      body.appendChild(userAttachmentGrid([p.path]));
+    } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.detail || p.input, result: p.result }));
   }
   rawText = rawText.trim();
   wrap.dataset.rawText = rawText;
@@ -1526,13 +2424,48 @@ function buildHistElement(m) {
   if (rawText) {
     const acts = document.createElement('div'); acts.className = 'msgActions';
     const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
-    cpBtn.onclick = () => navigator.clipboard.writeText(rawText || body.innerText).then(() => toast('Copied!')).catch(() => {});
+    cpBtn.onclick = () => writeClipboardText(rawText, 'Copied!');
     if (m.ts) { const ts = document.createElement('span'); ts.className = 'msgTs'; ts.textContent = fmtTs(m.ts); acts.appendChild(ts); }
+    if (cur.id && m._idx != null) {
+      const forkBtn = document.createElement('button'); forkBtn.className = 'iconbtn ghost msgCopy'; forkBtn.title = 'fork from here'; forkBtn.innerHTML = ICONS.branch;
+      forkBtn.onclick = (e) => { e.stopPropagation(); confirmFork({ throughIndex: Number(m._idx) }); };
+      acts.appendChild(forkBtn);
+    }
     acts.appendChild(cpBtn); wrap.appendChild(acts);
   }
   return wrap;
 }
 function addHistMessage(m) { const el = buildHistElement(m); $('messages').appendChild(el); return el.querySelector('.body'); }
+function nextPaint() {
+  return new Promise((resolve) => {
+    if (window.requestAnimationFrame) requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+async function renderHistoryBatch(messages, seq) {
+  const list = messages || [];
+  const batchSize = list.length > 140 ? 12 : 24;
+  scheduleHistoryPathResolve(list, seq);
+  for (let i = 0; i < list.length; i += batchSize) {
+    if (seq !== chatRenderSeq) return false;
+    const frag = document.createDocumentFragment();
+    for (const m of list.slice(i, i + batchSize)) frag.appendChild(buildHistElement(m));
+    $('messages').appendChild(frag);
+    if (i + batchSize < list.length) await nextPaint();
+  }
+  return true;
+}
+function scheduleHistoryPathResolve(messages, seq) {
+  const refs = (messages || []).flatMap(messagePathRefs);
+  if (!refs.length) return;
+  const cwd = (cur && cur.cwd) || '';
+  setTimeout(() => {
+    if (seq != null && seq !== chatRenderSeq) return;
+    resolvePathRefs(refs, cwd).then((changed) => {
+      if (changed && (seq == null || seq === chatRenderSeq)) rerenderResolvedMarkdown(Array.isArray(changed) ? changed : null);
+    }).catch(() => {});
+  }, 0);
+}
 
 /* load older history when user scrolls to top */
 async function loadEarlierMessages() {
@@ -1543,14 +2476,28 @@ async function loadEarlierMessages() {
   container.insertBefore(loader, container.firstChild);
   const prevHeight = container.scrollHeight;
   try {
+    if (cur.localEarlier && cur.localEarlier.length) {
+      const start = Math.max(0, cur.localEarlier.length - EARLIER_HISTORY_BATCH);
+      const messages = cur.localEarlier.splice(start);
+      loader.remove();
+      scheduleHistoryPathResolve(messages);
+      for (let i = messages.length - 1; i >= 0; i--) {
+        container.insertBefore(buildHistElement(messages[i]), container.firstChild);
+      }
+      cur.hasMoreHistory = cur.localEarlier.length > 0 || !!cur.remoteHasMoreHistory;
+      if (!cur.hasMoreHistory) { const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); }
+      container.scrollTop += container.scrollHeight - prevHeight;
+      return;
+    }
     const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`)).json();
     loader.remove();
     if (!h.messages || !h.messages.length) { cur.hasMoreHistory = false; const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); return; }
+    scheduleHistoryPathResolve(h.messages);
     // prepend in order (oldest first = same as h.messages array order)
     for (let i = h.messages.length - 1; i >= 0; i--) {
       container.insertBefore(buildHistElement(h.messages[i]), container.firstChild);
     }
-    cur.histCursor = h.cursor; cur.hasMoreHistory = h.hasMore;
+    cur.histCursor = h.cursor; cur.remoteHasMoreHistory = !!h.hasMore; cur.hasMoreHistory = cur.remoteHasMoreHistory;
     if (!cur.hasMoreHistory) { const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); }
     // restore scroll position — shift by how much content was added above
     container.scrollTop += container.scrollHeight - prevHeight;
@@ -1567,28 +2514,97 @@ function fileExtIcon(ext) {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(e)) return ICONS.copy;
   return ICONS.copy;
 }
+// PDF_EXT_RE is declared with the other path regexes near the top of this file.
+function fileExtOf(fp) {
+  const fname = String(fp || '').split('/').pop() || '';
+  return fname.includes('.') ? fname.split('.').pop().toLowerCase() : '';
+}
+function fmtBytes(n) {
+  n = Number(n);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return n + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB']; let i = -1, v = n;
+  do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
+  return (v >= 10 ? Math.round(v) : v.toFixed(1)) + ' ' + u[i];
+}
+// Lazily fill an element with the delivered file's size (HEAD /api/raw → Content-Length).
+// Best-effort: any failure just leaves the slot blank rather than blocking the card.
+function fillFileSize(el, fp) {
+  if (!el) return;
+  fetch(rawFileUrl(fp), { method: 'HEAD' })
+    .then((r) => { const s = fmtBytes(r.headers.get('content-length')); if (s) el.textContent = s; })
+    .catch(() => {});
+}
+function downloadFile(fp, fname) {
+  // Use the server's attachment response instead of buffering the entire file in JS.
+  // This is important for large workbooks/archives and gives iOS a real download response.
+  const a = document.createElement('a');
+  a.href = rawFileUrl(fp, true);
+  a.download = fname || String(fp || '').split('/').pop() || 'download';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+function fileDlBtn(fp, fname) {
+  const dl = document.createElement('button'); dl.className = 'fileCardDl'; dl.title = 'Download'; dl.innerHTML = ICONS['arrow-down'];
+  dl.addEventListener('click', (e) => { e.stopPropagation(); downloadFile(fp, fname); });
+  return dl;
+}
+// Delivered image → render the picture inline, tappable into the shared lightbox gallery.
+function imageDeliveryCard(fp, fname) {
+  const card = document.createElement('figure'); card.className = 'fileImgCard';
+  const img = document.createElement('img'); img.className = 'fileImgPreview'; img.src = rawFileUrl(fp); img.alt = fname; img.loading = 'lazy';
+  img.onerror = () => card.classList.add('fileMissing');
+  img.onclick = () => {
+    const all = [...$('messages').querySelectorAll('.fileImgPreview, .umgs img, .tchipThumb')];
+    window.openImageLightbox(all.map((i) => i.src), Math.max(0, all.indexOf(img)));
+  };
+  const cap = document.createElement('figcaption'); cap.className = 'fileMetaRow';
+  cap.innerHTML = `<span class="fileCardName">${esc(fname)}</span><span class="fileCardSize"></span>`;
+  cap.appendChild(fileDlBtn(fp, fname));
+  card.append(img, cap);
+  fillFileSize(cap.querySelector('.fileCardSize'), fp);
+  return card;
+}
+// Delivered PDF → inline embedded preview (full viewer on desktop, first page on iOS Safari)
+// plus explicit Open/Download actions so the full document is always reachable.
+function pdfDeliveryCard(fp, fname) {
+  const card = document.createElement('div'); card.className = 'filePdfCard';
+  const head = document.createElement('div'); head.className = 'fileMetaRow filePdfHead';
+  head.innerHTML = `<span class="fileCardIcon pdf">PDF</span><span class="fileCardName">${esc(fname)}</span><span class="fileCardSize"></span>`;
+  head.appendChild(fileDlBtn(fp, fname));
+  const prev = document.createElement('div'); prev.className = 'filePdfPreview';
+  const frame = document.createElement('iframe'); frame.className = 'filePdfFrame'; frame.title = fname; frame.loading = 'lazy';
+  frame.src = rawFileUrl(fp) + '#view=FitH&toolbar=0&navpanes=0';
+  prev.appendChild(frame);
+  const actions = document.createElement('div'); actions.className = 'filePreviewActions';
+  const open = document.createElement('button'); open.className = 'filePreviewBtn'; open.textContent = 'Open fullscreen';
+  open.addEventListener('click', () => openFile(fp));
+  actions.appendChild(open);
+  card.append(head, prev, actions);
+  fillFileSize(head.querySelector('.fileCardSize'), fp);
+  return card;
+}
+// Anything else → a download affordance with filename + size; tap opens the file viewer.
+function genericFileCard(fp, fname, ext) {
+  const card = document.createElement('div'); card.className = 'fileCard';
+  card.innerHTML = `<span class="fileCardIcon">${ICONS.file}</span>` +
+    `<div class="fileCardMain"><span class="fileCardName">${esc(fname)}</span><span class="fileCardSize"></span></div>` +
+    `<span class="fileCardExt">${ext ? esc(ext.toUpperCase()) : 'FILE'}</span>`;
+  card.appendChild(fileDlBtn(fp, fname));
+  card.addEventListener('click', (e) => { if (e.target.closest('.fileCardDl')) return; openFile(fp); });
+  fillFileSize(card.querySelector('.fileCardSize'), fp);
+  return card;
+}
 function sendFileCards(files, caption) {
   const wrap = document.createElement('div'); wrap.className = 'fileCards';
   if (caption) { const cap = document.createElement('div'); cap.className = 'fileCaption'; cap.textContent = caption; wrap.appendChild(cap); }
   for (const fp of (files || [])) {
     const fname = fp.split('/').pop();
-    const ext = fname.includes('.') ? fname.split('.').pop() : '';
-    const card = document.createElement('div');
-    card.className = 'fileCard';
-    card.innerHTML = `<span class="fileCardIcon">${ICONS.copy}</span><span class="fileCardName">${esc(fname)}</span><span class="fileCardExt">${ext ? esc(ext.toUpperCase()) : 'FILE'}</span><span class="fileCardDl">${ICONS['arrow-down']}</span>`;
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.fileCardDl')) return;
-      openFile(fp);
-    });
-    card.querySelector('.fileCardDl').addEventListener('click', (e) => {
-      e.stopPropagation();
-      fetch(rawFileUrl(fp)).then((r) => r.blob()).then((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = fname; a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-      }).catch(() => window.open(rawFileUrl(fp), '_blank'));
-    });
-    wrap.appendChild(card);
+    if (PREVIEW_IMG_EXT_RE.test(fp)) { wrap.appendChild(imageDeliveryCard(fp, fname)); continue; }
+    if (PDF_EXT_RE.test(fp)) { wrap.appendChild(pdfDeliveryCard(fp, fname)); continue; }
+    wrap.appendChild(genericFileCard(fp, fname, fileExtOf(fp)));
   }
   return wrap;
 }
@@ -1681,8 +2697,7 @@ const toolVerb = (name) => TOOL_VERB[name] || name;
 let running = false;     // a turn is currently running for this session
 let recording = false;   // mic is recording (live transcription in progress)
 let attnMode = false;    // the needs-attention reply page is open → composer is Send-only (never Stop)
-let attnShowAll = false; // Status tab: show ALL inbox entries (incl. done/answered), not just open
-let attnLinear = false;  // Linear tab: show the INC issues THIS session has touched
+let attnLinear = true;   // Linear tab: show the INC issues this session touched, or the global board queue
 function refreshButton() {
   const hasText = !!($('input').value.trim() || images.length);
   const btn = $('sendBtn');
@@ -1742,14 +2757,16 @@ function renderQueue(items) {
 
 /* live turn rendering */
 let live = null;
+let liveUser = null;
 function startAssistant() {
   killGhostIndicators();
   const wrap = document.createElement('div'); wrap.className = 'msg assistant';
   const body = document.createElement('div'); body.className = 'body';
   wrap.appendChild(body); $('messages').appendChild(wrap);
   const loading = document.createElement('div'); loading.className = 'loading'; loading.innerHTML = '<span></span><span></span><span></span>'; body.appendChild(loading);
-  const textEl = document.createElement('div'); textEl.className = 'cursor'; body.appendChild(textEl);
-  live = { body, raw: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
+  const textEl = document.createElement('div'); textEl.className = 'cursor mdBlock'; textEl._rawMdText = ''; body.appendChild(textEl);
+  live = { body, raw: '', copyText: '', textEl, loading }; running = true; refreshButton(); scrollBottom();
+  liveMdCache = { cut: -1, html: '' };   // never reuse a previous turn's cached prefix
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
 // remove orphaned streaming indicators (blinking cursor / loading dots) left by a previous
@@ -1757,34 +2774,39 @@ function clearLoading() { if (live && live.loading) { live.loading.remove(); liv
 function killGhostIndicators() { $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); }
 const imgUrl = (p) => '/api/img?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
 // For arbitrary filesystem paths (e.g. tool Read on an image), use /api/raw which has no dir restriction
-const rawFileUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
+const rawFileUrl = (p, download = false) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN) + (download ? '&dl=1' : '');
 // Remember the last user bubble we drew, so a re-echoed copy of the SAME message (e.g. the
 // server's own injected-echo suppression desyncing on a force-queue + Stop, which leaks the
 // echo back as a `remote_user`) can be dropped instead of rendering the message twice.
 let lastUserRender = { text: '', at: 0 };
 function isRecentDupUser(text) { return (text || '') === lastUserRender.text && (Date.now() - lastUserRender.at) < 15000; }
+function userAttachmentGrid(paths) {
+  const r = document.createElement('div'); r.className = 'umgs';
+  (paths || []).forEach((p) => {
+    if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
+    else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(String(p).split('/').pop())}</span>`; r.appendChild(fc); }
+  });
+  return r;
+}
 function addUser(text, images) {
+  setNewChatIntro(false);
   lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   const body = document.createElement('div'); body.className = 'body';
   if (images && images.length) {
-    const r = document.createElement('div'); r.className = 'umgs';
-    images.forEach((p) => {
-      if (isImagePath(p)) { const im = document.createElement('img'); im.src = imgUrl(p); r.appendChild(im); }
-      else { const fc = document.createElement('div'); fc.className = 'umgFile'; fc.innerHTML = `<span class="umgFileIcon">${ICONS.file}</span><span class="umgFileName">${esc(p.split('/').pop())}</span>`; r.appendChild(fc); }
-    });
-    body.appendChild(r);
+    body.appendChild(userAttachmentGrid(images));
   }
   if (text) { const t = document.createElement('div'); t.textContent = text; body.appendChild(t); }
   wrap.appendChild(body);
   const acts = document.createElement('div'); acts.className = 'msgActions';
   const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
-  cpBtn.onclick = () => navigator.clipboard.writeText(text || '').then(() => toast('Copied!')).catch(() => {});
+  cpBtn.onclick = () => writeClipboardText(text || '', 'Copied!');
   acts.appendChild(cpBtn); wrap.appendChild(acts);
   $('messages').appendChild(wrap);
+  return wrap;
 }
-function beginTurn(text, images) { clearWaitingCard(); addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
+function beginTurn(text, images) { clearWaitingCard(); liveUser = addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
 
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
@@ -1793,8 +2815,8 @@ function onServer(o) {
   // hadHistory=false, renders the user bubble from turn_start, THEN learns its id here. If
   // the WS later reconnects mid-first-turn, onSync re-adds the user bubble (guarded only by
   // !cur.hadHistory) → the message renders twice. Marking it now suppresses that re-add.
-  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; $('chatTitle').textContent = o.title; } return; }
-  if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); return; }
+  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; setChatTitle(o.title); } refreshSessionsSoon(); return; }
+  if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); if (o.cwd) cur.cwd = o.cwd; refreshAgentChip(); return; }
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
   // force-queue + Stop), so the message doesn't render twice.
@@ -1802,20 +2824,20 @@ function onServer(o) {
   if (o.type === 'queue') return renderQueue(o.queue);
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
   if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
-  if (o.type === 'turn_start') return beginTurn(o.text, o.images);
-  if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); return; }
+  if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images); }
+  if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); return; }
   if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
-  else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; queueRender(); }
+  else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
   else if (o.type === 'tool') {
     if (!live) startAssistant(); clearLoading();
-    live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
+    live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
     const data = { input: o.detail }; (live.toolData = live.toolData || {})[o.id] = data;
     // Place the chip AFTER the text that preceded it. live.textEl holds the just-streamed
     // pre-tool text; inserting the chip BEFORE it pushed that text below the chip — so a
     // summary written right before an AskUserQuestion rendered UNDER the question card.
     const chip = toolChip(o.name, o.input || '', data);
     live.textEl.insertAdjacentElement('afterend', chip);
-    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; maybeScroll();
+    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; maybeScroll();
     // AskUserQuestion pauses the turn waiting for user input — clear the running/loading state so Send shows
     if (o.name === 'AskUserQuestion') { live.textEl.classList.remove('cursor'); running = false; killGhostIndicators(); refreshButton(); }
   }
@@ -1838,7 +2860,10 @@ function onSync(o) {
   if (o.agent && o.sessionId) setAgent(o.agent);
   if (o.parentId) cur.parentId = o.parentId;
   if (o.parentTitle) cur.parentTitle = o.parentTitle;
-  if (o.title && cur.title === 'New chat') { cur.title = o.title; $('chatTitle').textContent = o.title; }
+  if (o.cwd) cur.cwd = o.cwd;
+  if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; setChatTitle(o.title); }
+  if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
+  if (typeof o.favorite === 'boolean') { cur.favorite = o.favorite; updateFavoriteButton(); }
   if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
   if (o.context) { cur.context = o.context; renderContextMeter(); }
   // Remove stale live bubble from DOM before recreating it below (prevents duplicate
@@ -1849,16 +2874,30 @@ function onSync(o) {
     // Reopening/reloading a session whose latest turn is still in-flight would render
     // that turn TWICE: REST /history already drew the in-flight turn's assistant blocks
     // (they're flushed to the JSONL as the turn runs), and the live path below redraws
-    // the SAME turn from curParts. When history is present (cur.hadHistory), drop its
-    // copy of the in-flight assistant turn — every node after the last user bubble — so
-    // only the live rebuild remains. The user bubble itself stays (history owns it).
-    if (cur.hadHistory) {
-      const kids = [...$('messages').children];
-      let lastUser = -1;
-      kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
-      if (lastUser >= 0) for (let i = kids.length - 1; i > lastUser; i--) kids[i].remove();
+    // the SAME turn from curParts. The old cleanup deleted *everything* after the last
+    // rendered user bubble. On a reconnect race, the new turn can reach sync before its
+    // turn_start bubble; "last user" then belongs to the PREVIOUS turn, so its completed
+    // answer vanished until the chat was reopened. First prove that the last user bubble
+    // is this turn, then remove only the durable live row for Codex-like histories.
+    const kids = [...$('messages').children];
+    let lastUser = -1;
+    kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
+    const tail = lastUser >= 0 ? kids.slice(lastUser + 1) : kids;
+    const lastUserEl = lastUser >= 0 ? kids[lastUser] : null;
+    const sameText = !!lastUserEl && (lastUserEl.dataset.rawText || '') === (o.curUser || '');
+    // A freshly-rendered turn owns liveUser. After a reload, the current user is either
+    // the final history row (no output yet) or is followed by a persisted `live` reply.
+    const hasCurrentUser = sameText && (lastUserEl === liveUser || tail.length === 0 || tail.some((el) => el.dataset && el.dataset.historyLive === 'true'));
+    if (hasCurrentUser) {
+      const durableLiveHistory = ['codex', 'gemini', 'mac'].includes(o.agent || cur.agent);
+      for (const el of tail) {
+        if (!durableLiveHistory || (el.dataset && el.dataset.historyLive === 'true')) el.remove();
+      }
+    } else if (o.curUser || (o.curUserImages || []).length) {
+      // sync arrived before turn_start (or REST history had not persisted the user yet):
+      // append the actual current user after the intact previous answer.
+      liveUser = addUser(o.curUser || '', o.curUserImages || []);
     }
-    if (!cur.hadHistory && (o.curUser || (o.curUserImages || []).length) && !isRecentDupUser(o.curUser || '')) addUser(o.curUser, o.curUserImages);  // existing sessions already have it in history; skip if we just drew it
     startAssistant();
     if (Array.isArray(o.curParts) && o.curParts.length) {
       // Rebuild the in-flight turn in its REAL order — interleaved tool chips and
@@ -1866,18 +2905,18 @@ function onSync(o) {
       // mid-turn reconnect doesn't jam every message into one block.
       for (const p of o.curParts) {
         if (p.t === 'tool') {
-          live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
+          live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
           (live.toolData = live.toolData || {})[p.id] = { input: p.detail, result: p.result };
           // chip AFTER the preceding text segment (not before live.textEl) — keep real order
           const chip = toolChip(p.name, p.input || '', live.toolData[p.id]);
           live.textEl.insertAdjacentElement('afterend', chip);
-          live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor'; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
-        } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.textEl.innerHTML = md(live.raw); }
+          live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
+        } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.copyText += p.text; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
       }
     } else {
       // legacy fallback (server snapshot without curParts)
-      (o.curTools || []).forEach((t) => { live.textEl.classList.remove('cursor'); live.body.insertBefore(toolChip(t.name, t.input || '', { input: t.detail, result: t.result }), live.textEl); const nt = document.createElement('div'); nt.className = 'cursor'; live.body.appendChild(nt); live.textEl = nt; });
-      if (o.curText) { clearLoading(); live.raw = o.curText; live.textEl.innerHTML = md(live.raw); }
+      (o.curTools || []).forEach((t) => { live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.body.insertBefore(toolChip(t.name, t.input || '', { input: t.detail, result: t.result }), live.textEl); const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; live.body.appendChild(nt); live.textEl = nt; });
+      if (o.curText) { clearLoading(); live.raw = o.curText; live.copyText = o.curText; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
     }
     running = true;
     // If the in-flight turn is parked on an AskUserQuestion (tool emitted, no result yet),
@@ -1890,25 +2929,59 @@ function onSync(o) {
   } else running = false;
   renderQueue(o.queue); refreshButton(); scrollBottom();
 }
-let raf = 0;
-function queueRender() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; if (live) { live.textEl.innerHTML = md(live.raw); maybeScroll(); } }); }
+let raf = 0, lastLiveRenderAt = 0;
+// While a reply streams we used to re-run md() over the ENTIRE accumulated text on every
+// animation frame — O(n²) over the turn, ~30ms/frame once a reply passes ~100KB, i.e. a
+// visibly janky phone for the whole turn. Two fixes: (1) cache the rendered HTML of the
+// "stable prefix" (everything up to the last blank line outside a code fence) and re-parse
+// only the tail each frame; (2) cap live renders at one per LIVE_RENDER_MIN_MS — the eye
+// can't follow faster than ~10Hz text updates anyway. finishTurn still does a final full
+// md() pass, so any prefix/tail seam (e.g. a list split across the cut) self-heals at end.
+const LIVE_RENDER_MIN_MS = 100;
+let liveMdCache = { cut: -1, html: '' };
+function liveMdHtml(raw) {
+  if (raw.length < 2000) return md(raw);
+  const i = raw.lastIndexOf('\n\n');
+  // never cut inside a fenced code block (odd number of ``` fences before the cut)
+  const cut = (i > 0 && ((raw.slice(0, i).match(/^```/gm) || []).length % 2 === 0)) ? i + 2 : 0;
+  if (!cut) return md(raw);
+  if (liveMdCache.cut !== cut) liveMdCache = { cut, html: md(raw.slice(0, cut)) };
+  return liveMdCache.html + md(raw.slice(cut));
+}
+function renderLiveNow() {
+  if (!live) return;
+  lastLiveRenderAt = performance.now();
+  live.textEl._rawMdText = live.raw;
+  live.textEl.innerHTML = liveMdHtml(live.raw);
+  maybeScroll();
+}
+function queueRender() {
+  if (raf) return;
+  const wait = Math.max(0, LIVE_RENDER_MIN_MS - (performance.now() - lastLiveRenderAt));
+  raf = setTimeout(() => { requestAnimationFrame(() => { raf = 0; renderLiveNow(); }); }, wait);
+}
 function finishTurn(o) {
   if (live) {
-    clearLoading(); live.textEl.classList.remove('cursor'); live.textEl.innerHTML = md(live.raw);
+    clearLoading(); live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
     if (o.canceled) { const s = document.createElement('div'); s.className = 'stoppedTag'; s.textContent = 'stopped'; live.body.appendChild(s); }
-    const rawText = live.raw; const msgWrap = live.body.parentElement;
+    const rawText = cleanCopyText(live.copyText || live.raw); const msgWrap = live.body.parentElement;
     if (msgWrap) {
       msgWrap.dataset.rawText = rawText;
-      const acts = document.createElement('div'); acts.className = 'msgActions';
-      const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
-      cpBtn.onclick = () => navigator.clipboard.writeText(rawText).then(() => toast('Copied!')).catch(() => {});
-      acts.appendChild(cpBtn); msgWrap.appendChild(acts);
+      if (rawText) {
+        const acts = document.createElement('div'); acts.className = 'msgActions';
+        const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
+        cpBtn.onclick = () => writeClipboardText(rawText, 'Copied!');
+        acts.appendChild(cpBtn); msgWrap.appendChild(acts);
+      } else {
+        msgWrap.classList.add('toolonly');
+      }
     }
   }
-  live = null; killGhostIndicators();
+  live = null; liveUser = null; killGhostIndicators();
   running = false; refreshButton();
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
-  if (cur.title === 'New chat' && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); $('chatTitle').textContent = cur.title; }
+  if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); setChatTitle(cur.title); }
+  refreshSessionsSoon();
   maybeScroll();
 }
 
@@ -1917,13 +2990,14 @@ function normalizeSettings(settings) {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
+    mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
   };
 }
 function sendSettings() {
   cur.settings = normalizeSettings(cur.settings);
   refreshAgentChip();
-  const payload = { type: 'settings', key: cur.key, settings: cur.settings };
+  const payload = { type: 'settings', key: cur.key, settings: cur.settings, cwd: cur.cwd };
   connectWS();
   const go = () => { try { ws.send(JSON.stringify(payload)); } catch {} };
   if (ws.readyState === 1) go();
@@ -1932,6 +3006,16 @@ function sendSettings() {
 
 /* send = enqueue (server owns the queue; it persists + auto-sends even if you leave) */
 function enqueueText(text, opts = {}) {
+  // Sending a message resumes the chat, which the server un-archives (runWorker →
+  // unarchiveOnResume). Reflect that locally so the UI stops showing it as Archived:
+  // clear the flag + repaint the button, and if we're viewing the Archived filter,
+  // switch to All so the now-active chat stays visible/selected instead of vanishing.
+  if (cur && cur.archived) {
+    cur.archived = false;
+    updateArchiveButton();
+    const s = allSessions.find((x) => x.id === cur.id); if (s) s.archived = false;
+    fetchSessions(curFilter === 'archived' ? 'all' : curFilter);
+  }
   const payload = { type: 'enqueue', key: cur.key, text, images: opts.images || [], mode: cur.mode, agent: cur.agent || 'claude', cwd: cur.cwd };
   if (opts.force) payload.force = true;  // take-over: spawn the box's bridge even though a foreign owner is live
   if (opts.displayText != null) payload.displayText = opts.displayText;
@@ -1967,9 +3051,15 @@ function submit() {
     refreshButton(); scrollBottom();
     return;
   }
+  const btw = text.match(/^\/btw(?:\s+([\s\S]*))?$/i);
+  if (btw) {
+    $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); refreshButton();
+    return runBtw(btw[1] || '');
+  }
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
   $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); images = []; renderAttach();
+  setNewChatIntro(false);
   enqueueText(text, { images: imgPaths });
   // If they were answering on the needs-attention page, drop back to the chat to watch it land.
   if (!$('attnPanel').classList.contains('hidden')) closeAttention();
@@ -2049,7 +3139,7 @@ function chooseWaiting(index, btn) {
 }
 function stopCurrent() {
   try { ws.send(JSON.stringify({ type: 'cancel', key: cur.key })); } catch {}
-  if (live) { clearLoading(); live.textEl.classList.remove('cursor'); if (live.raw) live.textEl.innerHTML = md(live.raw); }
+  if (live) { clearLoading(); live.textEl.classList.remove('cursor'); if (live.raw) { live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); } }
   // optimistic: if the server doesn't confirm within 1.5s, release the UI anyway
   setTimeout(() => { if (running) { running = false; refreshButton(); } }, 1500);
 }
@@ -2058,11 +3148,7 @@ $('sendBtn').onclick = () => { if ($('sendBtn').dataset.act === 'stop') stopCurr
 $('copyInputBtn').onclick = () => {
   const text = $('input').value;
   if (!text) return;
-  navigator.clipboard.writeText(text).then(() => toast('Copied!')).catch(() => {
-    /* fallback for older mobile browsers */
-    const t = $('input'); t.select(); t.setSelectionRange(0, t.value.length);
-    document.execCommand('copy'); toast('Copied!');
-  });
+  writeClipboardText(text, 'Copied!');
 };
 // Enter behavior: on desktop (mouse/fine pointer) Enter sends, Shift+Enter inserts a newline.
 // On mobile (coarse/touch pointer) Enter inserts a newline (default); send via the ↑ button.
@@ -2082,7 +3168,7 @@ function autoGrow() { const t = $('input'); t.style.height = 'auto'; t.style.hei
 $('input').addEventListener('input', () => { autoGrow(); onType(); updateSend(); saveDraft(cur.key, $('input').value); });
 
 /* ---------- mode (normal / bash) ---------- */
-function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
+function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').title = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
 $('modeChip').onclick = () => openSheet('Mode', [
   { ic: '⌗', label: 'normal', sel: cur.mode === 'normal', desc: `Chat with ${agentLabel(cur.agent)}`, fn: () => setMode('normal') },
   { ic: '⌘', label: 'bash', sel: cur.mode === 'bash', desc: 'Run commands on the box', fn: () => setMode('bash') },
@@ -2090,13 +3176,16 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.5' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : 'opus');
-  const effort = agent === 'codex' ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-sol' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
+  const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
   $('agentChip').classList.toggle('codex', agent === 'codex');
   $('agentChip').classList.toggle('gemini', agent === 'gemini');
   $('agentChip').classList.toggle('agy', agent === 'agy');
+  $('agentChip').classList.toggle('mac', agent === 'mac');
+  // "View screen" button only makes sense while driving the Mac.
+  { const vb = $('viewScreenBtn'); if (vb) vb.classList.toggle('hidden', agent !== 'mac'); }
 }
 function setAgent(agent) {
   cur.agent = agentType(agent);
@@ -2108,22 +3197,36 @@ $('agentChip').onclick = () => {
   const rows = [
     { ic: agentIcon('claude'), label: 'Claude', sel: cur.agent === 'claude', desc: 'Remote-control Claude Code', fn: () => setAgent('claude') },
     { ic: agentIcon('codex'), label: 'Codex', sel: cur.agent === 'codex', desc: 'Run Codex on the box', fn: () => setAgent('codex') },
-    { ic: agentIcon('gemini'), label: 'Gemini', sel: cur.agent === 'gemini', desc: 'Run Gemini on the box', fn: () => setAgent('gemini') },
-    { ic: agentIcon('agy'), label: 'Antigravity', sel: cur.agent === 'agy', desc: 'Use local agy / AI Pro', fn: () => setAgent('agy') },
   ];
-  if (cur.id) {
-    for (const row of rows) {
-      const target = row.label === 'Antigravity' ? 'agy' : row.label.toLowerCase();
-      row.desc = cur.agent === target ? 'Current agent' : `Continue this transcript in ${row.label}`;
-      row.fn = () => (cur.agent === target ? openModelSheet() : continueWithAgent(target));
-    }
-    rows.push({ ic: '', label: 'Model settings', desc: 'Change options for the active agent', fn: () => openModelSheet() });
+  if (agentEnabled('gemini') || cur.agent === 'gemini') rows.push({ ic: agentIcon('gemini'), label: 'Gemini', sel: cur.agent === 'gemini', desc: 'Run Gemini on the box', fn: () => setAgent('gemini') });
+  if (agentEnabled('agy') || cur.agent === 'agy') rows.push({ ic: agentIcon('agy'), label: 'Antigravity', sel: cur.agent === 'agy', desc: 'Use local agy / AI Pro', fn: () => setAgent('agy') });
+  if (agentEnabled('mac') || cur.agent === 'mac') rows.push({ ic: agentIcon('mac'), label: 'Computer Use', sel: cur.agent === 'mac', desc: 'Drive your Mac (Codex Computer Use)', fn: () => setAgent('mac') });
+  // Tapping the CURRENT agent always opens its model switcher (works in a new chat too, not just
+  // once the thread has an id). Tapping a DIFFERENT agent switches to it — continuing the transcript
+  // when one exists, otherwise just selecting it for the new chat (its original fn).
+  for (const row of rows) {
+    const target = row.label === 'Antigravity' ? 'agy' : row.label === 'Computer Use' ? 'mac' : row.label.toLowerCase();
+    if (cur.agent === target) { row.desc = 'Current agent · tap to switch model'; row.fn = () => openModelSheet(); }
+    else if (cur.id) { row.desc = `Continue this transcript in ${row.label}`; row.fn = () => continueWithAgent(target); }
   }
+  rows.push({ ic: '', label: 'Model settings', desc: `Switch model / effort for ${agentLabel(cur.agent)}`, fn: () => openModelSheet() });
   openSheet('Agent', rows);
 };
 
 /* ---------- attach files (images + any file type) ---------- */
 // Straight to the native iOS picker (it already offers Take Photo / Photo Library / Choose Files).
+// "View screen" — grab a live screenshot of the Mac (no agent, no cost) and pop it in the
+// shared image lightbox. Works whenever the Computer Use bridge is up.
+async function viewMacScreen() {
+  try {
+    toast('Capturing your Mac screen…');
+    const r = await api('/api/mac/screenshot');
+    if (!r.ok) { toast('Screen capture failed — is your Mac connected?'); return; }
+    const blob = await r.blob();
+    window.openImageLightbox([URL.createObjectURL(blob)], 0);
+  } catch (e) { toast('Screen capture failed'); }
+}
+$('viewScreenBtn').onclick = viewMacScreen;
 $('attachBtn').onclick = () => $('fileInput').click();
 $('fileInput').onchange = (e) => uploadFiles(e.target.files);
 $('camInput').onchange = (e) => uploadFiles(e.target.files);
@@ -2160,17 +3263,47 @@ window.addEventListener('drop', (e) => {
   const files = filesFrom(e.dataTransfer);
   if (files.length) uploadFiles(files);
 });
+// Downscale + re-encode big photos client-side before upload — on a slow uplink a full-res
+// phone photo (3–8 MB HEIC/JPEG) is the whole wait. Longest edge is capped at RESIZE_MAX_DIM;
+// that's already above the ~1568px Claude's vision downsizes to, so the model loses nothing and
+// Jimmy's lightbox stays sharp. GIF (animated) / SVG (vector) are never rasterized, and if the
+// re-encode fails (e.g. browser can't decode HEIC) or doesn't shrink, we keep the original bytes.
+const RESIZE_MAX_DIM = 1600;             // px, longest edge
+const RESIZE_QUALITY = 0.82;             // jpeg quality
+const RESIZE_MIN_BYTES = 200 * 1024;     // skip files already this small — not worth the CPU
+const NO_RESIZE_RE = /\.(gif|svg)$/i;
+const canResize = (f) => isImageFile(f) && !NO_RESIZE_RE.test((f && f.name) || '') && !/gif|svg/.test((f && f.type) || '');
+async function shrinkImage(file) {
+  if (!canResize(file) || file.size < RESIZE_MIN_BYTES || typeof createImageBitmap !== 'function') return file;
+  let bmp;
+  try {
+    // imageOrientation:'from-image' bakes in EXIF rotation (older Safari ignores/throws → plain decode).
+    try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+    catch { bmp = await createImageBitmap(file); }
+    const scale = Math.min(1, RESIZE_MAX_DIM / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', RESIZE_QUALITY));
+    if (!blob || blob.size >= file.size) return file;   // no win (already-small/opaque source) → keep original
+    const base = ((file.name || 'image').replace(/\.[^.]+$/, '')) || 'image';
+    return new File([blob], base + '.jpg', { type: 'image/jpeg', lastModified: file.lastModified || Date.now() });
+  } catch { return file; }               // decode/encode failed → upload the original untouched
+  finally { if (bmp && bmp.close) bmp.close(); }
+}
 // `images` is the composer's attachment buffer — images AND other files. Each entry:
 // { path, url (object-url preview for images, '' otherwise), name, isImage }.
 async function uploadFiles(files) {
   if (!files || !files.length) return;
   const picked = [...files].slice(0, 6);
-  const fd = new FormData(); picked.forEach((f) => fd.append('images', f));
+  toast('optimizing…');
+  const prepared = await Promise.all(picked.map(shrinkImage));   // order preserved → previews still line up
+  const fd = new FormData(); prepared.forEach((f) => fd.append('images', f));
   toast('uploading…');
   try {
     const d = await (await api('/api/upload', { method: 'POST', body: fd })).json();
     d.paths.forEach((p, i) => {
-      const f = picked[i]; const img = isImageFile(f);
+      const f = picked[i]; const img = isImageFile(f);   // preview from the original (nicer, already local)
       images.push({ path: p, url: img ? URL.createObjectURL(f) : '', name: (f && f.name) || p.split('/').pop(), isImage: img });
     });
     renderAttach();
@@ -2213,6 +3346,9 @@ async function onType() {
 // and custom commands are loaded from /api/commands?agent=...
 const BUILTIN_CMDS = {
   claude: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
     { name: 'switch', desc: 'Move THIS chat to another Claude account', action: 'switch-account' },
@@ -2221,37 +3357,62 @@ const BUILTIN_CMDS = {
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'review', desc: 'Review the current diff', action: 'review' },
   ],
   codex: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Codex model / reasoning effort', action: 'model' },
     { name: 'permissions', desc: 'Change approval & sandbox mode', action: 'approvals' },
     { name: 'approvals', desc: 'Change approval & sandbox mode', action: 'approvals' },
     { name: 'status', desc: 'Show current Box/Codex thread state', action: 'status' },
     { name: 'compact', desc: 'Summarize & compact the thread', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
     { name: 'fork', desc: 'Branch this thread into a child with parent context', action: 'fork' },
     { name: 'new', desc: 'Start a fresh Codex thread', action: 'new' },
     { name: 'diff', desc: 'Show the working-tree diff', send: true },
     { name: 'review', desc: 'Review the current working-tree diff', action: 'review' },
   ],
   gemini: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Gemini model', action: 'model' },
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'review', desc: 'Review the current diff', send: true },
     { name: 'new', desc: 'Start a fresh Gemini thread', action: 'new' },
   ],
   agy: [
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
+    { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Antigravity model', action: 'model' },
     { name: 'compact', desc: 'Summarize & compact the conversation', send: true },
     { name: 'clear', desc: 'Clear conversation history', send: true },
     { name: 'context', desc: 'Show context / token usage', send: true },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
     { name: 'review', desc: 'Review the current diff', send: true },
     { name: 'new', desc: 'Start a fresh Antigravity thread', action: 'new' },
+  ],
+  mac: [
+    { name: 'screen', desc: 'Snapshot your Mac screen right now', action: 'macscreen' },
+    { name: 'model', desc: 'Switch the Computer Use model / effort', action: 'model' },
+    { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
+    { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
+    { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
+    { name: 'fork', desc: 'Branch this chat into a child with parent context', action: 'fork' },
+    { name: 'new', desc: 'Start a fresh Computer Use chat', action: 'new' },
   ],
 };
 async function showCommands(tok) {
@@ -2295,42 +3456,95 @@ function compactTranscript(messages, maxChars = 14000, maxMsgs = 28) {
   if (out.length > maxChars) out = out.slice(out.length - maxChars);
   return out;
 }
+function visibleConversationText() {
+  const rows = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')].map((m) => {
+    const role = m.classList.contains('user') ? 'You' : agentLabel(cur.agent);
+    const text = cleanCopyText(m.dataset.rawText || '');
+    return text ? `${role}:\n${text}` : null;
+  }).filter(Boolean);
+  return rows.join('\n\n---\n\n');
+}
+async function loadUserMessages() {
+  if (!cur.id) return [];
+  const j = await (await api(`/api/sessions/${cur.id}/user-messages`)).json();
+  return (j.messages || []).map((m) => typeof m === 'string' ? { text: m, ts: null } : m);
+}
+async function copyUserMessages(preloaded) {
+  if (!cur.id && !preloaded) { toast('No session yet'); return; }
+  let msgs = preloaded;
+  try { if (!msgs) msgs = await loadUserMessages(); }
+  catch { toast('Could not load messages'); return; }
+  const text = (msgs || []).map((m) => cleanCopyText(m.text)).filter(Boolean).join('\n\n---\n\n');
+  await writeClipboardText(text, `Copied ${(msgs || []).length} messages`);
+}
+async function copyFullConversation() {
+  if (!cur.id) { toast('No session yet'); return; }
+  toast('Preparing copy...', 900);
+  try {
+    const r = await fetch(`/api/sessions/${cur.id}/export?token=${encodeURIComponent(TOKEN)}`);
+    if (!r.ok) { toast('Copy failed'); return; }
+    await writeClipboardText(await r.text(), 'Copied conversation');
+  } catch { toast('Copy failed'); }
+}
+function openCopySheet(preloadedUserMessages = null) {
+  openSheet('Copy', [
+    { ic: '', label: 'Full conversation', desc: 'Clean markdown export of the whole chat', fn: copyFullConversation },
+    { ic: '', label: 'My messages only', desc: 'Every user message from this chat', fn: () => copyUserMessages(preloadedUserMessages) },
+    { ic: '', label: 'Visible messages', desc: 'Only the messages currently loaded on screen', fn: () => writeClipboardText(visibleConversationText(), 'Copied visible messages') },
+  ]);
+}
 function buildForkPrompt(parent, messages) {
   const transcript = compactTranscript(messages);
-  return `You are a forked child Codex thread created in the Box mobile app.
+  return renderPromptTemplate('fork-thread', `Forked from ${parent.title}.\n\nParent transcript:\n${transcript || '(No parent transcript was available.)'}`, {
+    parentTitle: parent.title,
+    parentId: parent.id,
+    workspace: parent.cwd,
+    transcript: transcript || '(No parent transcript was available.)',
+  });
+}
+async function loadConversationSnapshot(throughIndex = null) {
+  if (!cur.id) return { messages: [], cwd: cur.cwd || defaultCwd, settings: cur.settings, agent: cur.agent, title: cur.title, mutable: false };
+  const qs = throughIndex != null ? `?through=${encodeURIComponent(throughIndex)}` : '';
+  const r = await api(`/api/sessions/${cur.id}/snapshot${qs}`);
+  if (!r.ok) throw new Error('snapshot failed');
+  const h = await r.json();
+  h.messages = annotateHistoryMessages(h.messages || []);
+  return h;
+}
+function buildBtwPrompt(parent, messages, question) {
+  const transcript = compactTranscript(messages, 40000, 80);
+  return `This is a one-off /btw side question from the Box app.
 
 Parent thread: ${parent.title}
-Parent id: ${parent.id}
+Parent id: ${parent.id || '(unsent)'}
 Workspace: ${parent.cwd}
 
-Use the transcript below as prior context for this child branch. Treat this as a separate branch: do not assume future parent-thread messages are visible here, and do not write back to the parent. Do not run commands or edit files in this seed turn.
+Use the parent transcript below as context. Answer only this side question; do not assume you are continuing the parent thread, and do not edit files unless the question explicitly asks for that.
+
+Side question:
+${question}
 
 Parent transcript:
-${transcript || '(No parent transcript was available.)'}
-
-For this seed turn, briefly acknowledge that the fork is ready and mention the parent thread title. Wait for the next user instruction.`;
+${transcript || '(No parent transcript was available.)'}`;
 }
 function buildSwitchPrompt(source, targetAgent, messages) {
   // Carry the prior conversation at high fidelity (last ~60 turns, ~40k chars) so the
   // hand-off feels like the SAME session continuing — not a fresh chat with a summary.
   const transcript = compactTranscript(messages, 40000, 60);
-  const sourceAgent = source.agent === 'codex' ? 'Codex' : 'Claude';
-  const target = targetAgent === 'codex' ? 'Codex' : 'Claude';
-  return `You are continuing a Box mobile conversation in ${target} after switching from ${sourceAgent}.
-
-Source thread: ${source.title}
-Source id: ${source.id}
-Workspace: ${source.cwd}
-
-Use the transcript below as prior context. Continue as the same working conversation, but do not assume future messages in the source thread are visible here unless they are pasted later.
-
-Source transcript:
-${transcript || '(No source transcript was available.)'}
-
-For this first turn, briefly acknowledge that ${target} has the prior context and is ready to continue. Do not run commands or edit files until the next user instruction.`;
+  const sourceAgent = agentLabel(agentType(source.agent));
+  const target = agentLabel(agentType(targetAgent));
+  return renderPromptTemplate('switch-agent', `Continue this conversation in ${target} with prior context from ${sourceAgent}.\n\nSource transcript:\n${transcript || '(No source transcript was available.)'}`, {
+    targetAgent: target,
+    sourceAgent,
+    sourceTitle: source.title,
+    sourceId: source.id,
+    workspace: source.cwd,
+    transcript: transcript || '(No source transcript was available.)',
+  });
 }
 async function continueWithAgent(targetAgent) {
-  targetAgent = targetAgent === 'codex' ? 'codex' : 'claude';
+  targetAgent = agentType(targetAgent);
+  if (!agentEnabled(targetAgent) && targetAgent !== cur.agent) return toast(`${AGENT_LABEL[targetAgent]} is not configured`);
   if (running) return toast('Wait for the current turn to finish before switching');
   if (!cur.id) { setAgent(targetAgent); return toast(`${AGENT_LABEL[targetAgent]} selected`); }
   if (targetAgent === cur.agent) return openModelSheet();
@@ -2341,10 +3555,10 @@ async function continueWithAgent(targetAgent) {
     id: cur.id,
     title: cur.title || 'Box chat',
     cwd: h.cwd || cur.cwd || defaultCwd,
-    agent: cur.agent === 'codex' ? 'codex' : 'claude',
+    agent: agentType(cur.agent),
   };
   // Don't stack "Codex: Claude: …" titles across repeated switches.
-  const baseTitle = source.title.replace(/^(Claude|Codex):\s*/, '');
+  const baseTitle = source.title.replace(/^(Claude|Codex|Gemini|Antigravity):\s*/, '');
   const title = `${AGENT_LABEL[targetAgent]}: ${baseTitle}`.slice(0, 80);
   const messages = h.messages || [];
   const prompt = buildSwitchPrompt(source, targetAgent, messages);
@@ -2355,20 +3569,66 @@ async function continueWithAgent(targetAgent) {
   enqueueText(prompt, { parentId: source.id, parentTitle: source.title, title, displayText: `↪ Continued in ${AGENT_LABEL[targetAgent]} — full prior context carried over` });
   toast(`Continuing in ${AGENT_LABEL[targetAgent]}`);
 }
-async function forkCurrent() {
-  if (cur.agent !== 'codex') return toast('/fork is Codex-only in Box right now');
-  if (running) return toast('Wait for the current turn to finish before forking');
+async function forkCurrent(opts = {}) {
   if (!cur.id) return toast('Send at least one message before forking');
   let h;
-  try { h = await (await api(`/api/sessions/${cur.id}/history`)).json(); }
+  try { h = await loadConversationSnapshot(opts.throughIndex); }
   catch { return toast('Could not load parent history'); }
-  const parent = { id: cur.id, title: cur.title || 'Parent chat', cwd: h.cwd || cur.cwd || defaultCwd, settings: normalizeSettings(h.settings || cur.settings) };
+  const agent = agentType(cur.agent);
+  const parent = { id: cur.id, title: cur.title || 'Parent chat', cwd: h.cwd || cur.cwd || defaultCwd, settings: normalizeSettings(h.settings || cur.settings), agent };
   const childTitle = (`Fork: ${parent.title}`).slice(0, 80);
   const prompt = buildForkPrompt(parent, h.messages || []);
-  await openChat({ id: null, title: childTitle, cwd: parent.cwd, agent: 'codex', settings: parent.settings, parentId: parent.id, parentTitle: parent.title });
+  await openChat({ id: null, title: childTitle, cwd: parent.cwd, agent, settings: parent.settings, parentId: parent.id, parentTitle: parent.title });
   cur.firstUser = `Forked from ${parent.title}`;
   enqueueText(prompt, { parentId: parent.id, parentTitle: parent.title, title: childTitle, displayText: `Forked from ${parent.title}` });
-  toast('Fork created');
+  toast(opts.throughIndex != null ? 'Forked from that point' : 'Fork created');
+}
+function confirmFork(opts = {}) {
+  if (!cur.id) return toast('Send at least one message before forking');
+  const scoped = opts.throughIndex != null;
+  openSheet(scoped ? 'Fork from this message?' : 'Fork this chat?', [
+    {
+      ic: '',
+      label: scoped ? 'Create fork from here' : 'Create fork',
+      desc: scoped
+        ? 'Starts a child chat using the transcript up to this message.'
+        : 'Starts a child chat using this conversation transcript.',
+      fn: () => forkCurrent(opts),
+    },
+    { ic: '', label: 'Cancel', desc: 'Keep working in this chat', fn: () => {} },
+  ]);
+}
+async function runBtw(question) {
+  question = String(question || '').trim();
+  if (!question) return toast('Type a question after /btw');
+  let h = null;
+  if (cur.id) {
+    try { h = await loadConversationSnapshot(); }
+    catch { h = null; }
+  }
+  const parent = {
+    id: cur.id || '',
+    title: cur.title || 'Current chat',
+    cwd: (h && h.cwd) || cur.cwd || defaultCwd,
+    settings: normalizeSettings((h && h.settings) || cur.settings),
+    agent: agentType(cur.agent),
+  };
+  const title = (`BTW: ${question}`).replace(/\s+/g, ' ').slice(0, 80);
+  const prompt = buildBtwPrompt(parent, (h && h.messages) || [], question);
+  await openChat({ id: null, title, cwd: parent.cwd, agent: parent.agent, settings: parent.settings, parentId: parent.id || null, parentTitle: parent.title });
+  cur.firstUser = `/btw ${question}`;
+  enqueueText(prompt, { parentId: parent.id || null, parentTitle: parent.title, title, displayText: `/btw ${question}` });
+  toast('BTW side thread started');
+}
+function openChatWorkspaceSheet() {
+  openPathSheet('Chat workspace', cur.cwd || defaultCwd, '~/development', async (path) => {
+    const want = path || defaultCwd;
+    const d = await (await api('/api/fs?path=' + encodeURIComponent(want))).json();
+    if (d.type !== 'dir') throw new Error('not a directory');
+    cur.cwd = d.path;
+    sendSettings();
+    toast(`Chat workspace: ${shortCwd(cur.cwd)}`);
+  }, { text: 'This chat uses this directory for files, bash, and the next agent turn.' });
 }
 function openStatusSheet() {
   cur.settings = normalizeSettings(cur.settings);
@@ -2380,13 +3640,16 @@ function openStatusSheet() {
     { ic: '', label: 'Agent', desc: agentLabel(agent), fn: () => {} },
     { ic: '', label: 'State', desc: running ? 'Running' : 'Idle', fn: () => {} },
     { ic: '', label: 'Context', desc: `${cx.percent}% · ${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${cx.source !== 'reported' ? ' est' : ''}`, fn: () => {} },
-    { ic: '', label: 'Workspace', desc: shortCwd(cur.cwd || defaultCwd), fn: () => {} },
+    { ic: '⌂', label: 'Workspace', desc: shortCwd(cur.cwd || defaultCwd), fn: openChatWorkspaceSheet },
   ];
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });
-  if (agent === 'codex') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: () => {} });
-  else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: () => {} });
-  else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: () => {} });
-  else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: () => {} });
+  if (agent === 'codex') {
+    rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: openModelSheet });
+    rows.push({ ic: '◆', label: 'Permissions', desc: sandboxLabel(cfg.sandbox || 'off'), fn: openApprovalsSheet });
+  }
+  else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: openModelSheet });
+  else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: openModelSheet });
+  else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: openModelSheet });
   if (cur.id) rows.push({
     ic: cur.agent === 'codex' ? '⌘' : '◆',
     label: `Continue in ${cur.agent === 'codex' ? 'Claude' : 'Codex'}`,
@@ -2398,7 +3661,7 @@ function openStatusSheet() {
 }
 function reviewCurrent() {
   if (cur.agent !== 'codex') return toast('/review is Codex-only in Box right now');
-  enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.', { displayText: '/review' });
+  enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
 }
 function insertToken(text, tok) {
   const t = $('input'); t.value = t.value.slice(0, tok.start) + text + t.value.slice(tok.end);
@@ -2416,13 +3679,18 @@ function runSlashCommand(cmd, tok) {
   $('input').blur();
   if (cmd.action === 'accounts') return openAccounts();
   if (cmd.action === 'switch-account') return openAccountSwitch();
+  if (cmd.action === 'settings') return openAppSettings();
+  if (cmd.action === 'prompts') return openPromptHub();
+  if (cmd.action === 'workspace') return openChatWorkspaceSheet();
   if (cmd.action === 'model') return openModelSheet();
+  if (cmd.action === 'macscreen') return viewMacScreen();
   if (cmd.action === 'theme') return toggleTheme();
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
-  if (cmd.action === 'fork') return forkCurrent();
+  if (cmd.action === 'fork') return confirmFork();
+  if (cmd.action === 'btw') { $('input').value = '/btw '; autoGrow(); refreshButton(); focusComposerSoon(); return; }
   if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
-  if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText('Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.');
+  if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
   if (cmd.action === 'review') return reviewCurrent();
   if (cmd.kind === 'skill' && (cur.agent === 'codex' || cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(`Use the ${cmd.name} skill.`);
   enqueueText('/' + cmd.name);
@@ -2435,9 +3703,12 @@ function renderSuggest(items) {
 }
 
 const CODEX_MODELS = [
-  { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'Strongest coding model' },
-  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'Balanced frontier model' },
-  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Faster everyday work' },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'Strongest GPT-5.6 model' },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'Everyday workhorse' },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', desc: 'Fast high-volume work' },
+  { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'Previous frontier model' },
+  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'Older frontier fallback' },
+  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Fast older fallback' },
   { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex', desc: 'Previous Codex model' },
   { id: 'gpt-5.2', label: 'GPT-5.2', desc: 'Older fallback' },
 ];
@@ -2458,11 +3729,15 @@ const CODEX_EFFORTS = [
   { id: 'medium', label: 'Medium', desc: 'Balanced' },
   { id: 'high', label: 'High', desc: 'Deeper reasoning' },
   { id: 'xhigh', label: 'XHigh', desc: 'Maximum depth' },
+  { id: 'max', label: 'Max', desc: 'Hardest tasks' },
 ];
+const codexEffortsForModel = (model) => String(model || '').startsWith('gpt-5.6')
+  ? CODEX_EFFORTS.filter((effort) => effort.id !== 'max')
+  : CODEX_EFFORTS;
 const CLAUDE_MODELS = [
   { id: 'opus', label: 'Opus 4.8', desc: 'Default — 1M context, most capable' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
-  { id: 'fable', label: 'Fable', desc: 'Latest Claude alias' },
+  { id: 'fable', label: 'Fable 5', desc: 'Newest — fast, fewer check-ins (heavier usage)' },
 ];
 const CLAUDE_EFFORTS = [
   { id: 'low', label: 'Low' },
@@ -2481,9 +3756,13 @@ function openModelSheet() {
   const rows = [];
   if (agent === 'codex') {
     rows.push({ ic: '', label: 'Model', desc: 'Applies to the next Codex turn in this Box chat', fn: () => openModelSheet() });
-    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.codex.model = m.id; sendSettings(); toast(`Codex model: ${m.label}`); openModelSheet(); }));
+    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
+      cur.settings.codex.model = m.id;
+      if (m.id.startsWith('gpt-5.6') && cur.settings.codex.reasoningEffort === 'max') cur.settings.codex.reasoningEffort = 'xhigh';
+      sendSettings(); toast(`Codex model: ${m.label}`); openModelSheet();
+    }));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
-    for (const e of CODEX_EFFORTS) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.codex.reasoningEffort = e.id; sendSettings(); toast(`Codex effort: ${e.label}`); openModelSheet(); }));
+    for (const e of codexEffortsForModel(cfg.model)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.codex.reasoningEffort = e.id; sendSettings(); toast(`Codex effort: ${e.label}`); openModelSheet(); }));
     return openSheet('Codex model', rows);
   }
   if (agent === 'gemini') {
@@ -2498,6 +3777,17 @@ function openModelSheet() {
     openSheet('Antigravity model', rows);
     return;
   }
+  if (agent === 'mac') {
+    rows.push({ ic: '', label: 'Model', desc: 'Codex model used on the next Computer Use turn (runs on your Mac)', fn: () => openModelSheet() });
+    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
+      cur.settings.mac.model = m.id;
+      if (m.id.startsWith('gpt-5.6') && cur.settings.mac.reasoningEffort === 'max') cur.settings.mac.reasoningEffort = 'xhigh';
+      sendSettings(); toast(`Computer Use model: ${m.label}`); openModelSheet();
+    }));
+    rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
+    for (const e of codexEffortsForModel(cfg.model)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.mac.reasoningEffort = e.id; sendSettings(); toast(`Computer Use effort: ${e.label}`); openModelSheet(); }));
+    return openSheet('Computer Use model', rows);
+  }
   rows.push({ ic: '', label: 'Model', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
   for (const m of CLAUDE_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.claude.model = m.id; sendSettings(); toast(`Claude model: ${m.label}`); openModelSheet(); }));
   rows.push({ ic: '', label: 'Effort', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
@@ -2505,16 +3795,26 @@ function openModelSheet() {
   openSheet('Claude model', rows);
 }
 function openApprovalsSheet() {
-  openSheet('Codex approvals', [
-    { ic: '✓', label: 'Box YOLO', desc: 'danger-full-access, never ask; current Box default', fn: () => toast('Box YOLO already active') },
-  ]);
+  cur.settings = normalizeSettings(cur.settings);
+  const active = (cur.settings.codex && cur.settings.codex.sandbox) || DEFAULT_SETTINGS.codex.sandbox || 'off';
+  openSheet('Codex permissions', CODEX_SANDBOXES.map((s) => ({
+    ic: s.id === active ? '✓' : '',
+    label: s.label,
+    desc: s.desc,
+    sel: s.id === active,
+    fn: () => {
+      cur.settings.codex.sandbox = s.id;
+      sendSettings();
+      toast(`Codex permissions: ${s.label}`);
+    },
+  })));
 }
 
 /* ---------- rename ---------- */
 // Rename any chat (from the in-chat header button OR the swipe Edit button) without
 // having to open it. Updates the open-chat header too if it's the same session.
 function renameChat(s, onDone) {
-  const cleanCur = (s.title && !/^New (Claude |Codex )?chat$/.test(s.title)) ? s.title : '';
+  const cleanCur = (s.title && !isPlaceholderChatTitle(s.title)) ? s.title : '';
   const inner = $('sheetInner'); inner.innerHTML = '<h3>Rename chat</h3>';
   const inp = document.createElement('input'); inp.className = 'sheetInput'; inp.value = cleanCur; inp.placeholder = 'Chat name';
   inner.appendChild(inp);
@@ -2523,24 +3823,36 @@ function renameChat(s, onDone) {
     const name = inp.value.trim();
     if (name) {
       s.title = name;
-      if (cur && s.id && s.id === cur.id) { cur.title = name; $('chatTitle').textContent = name; }
+      if (cur && s.id && s.id === cur.id) { cur.title = name; setChatTitle(name); }
       if (s.id) { try { await api(`/api/sessions/${s.id}/rename`, { method: 'POST', body: JSON.stringify({ name }) }); } catch {} }
     }
     closeSheet();
     if (onDone) onDone(name);
   };
-  inner.appendChild(row); $('sheet').classList.remove('hidden');
+  inner.appendChild(row); showSheet();
   // Focus synchronously, still inside the tap gesture — iOS only raises the soft keyboard for a
   // user-initiated focus(). A setTimeout breaks that gesture chain, so the keyboard stays down and
   // you have to tap the field again. The sheet un-hides instantly (no transition), so it's focusable now.
   inp.focus(); inp.select();
 }
-$('renameBtn').onclick = () => renameChat(cur);
+function openChatTitleSheet() {
+  const title = cur.title || 'New chat';
+  openSheet(title, [
+    { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
+    { ic: '', label: 'Fork chat', desc: 'Start a child conversation with this transcript', fn: () => confirmFork() },
+    { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
+    { ic: '', label: 'My messages', desc: 'Browse and copy just your prompts', fn: openMyMessages },
+    cur.favorite
+      ? { ic: '★', label: 'Unpin', desc: 'Remove from Favorites', fn: () => cur.id ? doFavorite({ id: cur.id, title: cur.title, favorite: true }, false) : toast('No session yet') }
+      : { ic: '☆', label: 'Pin', desc: 'Keep at the top of the chat list', fn: () => cur.id ? doFavorite({ id: cur.id, title: cur.title, favorite: false }, true) : toast('No session yet') },
+  ]);
+}
+$('chatTitle').onclick = openChatTitleSheet;
 
 /* ---------- file explorer + reader ---------- */
 let expPath = '';
 const parentOf = (p) => p.replace(/\/[^/]+\/?$/, '') || '/';
-$('filesBtn').onclick = () => { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); };
+$('filesBtn').onclick = () => { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); const i = $('expJumpInput'); try { i.focus(); i.select(); } catch {} };
 
 /* ---- my messages overlay ---- */
 function closeMyMsgs() { $('myMsgsOverlay').classList.add('hidden'); }
@@ -2558,21 +3870,17 @@ $('myMsgsDownload').onclick = async () => {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch { toast('Download failed'); }
 };
-$('myMsgsBtn').onclick = async () => {
+async function openMyMessages() {
   if (!cur.id) return toast('No session yet');
   const overlay = $('myMsgsOverlay'), list = $('myMsgsList');
   overlay.classList.remove('hidden'); paintIcons(overlay);
   list.innerHTML = '<div class="histLoader">Loading…</div>';
   let msgs;
-  try { msgs = (await (await api(`/api/sessions/${cur.id}/user-messages`)).json()).messages; }
+  try { msgs = await loadUserMessages(); }
   catch { list.innerHTML = '<div class="histLoader">Failed to load</div>'; return; }
   list.innerHTML = '';
   if (!msgs || !msgs.length) { list.innerHTML = '<div class="histLoader">No messages found</div>'; return; }
-  // msgs is [{text, ts}] — normalise in case server returns plain strings (old format)
-  msgs = msgs.map((m) => typeof m === 'string' ? { text: m, ts: null } : m);
-  $('myMsgsCopyAll').onclick = () => {
-    navigator.clipboard.writeText(msgs.map((m) => m.text).join('\n\n---\n\n')).then(() => toast(`Copied ${msgs.length} messages`)).catch(() => {});
-  };
+  $('myMsgsCopyAll').onclick = () => openCopySheet(msgs);
   const total = msgs.length;
   msgs.forEach(({ text, ts }, i) => {
     const card = document.createElement('div'); card.className = 'myMsgCard';
@@ -2592,7 +3900,7 @@ $('myMsgsBtn').onclick = async () => {
       left.appendChild(exp);
     }
     const cp = document.createElement('button'); cp.className = 'iconbtn ghost'; cp.title = 'copy'; cp.innerHTML = ICONS.copy;
-    cp.onclick = (e) => { e.stopPropagation(); navigator.clipboard.writeText(text).then(() => toast('Copied!')).catch(() => {}); };
+    cp.onclick = (e) => { e.stopPropagation(); writeClipboardText(text, 'Copied!'); };
     card.appendChild(left); card.appendChild(cp);
     // tap card → find that exact message in the chat and scroll to it. Match by the
     // message TIMESTAMP (a unique, stable key present on both the API and the rendered
@@ -2625,37 +3933,70 @@ $('myMsgsBtn').onclick = async () => {
     });
     list.appendChild(card);
   });
-};
+}
+$('myMsgsBtn').onclick = openMyMessages;
 
 /* ---- /clear + "needs attention" page ----
    A dedicated page that takes the messages area's place, so the REAL composer below (with its
    voice button) handles the reply. Back returns to the chat. Items are shown as clean cards. */
 // Paint bell icon (attnBtn has a badge child, so we use insertAdjacentHTML not data-icon/paintIcons)
 $('attnBtn').insertAdjacentHTML('afterbegin', ICONS.bell);
+function updateFavoriteButton() {
+  const b = $('favoriteBtn'); if (!b) return;
+  const isFavorite = !!(cur && cur.favorite);
+  b.dataset.icon = isFavorite ? 'star-filled' : 'star';
+  b.title = isFavorite ? 'Unpin this conversation' : 'Pin this conversation';
+  b.setAttribute('aria-label', b.title);
+  b.classList.toggle('active', isFavorite);
+  b._painted = 0; b.innerHTML = ''; paintIcons(b.parentElement || document);
+}
+function updateArchiveButton() {
+  const b = $('archiveBtn'); if (!b) return;
+  const isArchived = !!(cur && cur.archived);
+  b.dataset.icon = isArchived ? 'unarchive' : 'archive';
+  b.title = isArchived ? 'Unarchive this conversation' : 'Archive this conversation';
+  b.setAttribute('aria-label', b.title);
+  b._painted = 0; b.innerHTML = ''; paintIcons(b.parentElement || document);
+}
+function openArchiveConfirm(s, opts = {}) {
+  const inner = $('sheetInner');
+  inner.innerHTML = '<h3>Archive chat?</h3><p class="sheetText">This moves the chat to Archived and stops its running Claude bridge so it no longer consumes box resources. You can unarchive it later from Archived or from this chat.</p>';
+  const rows = [
+    { ic: '🗄', label: 'Archive', desc: 'Stop the bridge and move it out of active chats', fn: async () => {
+      const j = await doArchive(s, true);
+      if (j && opts.leaveChat) {
+        if (ws) ws.close();
+        // Desktop keeps the sidebar mounted, so don't bounce to the full-screen list —
+        // just deselect (a fresh new chat has no id, so syncCurrentCard clears the
+        // highlight) and drop an empty new chat into the right pane. Mobile has no
+        // side-by-side layout, so dropping back to the list is the expected result there.
+        if (isDesktopShell()) openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent });
+        else openSessions();
+      }
+    } },
+    { ic: '✕', label: 'Cancel', fn: () => {} },
+  ];
+  for (const r of rows) {
+    const el = document.createElement('div');
+    el.className = 'sheetRow' + (r.label === 'Archive' ? ' danger' : '');
+    el.innerHTML = `<span class="ic">${r.ic || ''}</span><div><div>${esc(r.label)}</div>${r.desc ? `<div class="muted" style="font-size:12.5px">${esc(r.desc)}</div>` : ''}</div>`;
+    el.onclick = () => { closeSheet(); r.fn(); };
+    inner.appendChild(el);
+  }
+  showSheet();
+}
 $('archiveBtn').onclick = async () => {
   if (!cur.id) return toast('Nothing to archive yet');
-  const sid = cur.id;   // no confirm — archive now, offer Undo via toast
-  try { await api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: true }) }); } catch {}
-  toast('🗄 Archived', 6000, { label: 'Undo', fn: () => { api(`/api/sessions/${sid}/archive`, { method: 'POST', body: JSON.stringify({ archived: false }) }).catch(() => {}); if (curFilter) fetchSessions(curFilter); } });
-  if (ws) ws.close(); openSessions();
+  const s = { id: cur.id, title: cur.title, archived: !!cur.archived };
+  if (s.archived) { await doArchive(s, false); return; }
+  openArchiveConfirm(s, { leaveChat: true });
 };
-$('attnBtn').onclick = () => { attnShowAll = false; attnLinear = false; navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key }); showAttention(); };
-$('copyChatBtn').onclick = () => {
-  const TURNS = 10;
-  const msgs = [...$('messages').querySelectorAll('.msg.user, .msg.assistant')];
-  const last = msgs.slice(-(TURNS * 2));
-  const lines = last.map((m) => {
-    const role = m.classList.contains('user') ? 'You' : 'Claude';
-    // Only use rawText — never fall back to innerText (which includes tool chip DOM garbage).
-    // Skip tool-only turns where there's no text content.
-    const text = (m.dataset.rawText || '').trim();
-    return text ? `${role}: ${text}` : null;
-  }).filter(Boolean);
-  if (!lines.length) { toast('No messages yet'); return; }
-  navigator.clipboard.writeText(lines.join('\n\n')).then(() => toast(`Copied ${lines.length} messages`)).catch(() => {});
+$('attnBtn').onclick = () => {
+  attnLinear = !!(((CFG && CFG.features) || {}).linear);
+  navTo({ view: 'chatAttn', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key });
+  showAttention();
 };
-$('attnTabInput').onclick = () => { attnShowAll = false; attnLinear = false; showAttention(); };
-$('attnTabStatus').onclick = () => { attnShowAll = true; attnLinear = false; showAttention(); };
+$('attnTabStatus').onclick = () => { attnLinear = false; showAttention(); };
 $('attnTabLinear') && ($('attnTabLinear').onclick = () => { attnLinear = true; showAttention(); });
 $('attnList').addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('.attnDismiss'); if (b) { e.preventDefault(); e.stopPropagation(); dismissAttn(b.dataset.key, b.dataset.title, b.dataset.identifier); } });
 function closeAttention() {
@@ -2682,6 +4023,32 @@ function attnCard(it) {
 }
 const attnKey = (it) => `${it.date || ''}|${it.title || ''}`;
 const attnDismissedSet = () => { try { return new Set(JSON.parse(LS.getItem('attn_dismissed') || '[]')); } catch { return new Set(); } };
+function attnSection(markdown, heading) {
+  const m = String(markdown || '').match(new RegExp(`(^##\\s*${heading}[\\s\\S]*?)(?=^##\\s|\\s*$)`, 'im'));
+  return m ? m[1].trim() : '';
+}
+function attnSectionBody(section) {
+  return String(section || '').replace(/^##[^\n]*\n?/i, '').trim();
+}
+function hasUsefulAttnSection(section) {
+  const body = attnSectionBody(section)
+    .replace(/\*\*/g, '')
+    .replace(/[_`]/g, '')
+    .trim()
+    .toLowerCase();
+  if (!body) return false;
+  return !/^\(?\s*(none|n\/a|nothing|no blockers?|all clear)\s*\)?[.!]*$/.test(body);
+}
+function buildBriefMarkdown(markdown) {
+  const needs = attnSection(markdown, 'needs your input');
+  const inProgress = attnSection(markdown, 'in progress');
+  const done = attnSection(markdown, 'done recently');
+  const parts = [];
+  if (hasUsefulAttnSection(needs)) parts.push(needs);
+  if (hasUsefulAttnSection(inProgress)) parts.push(inProgress);
+  if (hasUsefulAttnSection(done)) parts.push(done);
+  return { markdown: parts.join('\n\n').trim(), hasNeeds: hasUsefulAttnSection(needs) };
+}
 // Items are Linear issues (label needs-me). Dismiss = actually resolve the issue
 // (move it to Done) via the existing /api/linear/:id/done endpoint, so it clears for
 // every session — not just hidden locally. Falls back to local-hide if there's no
@@ -2698,16 +4065,13 @@ async function dismissAttn(key, title, identifier) {
   showAttention();
 }
 async function showAttention() {
-  // Per-session view: GET /api/sessions/:id/attention → this session's own status doc
-  // (server stores it per session id, so concurrent ~/development chats don't clobber).
-  // Falls back to the global needs-me Linear inbox (via /api/needs-attention) with the card UI.
+  // Linear is the default surface because it is the durable work queue. Brief is the
+  // per-session status doc, merged into one page instead of split across empty tabs.
   const perSession = cur.id;
   const seg = $('attnSeg');
   if (seg) seg.classList.remove('hidden');
-  // 3-way tab active state
-  $('attnTabInput') && $('attnTabInput').classList.toggle('active', !attnShowAll && !attnLinear);
-  $('attnTabStatus') && $('attnTabStatus').classList.toggle('active', attnShowAll && !attnLinear);
   $('attnTabLinear') && $('attnTabLinear').classList.toggle('active', attnLinear);
+  $('attnTabStatus') && $('attnTabStatus').classList.toggle('active', !attnLinear);
   if (attnLinear) {
     await renderSessionLinear(perSession);
   } else if (perSession) {
@@ -2715,38 +4079,31 @@ async function showAttention() {
     let markdown = null;
     try { const d = await (await api(`/api/sessions/${cur.id}/attention`)).json(); markdown = d.markdown || null; } catch {}
     if (markdown) {
-      const hasNeeds = /^##\s*needs your input/im.test(markdown) && !/^##\s*needs your input\s*\n\s*\n/im.test(markdown);
+      const brief = buildBriefMarkdown(markdown);
+      const hasNeeds = brief.hasNeeds;
       setAttnBadge(hasNeeds ? 1 : 0);
-      let display = markdown;
-      if (!attnShowAll) {
-        // "Needs input" tab — show only the ## Needs your input section
-        const m = markdown.match(/^(##\s*needs your input[\s\S]*?)(?=^##\s|\s*$)/im);
-        display = m ? m[1].trim() : (hasNeeds ? markdown : '');
-      }
-      if (display) {
-        const lead = attnShowAll
-          ? 'Full session status — updated every 5 turns automatically.'
-          : 'What this session needs from you — reply below to unblock it.';
-        $('attnList').innerHTML = `<div class="attnLead">${lead}</div><div class="attnMd">${md(display)}</div>`;
+      if (brief.markdown) {
+        const lead = hasNeeds
+          ? 'Session brief — blockers first. Reply below to unblock it.'
+          : 'Session brief — no blocker detected; recent status is below.';
+        $('attnList').innerHTML = `<div class="attnLead">${lead}</div><div class="attnMd">${md(brief.markdown)}</div>`;
       } else {
-        $('attnList').innerHTML = '<div class="attnEmpty">🎉 Nothing blocking — all clear.</div>';
+        $('attnList').innerHTML = '<div class="attnEmpty">Nothing useful in the session brief yet.</div>';
       }
     } else {
       setAttnBadge(0);
-      $('attnList').innerHTML = '<div class="attnEmpty">No status yet — will appear after a few turns.</div>';
+      $('attnList').innerHTML = '<div class="attnEmpty">No brief yet — it will appear after a few turns.</div>';
     }
   } else {
     // Global fallback: needs-me Linear inbox with card UI
     let all = [];
     try { const d = await (await api('/api/needs-attention')).json(); all = d.items || []; setAttnBadge((d.items || []).filter((i) => i.open).length); } catch {}
     const dis = attnDismissedSet();
-    const items = all.filter((i) => attnShowAll ? !dis.has(attnKey(i)) : (i.open && !dis.has(attnKey(i))));
-    const lead = attnShowAll
-      ? `Everything tracked across sessions. 🔴 needs you · 🟡 heads-up · 🟢 answered · ⚪ done.`
-      : `${items.length} thing${items.length === 1 ? '' : 's'} need your input. Reply below.`;
+    const items = all.filter((i) => !dis.has(attnKey(i)));
+    const lead = `Cross-session queue. Reply below, or resolve a card when it no longer needs you.`;
     $('attnList').innerHTML = items.length
       ? `<div class="attnLead">${lead}</div>` + items.map(attnCard).join('')
-      : (attnShowAll ? '<div class="attnEmpty">Nothing tracked yet.</div>' : '<div class="attnEmpty">🎉 All clear — nothing needs your input right now.</div>');
+      : '<div class="attnEmpty">Nothing tracked yet.</div>';
   }
   $('messages').classList.add('hidden');
   $('attnPanel').classList.remove('hidden');
@@ -2761,11 +4118,11 @@ async function showAttention() {
 // "Linear" tab of the bell — the INC issues THIS session has referenced (most first),
 // resolved to title + workflow state. Tap a row to open the in-app issue workspace.
 async function renderSessionLinear(perSession) {
-  if (!perSession) { $('attnList').innerHTML = '<div class="attnEmpty">Open a session to see the Linear issues it has worked on.</div>'; return; }
+  if (!perSession) { await renderLinearQueuePreview(); return; }
   $('attnList').innerHTML = '<div class="attnLead">Loading…</div>';
   let issues = [];
   try { const d = await (await api(`/api/sessions/${perSession}/linear`)).json(); issues = d.issues || []; } catch {}
-  if (!issues.length) { $('attnList').innerHTML = '<div class="attnEmpty">No Linear issues referenced in this session yet.</div>'; return; }
+  if (!issues.length) { await renderLinearQueuePreview('No Linear issue is tied to this session yet. Here is the active queue.'); return; }
   const STYPE = { completed: '#3aa55e', canceled: '#9aa', started: '#e0a23a', unstarted: '#5b8def', backlog: '#9aa', triage: '#e0533a' };
   const rows = issues.map((it) => {
     const stCol = it.state ? (STYPE[it.state.type] || '#9aa') : '#9aa';
@@ -2784,6 +4141,39 @@ async function renderSessionLinear(perSession) {
     };
   });
 }
+async function renderLinearQueuePreview(prefix) {
+  $('attnList').innerHTML = '<div class="attnLead">Loading…</div>';
+  let d = null;
+  try { d = await (await api('/api/linear-board')).json(); } catch {}
+  const issues = [];
+  for (const col of ((d && d.columns) || [])) {
+    if (col.recent) continue;
+    for (const t of (col.issues || [])) issues.push({ ...t, stateName: col.name, stateType: col.type });
+  }
+  if (!issues.length) {
+    $('attnList').innerHTML = '<div class="attnEmpty">No open Linear issues.</div>';
+    return;
+  }
+  issues.sort((a, b) => (a.stateType === 'started' ? -1 : b.stateType === 'started' ? 1 : 0) || (Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0)));
+  const rows = issues.slice(0, 12).map((it) => {
+    const [plabel, pcolor] = PRIO[it.priority] || [];
+    const sub = [it.stateName, plabel, it.assignee && `@${it.assignee}`].filter(Boolean).join(' · ');
+    return `<div class="sessRow linRow" data-id="${esc(it.id)}"><span class="sessIc">◎</span>`
+      + `<div class="sessMain"><div class="sessTitle">${esc(it.id)} · ${esc(it.title || '(untitled)')}</div>`
+      + `<div class="sessSub">${pcolor ? `<span class="attnDot" style="background:${pcolor}"></span>` : ''}${esc(sub)}</div></div>`
+      + `<span class="sessGo">→</span></div>`;
+  }).join('');
+  const lead = prefix || 'Active Linear queue — tap an issue to open it.';
+  $('attnList').innerHTML = `<div class="attnLead">${esc(lead)}</div>${rows}`;
+  $('attnList').querySelectorAll('.linRow').forEach((row) => {
+    row.onclick = () => {
+      issueOrigin = cur.id
+        ? { kind: 'chat', chat: { id: cur.id, title: cur.title, cwd: cur.cwd, agent: cur.agent, settings: cur.settings } }
+        : { kind: 'board' };
+      openIssue(row.dataset.id);
+    };
+  });
+}
 function setAttnBadge(n) {
   const b = $('attnBadge'); if (!b) return;
   if (n > 0) { b.textContent = n; b.classList.remove('hidden'); } else b.classList.add('hidden');
@@ -2793,7 +4183,7 @@ async function refreshAttnBadge() {
     // Per-session: badge = 1 if ATTENTION.md exists with a non-empty "Needs your input" section
     try {
       const d = await (await api(`/api/sessions/${cur.id}/attention`)).json();
-      const hasNeeds = d.markdown && /^##\s*needs your input/im.test(d.markdown) && !/^##\s*needs your input\s*\n\s*\n/im.test(d.markdown);
+      const hasNeeds = d.markdown && buildBriefMarkdown(d.markdown).hasNeeds;
       setAttnBadge(hasNeeds ? 1 : 0);
     } catch { setAttnBadge(0); }
   } else {
@@ -2808,12 +4198,40 @@ $('expClose').onclick = () => {
   else $('explorer').classList.add('hidden');
 };
 $('expUp').onclick = () => browseExp(parentOf(expPath));
+// Tappable breadcrumb: the current-path title focuses the path bar so it's obvious you can type one.
+$('expPath').onclick = () => { const i = $('expJumpInput'); i.focus(); i.select(); };
+function normalizeJumpPath(path) {
+  path = String(path || '').trim();
+  if (!path) return '';
+  return expandBoxPath(path);
+}
+function openJumpPath() {
+  let v = String($('expJumpInput').value || '').trim();
+  if (!v) return;
+  // A relative path (no leading / or ~) resolves against the folder we're currently viewing,
+  // so pasting "output/report.pdf" from a coding-agent message just works.
+  if (!/^[~/]/.test(v)) {
+    const base = String(expPath || cur.cwd || defaultCwd || (CFG && CFG.home) || '').replace(/\/$/, '');
+    if (base) v = base + '/' + v.replace(/^\.\//, '');
+  }
+  browseExp(normalizeJumpPath(v));
+}
+$('expJump').onsubmit = (e) => {
+  e.preventDefault();
+  openJumpPath();
+};
+$('expJump').querySelector('button').onclick = (e) => {
+  e.preventDefault();
+  openJumpPath();
+};
 async function browseExp(path) {
   $('expReader').classList.add('hidden'); $('expList').classList.remove('hidden');
+  path = normalizeJumpPath(path);
   let d; try { d = await (await api('/api/fs?path=' + encodeURIComponent(path))).json(); } catch { return; }
   if (d.error) return toast(d.error);
   if (d.type === 'file') { showMedia(path); return; }
   expPath = d.path; $('expPath').textContent = shortCwd(d.path);
+  $('expJumpInput').value = d.path;
   const list = $('expList'); list.innerHTML = '';
   for (const e of d.entries) {
     const row = document.createElement('div'); row.className = 'row';
@@ -2857,27 +4275,49 @@ function openToolDetail(name, data) {
   else if (name === 'Read') { if (fp) inner.appendChild(openFileBtn(fp)); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
   else if (name === 'Bash') { inner.appendChild(codeBlock('$ ' + (inp.command || ''))); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
   else { inner.appendChild(codeBlock(JSON.stringify(inp, null, 2))); if (data.result) inner.appendChild(codeBlock(data.result, 'out')); }
-  $('sheet').classList.remove('hidden');
+  showSheet();
 }
 const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'], video: ['mp4', 'mov', 'webm', 'm4v', 'mkv'] };
-const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
+const SPREADSHEET_EXTS = ['xls', 'xlsx', 'xlsm', 'xlsb', 'ods'];
+const SPREADSHEET_MAX_BYTES = 20 * 1024 * 1024;
+let spreadsheetWorker = null;
+const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
 function openFile(path) { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); showMedia(path); }
 function showMedia(path) {
+  if (spreadsheetWorker) { spreadsheetWorker.terminate(); spreadsheetWorker = null; }
+  path = normalizeJumpPath(path);
   $('expList').classList.add('hidden'); $('expReader').classList.remove('hidden'); paintIcons($('expReader'));
   $('readerName').textContent = path.split('/').pop();
+  $('expPath').textContent = shortCwd(path);
+  $('expJumpInput').value = path;
   $('readerAt').onclick = () => insertRef(path);
+  $('readerDownload').onclick = () => downloadFile(path, path.split('/').pop());
   const ext = (path.split('.').pop() || '').toLowerCase();
   const body = $('readerBody'); body.innerHTML = ''; body.classList.remove('astext');
   if (MEDIA.img.includes(ext)) { const im = document.createElement('img'); im.className = 'mediaimg'; im.src = rawUrl(path); body.appendChild(im); }
   else if (MEDIA.audio.includes(ext)) { const a = document.createElement('audio'); a.controls = true; a.src = rawUrl(path); a.className = 'mediael'; body.appendChild(a); }
   else if (MEDIA.video.includes(ext)) { const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.src = rawUrl(path); v.className = 'mediael'; body.appendChild(v); }
-  else {
+  else if (ext === 'pdf') {
+    // Native embedded PDF viewer (full + scrollable on desktop; first page on iOS Safari).
+    // Always offer an open-in-new-tab fallback so the whole document is reachable everywhere.
+    const f = document.createElement('iframe'); f.className = 'mediael pdfframe'; f.title = path.split('/').pop();
+    f.src = rawUrl(path) + '#view=FitH'; body.appendChild(f);
+    const bar = document.createElement('div'); bar.className = 'pdfFallbackBar';
+    const a = document.createElement('a'); a.className = 'filePreviewBtn'; a.textContent = 'Open in browser'; a.href = rawUrl(path); a.target = '_blank'; a.rel = 'noopener';
+    bar.appendChild(a); body.appendChild(bar);
+  }
+  else if (SPREADSHEET_EXTS.includes(ext)) renderSpreadsheetPreview(body, path);
+  else if (isTextPreviewExt(ext)) {
     body.classList.add('astext'); body.textContent = 'Loading…';
     api('/api/fs?path=' + encodeURIComponent(path)).then((r) => r.json()).then((d) => {
       if (d.error) { body.textContent = d.error; return; }
-      if (d.tooBig) { body.textContent = `(too large to preview: ${d.size} bytes)`; return; }
+      if (d.tooBig) {
+        if (['html', 'htm'].includes(ext)) renderHtmlContent(body, '', path);
+        else body.textContent = `(too large to preview: ${d.size} bytes)`;
+        return;
+      }
       const content = d.content != null ? d.content : '(binary file)';
-      if (['html', 'htm'].includes(ext)) { renderHtmlContent(body, content); }
+      if (['html', 'htm'].includes(ext)) { renderHtmlContent(body, content, path); }
       else if (['md', 'markdown'].includes(ext)) { body.classList.remove('astext'); body.innerHTML = `<div class="mdview"></div>`; body.firstChild.innerHTML = md(content); }
       else {
         body.classList.remove('astext');
@@ -2889,14 +4329,109 @@ function showMedia(path) {
       }
     }).catch(() => { body.textContent = '(cannot read)'; });
   }
+  else {
+    // Office files and other binary artifacts turn into mojibake when read as UTF-8.
+    // Give them a useful landing screen with an explicit download action instead.
+    const fname = path.split('/').pop() || 'file';
+    const panel = document.createElement('div'); panel.className = 'binaryFilePanel';
+    const badge = document.createElement('div'); badge.className = 'binaryFileBadge'; badge.textContent = ext ? ext.toUpperCase() : 'FILE';
+    const name = document.createElement('strong'); name.textContent = fname;
+    const size = document.createElement('span'); size.className = 'fileCardSize';
+    const note = document.createElement('p');
+    note.textContent = ['xls', 'xlsx', 'xlsm', 'ods'].includes(ext)
+      ? 'Spreadsheet preview isn’t supported in Box. Download the workbook to open it.'
+      : 'Preview isn’t available for this file type. Download the file to open it.';
+    const dl = document.createElement('button'); dl.className = 'binaryFileDownload';
+    dl.innerHTML = `${ICONS['arrow-down']}<span>Download</span>`;
+    dl.onclick = () => downloadFile(path, fname);
+    panel.append(badge, name, size, note, dl);
+    body.appendChild(panel);
+    fillFileSize(size, path);
+  }
 }
-function renderHtmlContent(body, content) {
+function spreadsheetColumnName(index) {
+  let n = Number(index) + 1, out = '';
+  while (n > 0) { const r = (n - 1) % 26; out = String.fromCharCode(65 + r) + out; n = Math.floor((n - 1) / 26); }
+  return out;
+}
+function spreadsheetFallback(body, path, message) {
+  body.innerHTML = '';
+  const panel = document.createElement('div'); panel.className = 'binaryFilePanel';
+  const badge = document.createElement('div'); badge.className = 'binaryFileBadge'; badge.textContent = 'XLSX';
+  const note = document.createElement('p'); note.textContent = message;
+  const dl = document.createElement('button'); dl.className = 'binaryFileDownload'; dl.innerHTML = `${ICONS['arrow-down']}<span>Download</span>`;
+  dl.onclick = () => downloadFile(path, path.split('/').pop());
+  panel.append(badge, note, dl); body.appendChild(panel);
+}
+async function renderSpreadsheetPreview(body, path) {
+  body.classList.add('spreadsheetBody');
+  body.innerHTML = '<div class="sheetLoading"><span class="loading"><span></span><span></span><span></span></span><strong>Opening workbook…</strong></div>';
+  try {
+    const response = await fetch(rawFileUrl(path));
+    if (!response.ok) throw new Error('Could not read workbook');
+    const announcedSize = Number(response.headers.get('content-length') || 0);
+    if (announcedSize > SPREADSHEET_MAX_BYTES) return spreadsheetFallback(body, path, `This workbook is ${fmtBytes(announcedSize)}. Preview supports files up to ${fmtBytes(SPREADSHEET_MAX_BYTES)}; download it to open the full file.`);
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > SPREADSHEET_MAX_BYTES) return spreadsheetFallback(body, path, `This workbook is ${fmtBytes(buffer.byteLength)}. Preview supports files up to ${fmtBytes(SPREADSHEET_MAX_BYTES)}; download it to open the full file.`);
+    const worker = new Worker('/xlsx-worker.js'); spreadsheetWorker = worker;
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { worker.terminate(); reject(new Error('Preview took too long')); }, 20000);
+      worker.onmessage = (event) => { clearTimeout(timer); resolve(event.data); };
+      worker.onerror = () => { clearTimeout(timer); reject(new Error('Could not parse workbook')); };
+      worker.postMessage({ buffer, maxRows: 250, maxCols: 50, maxSheets: 20 }, [buffer]);
+    });
+    worker.terminate(); if (spreadsheetWorker === worker) spreadsheetWorker = null;
+    if (!result || !result.ok) throw new Error((result && result.error) || 'Could not parse workbook');
+    renderSpreadsheetSheets(body, result);
+  } catch (error) {
+    spreadsheetFallback(body, path, `${String((error && error.message) || error || 'Could not preview workbook')}. Download the workbook to open it.`);
+  }
+}
+function renderSpreadsheetSheets(body, workbook) {
+  body.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className = 'spreadsheetPreview';
+  const tabs = document.createElement('div'); tabs.className = 'sheetTabs';
+  const viewport = document.createElement('div'); viewport.className = 'sheetViewport';
+  const foot = document.createElement('div'); foot.className = 'sheetFoot';
+  wrap.append(tabs, viewport, foot); body.appendChild(wrap);
+  const sheets = workbook.sheets || [];
+  if (!sheets.length) { viewport.innerHTML = '<div class="sheetEmpty">This workbook has no visible cells.</div>'; return; }
+  const draw = (index) => {
+    const sheet = sheets[index];
+    tabs.querySelectorAll('button').forEach((button, i) => button.classList.toggle('on', i === index));
+    viewport.innerHTML = '';
+    const table = document.createElement('table'); table.className = 'sheetTable';
+    const head = document.createElement('thead'); const headRow = document.createElement('tr');
+    const corner = document.createElement('th'); corner.className = 'sheetCorner'; headRow.appendChild(corner);
+    const shownCols = Math.max(1, Math.min(50, sheet.totalCols || Math.max(0, ...(sheet.rows || []).map((row) => row.length))));
+    for (let c = 0; c < shownCols; c++) { const th = document.createElement('th'); th.textContent = spreadsheetColumnName((sheet.startCol || 0) + c); headRow.appendChild(th); }
+    head.appendChild(headRow); table.appendChild(head);
+    const tbody = document.createElement('tbody');
+    for (let r = 0; r < (sheet.rows || []).length; r++) {
+      const tr = document.createElement('tr'); const rowNum = document.createElement('th'); rowNum.textContent = String((sheet.startRow || 0) + r + 1); tr.appendChild(rowNum);
+      for (let c = 0; c < shownCols; c++) { const td = document.createElement('td'); const value = sheet.rows[r] && sheet.rows[r][c]; td.textContent = value == null ? '' : String(value); tr.appendChild(td); }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody); viewport.appendChild(table);
+    const notes = [`${sheet.totalRows.toLocaleString()} rows × ${sheet.totalCols.toLocaleString()} columns`, 'read-only'];
+    if (sheet.truncated) notes.push('showing first 250 rows × 50 columns');
+    if (workbook.sheetsTruncated) notes.push(`showing 20 of ${workbook.totalSheets} sheets`);
+    foot.textContent = notes.join(' · ');
+    viewport.scrollTo(0, 0);
+  };
+  sheets.forEach((sheet, index) => { const button = document.createElement('button'); button.textContent = sheet.name || `Sheet ${index + 1}`; button.onclick = () => draw(index); tabs.appendChild(button); });
+  draw(0);
+}
+function isTextPreviewExt(ext) {
+  return !ext || ['txt', 'text', 'log', 'csv', 'tsv', 'md', 'markdown'].includes(ext) || Object.prototype.hasOwnProperty.call(EXT_LANG, ext);
+}
+function renderHtmlContent(body, content, path = '') {
   body.classList.remove('astext');
   body.innerHTML = `<div class="htmlbar"><button class="htmltab on">Preview</button><button class="htmltab">Source</button></div><div class="htmlhost"></div>`;
   const host = body.querySelector('.htmlhost');
   const tabs = body.querySelectorAll('.htmltab');
-  const preview = () => { host.innerHTML = ''; const f = document.createElement('iframe'); f.className = 'htmlframe'; f.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals'); f.srcdoc = content; host.appendChild(f); };
-  const source = () => { host.innerHTML = '<pre class="hl"><code class="language-xml"></code></pre>'; const c = host.querySelector('code'); c.textContent = content; if (window.hljs) { try { hljs.highlightElement(c); } catch {} } };
+  const preview = () => { host.innerHTML = ''; const f = document.createElement('iframe'); f.className = 'htmlframe'; f.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms allow-modals'); if (path) f.src = rawUrl(path); else f.srcdoc = content; host.appendChild(f); };
+  const source = () => { host.innerHTML = '<pre class="hl"><code class="language-xml"></code></pre>'; const c = host.querySelector('code'); c.textContent = content || '(source too large to preview)'; if (window.hljs) { try { hljs.highlightElement(c); } catch {} } };
   tabs[0].onclick = () => { tabs[0].classList.add('on'); tabs[1].classList.remove('on'); preview(); };
   tabs[1].onclick = () => { tabs[1].classList.add('on'); tabs[0].classList.remove('on'); source(); };
   preview();
@@ -2913,10 +4448,93 @@ function openSheet(title, rows) {
   if (active && active.id === 'input') active.blur();
   const inner = $('sheetInner'); inner.innerHTML = title ? `<h3>${esc(title)}</h3>` : '';
   for (const r of rows) { const el = document.createElement('div'); el.className = 'sheetRow' + (r.sel ? ' sel' : ''); el.innerHTML = `<span class="ic">${r.ic || ''}</span><div><div>${esc(r.label)}</div>${r.desc ? `<div class="muted" style="font-size:12.5px">${esc(r.desc)}</div>` : ''}</div>`; el.onclick = () => { closeSheet(); r.fn(); }; inner.appendChild(el); }
-  $('sheet').classList.remove('hidden');
+  showSheet();
 }
-function closeSheet() { $('sheet').classList.add('hidden'); }
+let sheetDrag = null;
+let pendingSheetHistory = null;
+function setSheetDragOffset(y) {
+  const sheet = $('sheet');
+  const offset = Math.max(0, y || 0);
+  sheet.style.setProperty('--sheet-y', offset + 'px');
+  sheet.style.setProperty('--sheet-dim', Math.max(.12, .35 * (1 - Math.min(offset, 360) / 420)).toFixed(3));
+}
+function resetSheetDrag() {
+  const sheet = $('sheet');
+  sheet.classList.remove('dragging');
+  setSheetDragOffset(0);
+  sheetDrag = null;
+}
+function showSheet() {
+  resetSheetDrag();
+  const inner = $('sheetInner');
+  if (inner) inner.scrollTop = 0;
+  const sheet = $('sheet');
+  const wasHidden = sheet.classList.contains('hidden');
+  sheet.classList.remove('hidden');
+  // Wire the sheet into history so browser Back dismisses it before leaving the page.
+  // Reopening/replacing a sheet before its queued close settles reuses that entry.
+  if (wasHidden) {
+    pendingSheetHistory = null;
+    try {
+      const state = { ...(history.state || {}), _sheet: true };
+      if (history.state && history.state._sheet) history.replaceState(state, '', routeUrl(state));
+      else history.pushState(state, '', routeUrl(state));
+    } catch {}
+  }
+}
+function closeSheet({ fromHistory = false } = {}) {
+  resetSheetDrag();
+  $('sheet').classList.add('hidden');
+  if (fromHistory || !(history.state && history.state._sheet)) return;
+  // Give a click handler one microtask to navigate or open a replacement sheet. If
+  // neither happens, actually pop this transient entry so Back never needs two taps.
+  const token = {};
+  pendingSheetHistory = token;
+  queueMicrotask(() => {
+    if (pendingSheetHistory !== token) return;
+    pendingSheetHistory = null;
+    try { history.back(); } catch {}
+  });
+}
 $('sheet').onclick = (e) => { if (e.target === $('sheet')) closeSheet(); };
+function onSheetTouchStart(e) {
+  if ($('sheet').classList.contains('hidden') || e.touches.length !== 1) return;
+  const inner = $('sheetInner');
+  if (!inner || e.target.closest('input, textarea, select, button, a, iframe, audio, video')) return;
+  const y = e.touches[0].clientY;
+  sheetDrag = { startY: y, lastY: y, startAt: performance.now(), dragging: false, offset: 0 };
+}
+function onSheetTouchMove(e) {
+  if (!sheetDrag || e.touches.length !== 1) return;
+  const inner = $('sheetInner');
+  if (!inner) return;
+  const y = e.touches[0].clientY;
+  const dy = y - sheetDrag.startY;
+  sheetDrag.lastY = y;
+  if (!sheetDrag.dragging) {
+    if (dy <= 8 || inner.scrollTop > 0) return;
+    sheetDrag.dragging = true;
+    $('sheet').classList.add('dragging');
+  }
+  e.preventDefault();
+  const resisted = dy > 320 ? 320 + ((dy - 320) * .25) : dy;
+  sheetDrag.offset = Math.max(0, resisted);
+  setSheetDragOffset(sheetDrag.offset);
+}
+function onSheetTouchEnd() {
+  if (!sheetDrag) return;
+  const inner = $('sheetInner');
+  const dt = Math.max(1, performance.now() - sheetDrag.startAt);
+  const velocity = (sheetDrag.lastY - sheetDrag.startY) / dt;
+  const threshold = Math.min(150, Math.max(88, ((inner && inner.offsetHeight) || 0) * .24));
+  const shouldClose = sheetDrag.dragging && (sheetDrag.offset > threshold || (velocity > .65 && sheetDrag.offset > 44));
+  if (shouldClose) closeSheet();
+  else resetSheetDrag();
+}
+$('sheetInner').addEventListener('touchstart', onSheetTouchStart, { passive: true });
+$('sheetInner').addEventListener('touchmove', onSheetTouchMove, { passive: false });
+$('sheetInner').addEventListener('touchend', onSheetTouchEnd);
+$('sheetInner').addEventListener('touchcancel', resetSheetDrag);
 // Desktop convenience: Escape dismisses the topmost transient surface (bottom sheet
 // or the accounts overlay). The image lightbox owns its own Escape; the chat's
 // attention overlay closes with Back (it's a history entry), so it's not handled here.
@@ -2948,14 +4566,38 @@ document.addEventListener('keydown', (e) => {
   // don't hijack keys while a modal/overlay owns the screen
   if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden') ||
       ($('accountsOverlay') && !$('accountsOverlay').classList.contains('hidden'))) return;
-  const onList = !$('sessions').classList.contains('hidden');
+  const onList = !$('sessions').classList.contains('hidden') || (isDesktopShell() && document.body.dataset.view !== 'login');
   const onChat = !$('chat').classList.contains('hidden');
   if (e.key === '/') { if (onChat && !attnMode) { e.preventDefault(); $('input').focus(); } return; }
-  if (e.key === '?') { toast('Shortcuts: j/k move · Enter opens · / composer · Esc closes', 3200); return; }
+  if (e.key === '?') { toast('Shortcuts: n new · b board · p pipelines · j/k move · Enter opens · / composer', 3800); return; }
   if (!onList) return;
   if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); kbMove(1); }
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); kbMove(-1); }
   else if (e.key === 'Enter') { const c = kbCards()[kbSel]; if (c) { e.preventDefault(); c.querySelector('.sCardFront').click(); } }
+});
+
+document.addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (!$('sheet').classList.contains('hidden') || !$('lightbox').classList.contains('hidden')) return;
+  if (!TOKEN || document.body.dataset.view === 'login') return;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (!$('board').classList.contains('hidden')) boardSearchToggle();
+    else sessSearchToggle();
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+    e.preventDefault();
+    $('newBtn').click();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key.toLowerCase() === 'n') { e.preventDefault(); $('newBtn').click(); }
+  else if (e.key.toLowerCase() === 'b' && CFG.features && CFG.features.linear) { e.preventDefault(); openBoard(); }
+  else if (e.key.toLowerCase() === 'p') { e.preventDefault(); openPipelines(); }
+  else if (e.key.toLowerCase() === 'm' && isDesktopShell() && document.body.dataset.view !== 'sessions') { e.preventDefault(); toggleSidebarCollapsed(); }
+  else if (e.key.toLowerCase() === 's') { e.preventDefault(); openSessions(curFilter || 'all'); }
 });
 
 /* ---------- Claude accounts (login / pool / failover) ---------- */
@@ -3030,6 +4672,108 @@ async function renderAccountsList() {
     if (a.id !== 'mine' && !a.primary) btn('Remove', () => { if (confirm(`Remove account "${a.label || a.id}"? (its credentials dir is left on disk)`)) acctAction('/api/accounts/remove', { id: a.id }, 'Removed'); }, 'danger');
     body.appendChild(card);
   }
+  await renderProviders(body);
+}
+
+// Codex (OpenAI) + Gemini (Google): sign in with a SUBSCRIPTION or an API key — the same
+// idea as the Claude accounts above, but each CLI is single-account (one credential file),
+// so it's just "who am I signed in as / sign in / sign out", not a pool.
+async function renderProviders(body) {
+  let data;
+  try { data = await (await api('/api/providers')).json(); } catch { return; }
+  const meta = data.meta || {}, provs = data.providers || {};
+  const sec = document.createElement('div'); sec.className = 'acctProviders';
+  sec.innerHTML = '<div class="acctSectionHdr">Other agents</div>';
+  body.appendChild(sec);
+  for (const key of ['codex', 'gemini']) {
+    const st = provs[key] || { mode: 'none' }, m = meta[key] || { label: key };
+    const stateLabel = st.mode === 'subscription' ? `signed in${st.label ? ' · ' + st.label : ''}` : st.mode === 'apikey' ? 'API key set' : 'not signed in';
+    const card = document.createElement('div'); card.className = 'acctCard';
+    card.innerHTML = `<div class="acctTop"><div class="acctName">${esc(m.label)}</div><span class="acctBadge ${st.mode === 'none' ? 'warn' : 'ok'}">${esc(stateLabel)}</span></div><div class="acctActions"></div>`;
+    const acts = card.querySelector('.acctActions');
+    const btn = (label, fn, cls = '') => { const b = document.createElement('button'); b.className = 'chip small ' + cls; b.textContent = label; b.onclick = fn; acts.appendChild(b); };
+    btn(st.mode === 'none' ? 'Sign in' : 'Change', () => renderProviderLogin(key, m, st));
+    if (st.mode !== 'none') btn('Sign out', async () => {
+      if (!confirm(`Sign ${m.label} out?`)) return;
+      try { const j = await (await api('/api/providers/logout', { method: 'POST', body: JSON.stringify({ provider: key }) })).json(); if (j.error) return toast(j.error); toast('Signed out'); renderAccountsList(); }
+      catch { toast('Failed'); }
+    }, 'danger');
+    sec.appendChild(card);
+  }
+}
+
+function renderProviderLogin(provider, meta, status) {
+  const body = $('accountsBody');
+  const keysUrl = meta.keysUrl || '';
+  const subLabel = provider === 'codex' ? 'Sign in with ChatGPT' : 'Sign in with Google';
+  body.innerHTML = `<div class="acctForm">
+    <div class="acctSectionHdr">${esc(meta.label)} login</div>
+    <div class="acctTabs"><button class="acctTab sel" data-tab="sub">Subscription</button><button class="acctTab" data-tab="apikey">API key</button></div>
+    <div id="pvPaneSub" class="acctPane">
+      <div class="acctNote">Use your ${esc(meta.sub || 'subscription')} — flat-rate, usually cheaper than a metered API key.</div>
+      <button id="pvSubStart" class="btn primary">${esc(subLabel)}</button>
+      <div id="pvSubStep2" class="hidden">
+        <a id="pvSubLink" class="acctLink" target="_blank" rel="noopener">Open sign-in ↗</a>
+        <div id="pvCodeBox"></div>
+      </div>
+    </div>
+    <div id="pvPaneApikey" class="acctPane hidden">
+      <label class="acctLbl">API key<input id="pvKey" class="acctInput" type="password" placeholder="${provider === 'codex' ? 'sk-…' : 'AIza… (Google AI Studio key)'}" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <button id="pvKeyPaste" class="chip small acctPaste">📋 Paste from clipboard</button>
+      ${keysUrl ? `<a class="acctLink" target="_blank" rel="noopener" href="${esc(keysUrl)}">Get an API key ↗</a>` : ''}
+      <div class="acctNote">API-key auth bills per token (metered).</div>
+      <button id="pvKeySave" class="btn primary">Save API key</button>
+    </div>
+    <button id="pvBack" class="chip small acctBack">← Back</button></div>`;
+  body.querySelectorAll('.acctTab').forEach((t) => t.onclick = () => {
+    body.querySelectorAll('.acctTab').forEach((x) => x.classList.toggle('sel', x === t));
+    $('pvPaneSub').classList.toggle('hidden', t.dataset.tab !== 'sub');
+    $('pvPaneApikey').classList.toggle('hidden', t.dataset.tab !== 'apikey');
+  });
+  $('pvBack').onclick = renderAccountsList;
+  $('pvKeyPaste').onclick = async () => { try { const t = await navigator.clipboard.readText(); $('pvKey').value = (t || '').trim(); toast('Pasted ✓'); } catch { $('pvKey').focus(); toast('Long-press the field → Paste'); } };
+  $('pvKeySave').onclick = async () => {
+    const apiKey = $('pvKey').value.trim(); if (!apiKey) return toast('Paste an API key');
+    const b = $('pvKeySave'); b.disabled = true; b.textContent = 'Saving…';
+    try { const j = await (await api(`/api/providers/${provider}/apikey`, { method: 'POST', body: JSON.stringify({ apiKey }) })).json(); if (j.error) return toast(j.error); toast(j.validated ? 'API key saved & validated' : 'API key saved'); renderAccountsList(); }
+    catch { toast('Save failed'); } finally { b.disabled = false; b.textContent = 'Save API key'; }
+  };
+  let flowId = null, pollTimer = null;
+  $('pvSubStart').onclick = async () => {
+    const b = $('pvSubStart'); b.disabled = true; b.textContent = 'Starting…';
+    try {
+      const ep = provider === 'codex' ? '/api/providers/codex/device/start' : '/api/providers/gemini/google/start';
+      const j = await (await api(ep, { method: 'POST' })).json();
+      if (j.error) { toast(j.error); return; }
+      flowId = j.flowId; $('pvSubLink').href = j.url; $('pvSubStep2').classList.remove('hidden');
+      const cb = $('pvCodeBox');
+      if (provider === 'codex') {
+        cb.innerHTML = `<div class="acctNote">1. Open the link.  2. Enter this code:</div><div class="pvCode">${esc(j.code || '')}</div><div class="acctNote">Then come back — this completes automatically.</div>`;
+        pollTimer = setInterval(async () => {
+          try {
+            const p = await (await api('/api/providers/poll?flowId=' + encodeURIComponent(flowId))).json();
+            if (p.status === 'success') { clearInterval(pollTimer); toast('Signed in' + (p.account ? ' · ' + p.account : '')); renderAccountsList(); }
+            else if (p.status === 'error') { clearInterval(pollTimer); toast(p.error || 'Sign-in failed'); }
+            else if (p.status === 'expired') { clearInterval(pollTimer); }
+          } catch {}
+        }, 2500);
+      } else {
+        cb.innerHTML = `<div class="acctNote">1. Open the link & sign in.  2. Copy the code Google gives you and paste it:</div>
+          <button id="pvGPaste" class="btn primary">📋 Paste code from clipboard</button>
+          <textarea id="pvGCode" class="acctInput acctCodeView" rows="2" readonly placeholder="pasted code shows here"></textarea>
+          <button id="pvGComplete" class="btn primary">Complete sign-in</button>`;
+        $('pvGPaste').onclick = async () => { try { const t = await navigator.clipboard.readText(); const el = $('pvGCode'); el.removeAttribute('readonly'); el.value = (t || '').trim(); el.setAttribute('readonly', ''); toast('Pasted ✓'); } catch { const el = $('pvGCode'); el.removeAttribute('readonly'); el.focus(); toast('Long-press → Paste'); } };
+        $('pvGComplete').onclick = async () => {
+          const code = $('pvGCode').value.trim(); if (!code) return toast('Paste the code first');
+          const gb = $('pvGComplete'); gb.disabled = true; gb.textContent = 'Finishing…';
+          try { const j2 = await (await api('/api/providers/gemini/google/complete', { method: 'POST', body: JSON.stringify({ flowId, code }) })).json(); if (j2.error) { toast(j2.error); return; } toast('Signed in'); renderAccountsList(); }
+          catch { toast('Sign-in failed'); } finally { gb.disabled = false; gb.textContent = 'Complete sign-in'; }
+        };
+      }
+      toast('Open the link to continue');
+    } catch { toast('Failed to start'); }
+    finally { b.disabled = false; b.textContent = subLabel; }
+  };
 }
 
 async function acctAction(path, payload, okMsg) {
@@ -3334,9 +5078,15 @@ async function stopRec(useIt) {
   const lb = $('lightbox'), track = $('lbTrack'), count = $('lbCount');
   let srcs = [];
   $('messages').addEventListener('click', (e) => {
-    const img = e.target.closest && e.target.closest('.umgs img'); if (!img) return;
-    const all = [...$('messages').querySelectorAll('.umgs img')];
+    const img = e.target.closest && e.target.closest('.umgs img, .pathPreviewImg img, .mdImg'); if (!img) return;
+    const all = [...$('messages').querySelectorAll('.umgs img, .pathPreviewImg img, .mdImg')];
     openAt(all.map((i) => i.src), all.indexOf(img));
+  });
+  $('messages').addEventListener('click', (e) => {
+    const card = e.target.closest && e.target.closest('.pathPreview');
+    if (!card || e.target.closest('img')) return;
+    e.preventDefault();
+    openFile(card.dataset.path);
   });
   $('lbClose').onclick = close;
   $('lbDownload').onclick = () => {
@@ -3392,7 +5142,7 @@ async function stopRec(useIt) {
 // Version label auto-tracks the live app.js: we stamp it from the served file's
 // Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
 // (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 61;  // static fallback if the HEAD probe can't run (offline / old server)
+const BUILD = 82;  // static fallback if the HEAD probe can't run (offline / old server)
 function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
 stampVersion('v' + BUILD);
 fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
@@ -3401,6 +5151,44 @@ fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
   stampVersion('build ' + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + '·' + p(d.getUTCHours()) + p(d.getUTCMinutes()) + 'Z');
 }).catch(() => {});
 paintIcons();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-if (TOKEN) { navTo({ view: 'sessions', filter: 'all' }, { replace: true }); loadConfig(); openSessions().catch(() => show('login')); }
-else { navTo({ view: 'login' }, { replace: true }); show('login'); }
+applySidebarCollapsed();
+setInterval(() => {
+  refreshSessionListTimes();
+  if (!document.hidden && TOKEN && sessionListIsVisible() && Date.now() - lastSessionFetchAt > 55000) refreshSessionsSoon(0);
+}, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  refreshSessionListTimes();
+  refreshSessionsSoon(100);
+});
+if ('serviceWorker' in navigator) {
+  // A waiting worker can claim an already-open PWA, but the page keeps running the
+  // old HTML/JS until it is reloaded. Refresh once when an existing installation
+  // switches controllers so frontend fixes become visible without a manual relaunch.
+  const hadServiceWorkerController = !!navigator.serviceWorker.controller;
+  let reloadingForServiceWorkerUpdate = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadServiceWorkerController || reloadingForServiceWorkerUpdate) return;
+    reloadingForServiceWorkerUpdate = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('/sw.js').then((registration) => {
+    registration.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) registration.update().catch(() => {});
+    });
+  }).catch(() => {});
+}
+const requestedRoute = routeFromLocation();
+if (TOKEN) {
+  const initialRoute = requestedRoute;
+  navTo(initialRoute, { replace: true });
+  loadConfig();
+  renderRoute(initialRoute);
+}
+else {
+  // Keep a copied deep-link intact while the token gate is on screen; after login
+  // the requested route is restored instead of silently dropping the user at home.
+  try { history.replaceState({ view: 'login', returnTo: requestedRoute }, '', location.pathname + location.search); } catch {}
+  show('login');
+}

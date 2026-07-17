@@ -52,14 +52,27 @@ export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings =
   const cfgArgs = [];
   if (settings.model) cfgArgs.push('--model', settings.model);
   if (settings.reasoningEffort) cfgArgs.push('-c', `model_reasoning_effort="${settings.reasoningEffort}"`);
-  // Full-access, no-prompt mode (the `codex exec` equivalent of `--yolo`). The box is itself the
-  // trust boundary, so we skip Codex's own sandbox — its bubblewrap sandbox can't set up loopback
-  // networking here (bwrap: loopback Failed RTM_NEWADDR) and blocks EVERY command otherwise.
-  // Applied to BOTH new and resume turns (resume previously inherited no bypass → stayed sandboxed).
-  const BYPASS = ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
+  // Sandbox policy. DEFAULT = OFF (full access, no prompts) — the box is a single-user trust
+  // boundary, so confining Codex just gets in the owner's way. Self-hosters who DO want Codex
+  // confined can set `CODEX_SANDBOX=workspace-write` (or `read-only`) in their .env; anything
+  // falsy / `off` / `none` keeps it off. Off maps to `--dangerously-bypass-approvals-and-sandbox`
+  // (the box runs unattended, so there's nothing to approve), exactly as it did before #40.
+  //
+  // FLAG PLACEMENT — the resume bug #40 introduced: `-s/--sandbox` is an option of `codex exec`
+  // (the parent), NOT of the `resume` subcommand, so `codex exec resume … --sandbox …` dies with
+  // "error: unexpected argument '--sandbox' found". When sandboxing it must therefore go BEFORE
+  // the `resume` token (an exec-level option). The `--dangerously-bypass-*` flags ARE valid on
+  // `resume`, so the default (off) path is uniform for new and resume turns. `--json` / `--model`
+  // / `-c` / `--skip-git-repo-check` are all accepted on `resume` and stay after it.
+  const mode = String(settings.sandbox || process.env.CODEX_SANDBOX || '').trim().toLowerCase();
+  const sandboxed = mode && mode !== 'off' && mode !== 'none' && mode !== 'false';
+  // Exec-level flags that must precede the `resume` subcommand:
+  const PRE = sandboxed ? ['--sandbox', mode] : [];
+  // Bypass flags (off path) — valid on both `exec` and `exec resume`:
+  const BYPASS = sandboxed ? [] : ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'];
   return sessionId
-    ? ['exec', 'resume', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', sessionId, prompt || '', ...imageArgs]
-    : ['exec', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', '-C', cwd || process.cwd(), prompt || '', ...imageArgs];
+    ? ['exec', ...PRE, 'resume', '--json', ...cfgArgs, ...BYPASS, '--skip-git-repo-check', sessionId, prompt || '', ...imageArgs]
+    : ['exec', '--json', ...cfgArgs, ...PRE, ...BYPASS, '--skip-git-repo-check', '-C', cwd || process.cwd(), prompt || '', ...imageArgs];
 }
 
 export class CodexExecEngine {

@@ -59,4 +59,53 @@ const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
   assert.ok(a.includes('-c') && a.includes('model_reasoning_effort="high"'));
 }
 
+// 6. Sandbox DEFAULT = off: no `--sandbox` anywhere; bypass flags present; resume positionals intact.
+//    (Guards the #40 regression where `--sandbox` was emitted AFTER the `resume` subcommand, which
+//    `codex exec resume` rejects: "error: unexpected argument '--sandbox' found".)
+{
+  const saved = process.env.CODEX_SANDBOX;
+  delete process.env.CODEX_SANDBOX;
+  try {
+    const sid = '019f1082-bce1-7902-89e5-cd093946e566';
+    const resume = buildCodexArgs({ sessionId: sid, prompt: 'go' });
+    assert.ok(!resume.includes('--sandbox'), 'default: no --sandbox on resume');
+    assert.ok(resume.includes('--dangerously-bypass-approvals-and-sandbox'), 'default: bypass on resume');
+    assert.ok(resume.indexOf(sid) < resume.indexOf('go'), 'resume: session id precedes prompt');
+    const fresh = buildCodexArgs({ cwd: '/work', prompt: 'go' });
+    assert.ok(!fresh.includes('--sandbox'), 'default: no --sandbox on new turn');
+    assert.ok(fresh.includes('--dangerously-bypass-approvals-and-sandbox'), 'default: bypass on new turn');
+  } finally {
+    if (saved === undefined) delete process.env.CODEX_SANDBOX; else process.env.CODEX_SANDBOX = saved;
+  }
+}
+
+// 7. Opt-in sandbox (settings.sandbox / CODEX_SANDBOX): `--sandbox <mode>` is present and — crucially
+//    for resume — comes BEFORE the `resume` token (it's a `codex exec` option, not a `resume` one),
+//    and no bypass flags leak in.
+{
+  const sid = '019f1082-bce1-7902-89e5-cd093946e566';
+  const resume = buildCodexArgs({ sessionId: sid, prompt: 'go', settings: { sandbox: 'workspace-write' } });
+  const sbIdx = resume.indexOf('--sandbox');
+  assert.ok(sbIdx >= 0, 'opt-in: --sandbox present on resume');
+  assert.equal(resume[sbIdx + 1], 'workspace-write', 'opt-in: mode follows --sandbox');
+  assert.ok(sbIdx < resume.indexOf('resume'), 'opt-in: --sandbox precedes the resume subcommand');
+  assert.ok(!resume.includes('--dangerously-bypass-approvals-and-sandbox'), 'opt-in: no bypass when sandboxed');
+  const fresh = buildCodexArgs({ cwd: '/work', prompt: 'go', settings: { sandbox: 'read-only' } });
+  assert.equal(fresh[fresh.indexOf('--sandbox') + 1], 'read-only', 'opt-in: new turn honors mode');
+  assert.equal(fresh[fresh.indexOf('-C') + 1], '/work', 'opt-in: -C cwd still intact');
+}
+
+// 8. CODEX_SANDBOX env honored, and `off` keeps it off.
+{
+  const saved = process.env.CODEX_SANDBOX;
+  try {
+    process.env.CODEX_SANDBOX = 'workspace-write';
+    assert.ok(buildCodexArgs({ cwd: '/work', prompt: 'x' }).includes('--sandbox'), 'env on → --sandbox');
+    process.env.CODEX_SANDBOX = 'off';
+    assert.ok(!buildCodexArgs({ cwd: '/work', prompt: 'x' }).includes('--sandbox'), 'env off → no --sandbox');
+  } finally {
+    if (saved === undefined) delete process.env.CODEX_SANDBOX; else process.env.CODEX_SANDBOX = saved;
+  }
+}
+
 console.log('✅ codex-exec-engine.test.mjs passed');
