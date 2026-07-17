@@ -2576,6 +2576,13 @@ function codexAvailable() {
   catch { _codexAvail = false; }
   return _codexAvail;
 }
+let _geminiAvail = null;
+function geminiAvailable() {
+  if (_geminiAvail !== null) return _geminiAvail;
+  try { execSync('command -v gemini', { stdio: 'ignore' }); _geminiAvail = true; }
+  catch { _geminiAvail = false; }
+  return _geminiAvail;
+}
 let _agyAvail = null;
 function agyAvailable() {
   if (_agyAvail !== null) return _agyAvail;
@@ -2600,7 +2607,7 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
     voiceAssistant: !!OPENAI_KEY,
     slack: slackConfigured(cfg),
     codex: codexAvailable(),
-    gemini: !!GEMINI_KEY,
+    gemini: geminiAvailable(),
     agy: agyAvailable(),
     mac: macAvailable(),
   },

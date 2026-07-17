@@ -352,7 +352,12 @@ export function voiceFileAccessPolicy({ path, purpose = '', user_confirmed = fal
   const STATE_DIR = opts.STATE_DIR || join(HOME, '.cc-mobile');
   const UPLOAD_DIR = opts.UPLOAD_DIR || join(STATE_DIR, 'uploads');
   const maxBytes = Math.max(1, Number(opts.maxBytes || 25 * 1024 * 1024));
-  const roots = opts.roots || voiceFileAccessRoots(opts.rootsRaw, { HOME, STATE_DIR });
+  const roots = opts.roots
+    ? opts.roots.map((root) => {
+        try { return realpathSync(root); }
+        catch { return resolve(root); }
+      }).filter((root, index, all) => root && all.indexOf(root) === index)
+    : voiceFileAccessRoots(opts.rootsRaw, { HOME, STATE_DIR });
   const requested = String(path || '').trim();
   if (!requested) {
     return {

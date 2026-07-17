@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -307,7 +307,7 @@ assert.equal(adapterSessionIdFromRows([{ kind: 'assistant', source: 'adapter', a
 
     const byName = voiceFileAccessPolicy({ path: 'attendees.xlsx' }, { HOME: root, STATE_DIR: root, roots: [root], cwd: root, maxBytes: 1024 });
     assert.equal(byName.ok, true);
-    assert.equal(byName.path, sheet);
+    assert.equal(byName.path, realpathSync(sheet));
 
     const missing = voiceFileAccessPolicy({ path: join(root, 'missing.csv') }, { HOME: root, STATE_DIR: root, roots: [root] });
     assert.equal(missing.ok, false);
