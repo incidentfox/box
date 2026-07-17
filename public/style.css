@@ -417,6 +417,11 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .pdfBadge { flex: none; font-size: 9px; font-weight: 800; letter-spacing: .03em; color: #fff; background: #d2433a; border-radius: 4px; padding: 2px 4px; line-height: 1.3; }
 .pathPreviewPdf .pathPreviewText { font-weight: 600; }
 .thinking { color: var(--muted); font-style: italic; font-size: 14px; margin-bottom: 6px; white-space: pre-wrap; }
+.liveProgress { display: flex; align-items: center; gap: 7px; margin: 2px 0 5px; color: var(--muted); font: 600 12.5px/1.35 -apple-system, "Inter", system-ui, sans-serif; }
+.liveProgressDot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--accent); animation: liveProgressPulse 1.4s ease-in-out infinite; }
+.liveProgress.stale { color: var(--muted); }
+.liveProgress.stale .liveProgressDot { background: #d49a35; animation-duration: 2.2s; }
+@keyframes liveProgressPulse { 50% { opacity: .28; transform: scale(.82); } }
 .toolchip { display: block; background: none; border: 0; border-radius: 0; padding: 4px 1px; margin: 1px 0; font-size: 14px; line-height: 1.35; color: var(--muted); font-family: -apple-system, "Inter", system-ui, sans-serif; }
 .toolchip .tchipHead { display: flex; align-items: center; gap: 7px; }
 .toolchip .tverb { font-weight: 600; color: var(--ink); }

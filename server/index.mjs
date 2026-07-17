@@ -3411,12 +3411,39 @@ function rt(extKey) {
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
       settings: normalizeSettings(p.settings || {}),
       context: p.context || null,
-      queue: p.queue || [], running: false, curText: '', curTools: [], curParts: [], subs: new Set(), proc: null, canceled: false });
+      queue: p.queue || [], running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, canceled: false });
   }
   return RT.get(key);
 }
 function persist(s) { try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, queue: s.queue })); } catch {} }
-function bcast(s, o) { for (const ws of s.subs) { try { ws.send(JSON.stringify(o)); } catch {} } }
+function activityLabelForEvent(o, previous = '') {
+  if (!o || !o.type) return '';
+  if (o.type === 'turn_start') return 'Starting';
+  if (o.type === 'thinking') return 'Thinking';
+  if (o.type === 'text') return 'Writing response';
+  if (o.type === 'bash_out') return 'Running command';
+  if (o.type === 'notice') return previous || 'Working';
+  if (o.type === 'tool_result') return previous || 'Processing result';
+  if (o.type !== 'tool') return '';
+  if (o.name === 'Bash' || o.name === 'SlashCommand') return 'Running command';
+  if (['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'ApplyPatch'].includes(o.name)) return 'Editing files';
+  if (['Read'].includes(o.name)) return 'Reading files';
+  if (['Grep', 'Glob'].includes(o.name)) return 'Searching code';
+  if (['WebFetch', 'WebSearch'].includes(o.name)) return 'Searching web';
+  if (o.name === 'Task') return 'Delegating work';
+  if (o.name === 'MCP') return 'Using connected tool';
+  return o.name ? `Using ${o.name}` : 'Using tool';
+}
+function bcast(s, event) {
+  let o = event;
+  const activityLabel = activityLabelForEvent(event, s.activityLabel);
+  if (activityLabel) {
+    s.lastActivityAt = Date.now();
+    s.activityLabel = activityLabel;
+    o = { ...event, activityAt: s.lastActivityAt, activityLabel };
+  }
+  for (const ws of s.subs) { try { ws.send(JSON.stringify(o)); } catch {} }
+}
 const queueView = (s) => s.queue.map((q, i) => ({ qid: q.qid, text: q.displayText != null ? q.displayText : q.text, mode: q.mode, agent: q.agent || s.agent || 'claude', images: q.images || [], running: i === 0 && s.running }));
 
 // locate a session's jsonl across project dirs (sessions can live under any cwd)
@@ -3804,7 +3831,7 @@ async function runWorker(s) {
     if (msg.parentId) s.parentId = msg.parentId;
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
-    s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
+    s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.lastActivityAt = Date.now(); s.activityLabel = 'Starting'; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
     if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
     persist(s);
@@ -3819,7 +3846,7 @@ async function runWorker(s) {
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
-  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
+  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; s.lastActivityAt = 0; s.activityLabel = ''; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
 // Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
@@ -4386,7 +4413,7 @@ wss.on('connection', (ws) => {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
