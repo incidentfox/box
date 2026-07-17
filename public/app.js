@@ -2350,8 +2350,12 @@ async function renderLinearBar(inc, sessionId) {
 // renderRoute when the popped route leaves the chat.)
 function goBackFromChat() {
   if (attnMode) return history.back();   // pops the chatAttn entry → renderRoute closes the overlay
-  if (cur.parentId) return openChat({ id: cur.parentId, title: cur.parentTitle || 'Parent chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings });
-  return history.back();                  // step back to the previous screen (usually the list)
+  // A newly-created fork already sits directly after its parent in browser history.
+  // Pushing the parent again here produced parent → fork → parent; the next Back
+  // returned to the fork and trapped the user in a two-page loop. Pop history for
+  // every chat instead: a fresh fork returns to its parent, while a fork opened from
+  // the session list correctly returns to the list.
+  return history.back();
 }
 $('backBtn').onclick = goBackFromChat;
 
