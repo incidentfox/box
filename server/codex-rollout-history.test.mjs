@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { parseCodexRollout } from './codex-rollout-history.mjs';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  codexRolloutHistory, codexRolloutMeta, codexRolloutState, parseCodexLiveEntry, parseCodexRollout,
+} from './codex-rollout-history.mjs';
 
 const rows = [
   { timestamp: '2026-07-17T17:00:00Z', type: 'event_msg', payload: { type: 'user_message', message: 'Monitor calls' } },
@@ -19,5 +24,36 @@ assert.equal(messages[1].parts[1].input, 'poll calls');
 assert.equal(messages[1].parts[1].result, '9 active');
 assert.equal(messages[1].parts[2].result, 'finished');
 assert.ok(!JSON.stringify(messages).includes('secret'));
+
+const root = mkdtempSync(join(tmpdir(), 'box-codex-rollout-'));
+try {
+  const file = join(root, 'rollout-test.jsonl');
+  const diskRows = [
+    { timestamp: '2026-07-17T16:59:59Z', type: 'session_meta', payload: { id: 'thread-1', cwd: '/tmp/work', timestamp: '2026-07-17T16:59:59Z' } },
+    ...rows.split('\n').map((line) => JSON.parse(line)),
+    // Simulate the giant persisted context rows that made the old readFileSync path freeze.
+    { type: 'world_state', payload: 'private-context-should-be-skipped-' + 'x'.repeat(3 * 1024 * 1024) },
+    { timestamp: '2026-07-17T17:01:00Z', type: 'event_msg', payload: { type: 'user_message', message: 'Latest turn' } },
+    { timestamp: '2026-07-17T17:01:01Z', type: 'event_msg', payload: { type: 'agent_message', message: 'Still working.', phase: 'commentary' } },
+  ];
+  writeFileSync(file, diskRows.map(JSON.stringify).join('\n') + '\n');
+  const page = await codexRolloutHistory(file, { maxBytes: 1024 * 1024 });
+  assert.equal(page.hasMore, true);
+  assert.ok(page.cursor > 0);
+  assert.ok(page.liveCursor > page.cursor);
+  assert.deepEqual(page.messages.map((m) => m.role), ['user', 'assistant']);
+  assert.equal(page.messages[0].parts[0].text, 'Latest turn');
+  assert.ok(!JSON.stringify(page.messages).includes('private-context'));
+  assert.deepEqual(codexRolloutMeta(file), {
+    id: 'thread-1', cwd: '/tmp/work', created: '2026-07-17T16:59:59Z', source: 'native', opening: 'Monitor calls', size: page.liveCursor,
+  });
+  assert.deepEqual(parseCodexLiveEntry({ timestamp: 't', type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }).map((e) => e.kind), ['text', 'turn_end']);
+  assert.equal(codexRolloutState(file).busy, true);
+  appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }) + '\n');
+  assert.equal(codexRolloutState(file).phase, 'final_answer');
+  assert.equal(codexRolloutState(file).busy, false);
+} finally {
+  rmSync(root, { recursive: true, force: true });
+}
 
 console.log('codex rollout history ok');

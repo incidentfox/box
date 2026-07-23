@@ -2224,7 +2224,12 @@ function resetWsWatchdog() {
 }
 function subscribeCurrentWS() {
   if (!cur.key || !ws || ws.readyState !== 1) return;
-  try { ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); } catch {}
+  const payload = { type: 'subscribe', key: cur.key };
+  if (!cur.liveCursorSent && cur.liveCursor != null) {
+    payload.liveCursor = cur.liveCursor;
+    cur.liveCursorSent = true;
+  }
+  try { ws.send(JSON.stringify(payload)); } catch {}
 }
 function connectWS() {
   if (ws && ws.readyState <= 1) { if (ws.readyState === 1) subscribeCurrentWS(); return; }
@@ -2288,6 +2293,7 @@ async function openChat(s) {
       cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
       cur.context = h.context || cur.context; renderContextMeter();
       cur.histCursor = h.cursor || 0; cur.remoteHasMoreHistory = !!h.hasMore;
+      cur.liveCursor = h.liveCursor != null ? h.liveCursor : null; cur.liveCursorSent = false;
       const messages = annotateHistoryMessages(h.messages || []);
       cur.localEarlier = messages.length > INITIAL_HISTORY_RENDER_LIMIT ? messages.slice(0, -INITIAL_HISTORY_RENDER_LIMIT) : [];
       cur.hasMoreHistory = cur.remoteHasMoreHistory || cur.localEarlier.length > 0;
@@ -2890,6 +2896,7 @@ function onServer(o) {
   else if (o.type === 'notice') { if (!live) startAssistant(); const n = document.createElement('div'); n.className = 'notice'; n.textContent = o.text; live.body.appendChild(n); maybeScroll(); }
   else if (o.type === 'error') { if (!live) startAssistant(); clearLoading(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.msg; live.body.appendChild(e); }
   else if (o.type === 'blocked') renderBlocked(o);
+  else if (o.type === 'native_wait') toast(o.msg || 'Queued behind the terminal turn.', 3500);
   else if (o.type === 'waiting') renderWaiting(o);
   else if (o.type === 'waiting_clear') clearWaitingCard();
   else if (o.type === 'done') finishTurn(o);

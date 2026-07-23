@@ -23,7 +23,9 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
-import { codexRolloutHistory } from './codex-rollout-history.mjs';
+import {
+  codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
+} from './codex-rollout-history.mjs';
 import { recoverPersistedQueue } from './queue-state.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
@@ -1206,6 +1208,9 @@ function ensureCodexSession(id, attrs = {}) {
     parentId: attrs.parentId || prev.parentId || null,
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
     context: attrs.context || prev.context || null,
+    source: attrs.source || prev.source || '',
+    transcriptPath: attrs.transcriptPath || prev.transcriptPath || '',
+    dtachSock: attrs.dtachSock || prev.dtachSock || '',
   };
   saveCodex(state);
   return state.sessions[id];
@@ -1666,19 +1671,54 @@ function autoSubcat(id, file) {
 }
 
 let CODEX_LIVE_CACHE = { ts: 0, ids: new Set() };
-function liveCodexSessionIds(sessions) {
+function runningCodexThreadIds() {
   const now = Date.now();
   if (now - CODEX_LIVE_CACHE.ts < 2500) return new Set(CODEX_LIVE_CACHE.ids);
   const ids = new Set();
-  const procText = pgrepFull('codex exec');
+  const procText = pgrepFull('codex');
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const line of procText.split('\n')) {
+    const argv = line.trim().split(/\s+/);
+    const resume = argv.indexOf('resume');
+    if (resume < 0) continue;
+    const id = argv.slice(resume + 1).find((arg) => uuid.test(arg));
+    if (id) ids.add(id.toLowerCase());
+  }
+  CODEX_LIVE_CACHE = { ts: now, ids: new Set(ids) };
+  return ids;
+}
+
+function adoptLiveCodexSessions(liveThreadIds) {
+  if (!liveThreadIds.size) return;
+  const state = loadCodex();
+  let changed = false;
+  for (const id of liveThreadIds) {
+    if ((state.sessions || {})[id]) continue;
+    const transcriptPath = findCodexRollout(CODEX_HOME, id);
+    const meta = codexRolloutMeta(transcriptPath);
+    if (!transcriptPath || !meta || meta.id !== id) continue;
+    let mtime = Date.now(); try { mtime = statSync(transcriptPath).mtimeMs; } catch {}
+    const created = Date.parse(meta.created || '') || mtime;
+    const live = codexRolloutState(transcriptPath);
+    state.sessions[id] = {
+      id, agent: 'codex', title: meta.opening || `Codex ${id.slice(0, 8)}`,
+      cwd: meta.cwd || DEFAULT_CWD, created, lastUsed: mtime, preview: live.preview || '',
+      settings: normalizeSettings({}), parentId: null, parentTitle: '', context: null,
+      source: 'native', transcriptPath,
+    };
+    changed = true;
+  }
+  if (changed) saveCodex(state);
+}
+
+function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds()) {
+  const ids = new Set(processIds);
   for (const s of sessions || []) {
     if (!s || !s.id) continue;
-    if (procText.includes(s.id)) { ids.add(s.id); continue; }
     if (s.dtachSock) {
       try { if (existsSync(s.dtachSock)) ids.add(s.id); } catch {}
     }
   }
-  CODEX_LIVE_CACHE = { ts: now, ids: new Set(ids) };
   return ids;
 }
 
@@ -1704,13 +1744,24 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       files.push({ id, file: full, mtime });
     }
   }
-  const codexSessions = Object.values(loadCodex().sessions || {}).map((s) => ({
-    ...s,
-    id: s.id, agent: 'codex', file: null, mtime: s.lastUsed || s.created || 0,
-    title: s.title || 'Codex chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
-    parentId: s.parentId || null, parentTitle: s.parentTitle || '',
-    settings: s.settings || {}, context: s.context || null,
-  }));
+  const codexProcessIds = runningCodexThreadIds();
+  adoptLiveCodexSessions(codexProcessIds);
+  const codexBusyIds = new Set();
+  const codexSessions = Object.values(loadCodex().sessions || {}).map((s) => {
+    let rollout = null, liveState = null;
+    if (codexProcessIds.has(s.id) || s.source === 'native') {
+      rollout = s.transcriptPath || findCodexRollout(CODEX_HOME, s.id);
+      liveState = codexRolloutState(rollout);
+      if (codexProcessIds.has(s.id) && liveState.busy) codexBusyIds.add(s.id);
+    }
+    return ({
+      ...s,
+      id: s.id, agent: 'codex', file: null, mtime: Math.max(s.lastUsed || s.created || 0, (liveState && liveState.mtimeMs) || 0),
+      title: s.title || 'Codex chat', cwd: s.cwd || DEFAULT_CWD, preview: (liveState && liveState.preview) || s.preview || '',
+      parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+      settings: s.settings || {}, context: s.context || null,
+    });
+  });
   const geminiSessions = Object.values(loadGemini().sessions || {}).map((s) => ({
     id: s.id, agent: 'gemini', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'Gemini chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
@@ -1730,7 +1781,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const items = files.concat(codexSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
-  const codexLiveIds = liveCodexSessionIds(codexSessions);
+  const codexLiveIds = liveCodexSessionIds(codexSessions, codexProcessIds);
   // Live = Claude remote-control bridges plus Codex sessions with an active exec process,
   // a registered terminal dtach socket, or another running local agent turn.
   const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys(), ...codexLiveIds, ...RUNNING]);
@@ -1746,7 +1797,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // recency window + ordering reflect real conversation, not heartbeat writes.
   const actTime = (f) => { const s = f && scan.get(f.id); return (s && s.lastTs) ? s.lastTs : (f ? f.mtime : 0); };
   items.sort((a, b) => actTime(b) - actTime(a));
-  const statusOf = (id) => archived.has(id) ? 'archived' : RUNNING.has(id) ? 'working' : (scan.get(id) && scan.get(id).needsInput) ? 'needs_input' : liveIds.has(id) ? 'live' : 'idle';
+  const statusOf = (id) => archived.has(id) ? 'archived' : (RUNNING.has(id) || codexBusyIds.has(id)) ? 'working' : (scan.get(id) && scan.get(id).needsInput) ? 'needs_input' : liveIds.has(id) ? 'live' : 'idle';
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
   // counts over ALL sessions. Auto sessions are tallied only under `auto` (and
@@ -1958,12 +2009,13 @@ function claudeSessionHistory(id, file, before = null) {
   const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
   return setHistoryCache(key, { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) });
 }
-function sessionHistory(id, { before = null } = {}) {
+async function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) {
-    const rolloutMessages = codexRolloutHistory(findCodexRollout(CODEX_HOME, id));
-    const messages = rolloutMessages.length ? rolloutMessages : loadCodexMessages(id, codex);
-    return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: false, cursor: 0, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+    const rolloutFile = codex.transcriptPath || findCodexRollout(CODEX_HOME, id);
+    const rollout = await codexRolloutHistory(rolloutFile, { before });
+    const messages = rolloutFile ? rollout.messages : loadCodexMessages(id, codex);
+    return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: rollout.hasMore, cursor: rollout.cursor, liveCursor: rollout.liveCursor, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
   }
   const gemini = (loadGemini().sessions || {})[id];
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
@@ -2159,13 +2211,17 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
     res.status(500).json({ results: [], error: String(e.message || e) });
   }
 });
-app.get('/api/sessions/:id/history', requireAuth, (req, res) => {
-  const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
-  const h = sessionHistory(req.params.id, { before });
-  h.messages = compactHistoryMessages(h.messages || []);
-  h.archived = loadArchived().has(req.params.id);
-  h.favorite = loadFavorites().has(req.params.id);
-  res.json(h);
+app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
+  try {
+    const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
+    const h = await sessionHistory(req.params.id, { before });
+    h.messages = compactHistoryMessages(h.messages || []);
+    h.archived = loadArchived().has(req.params.id);
+    h.favorite = loadFavorites().has(req.params.id);
+    res.json(h);
+  } catch (e) {
+    res.status(500).json({ error: String(e && e.message || e) });
+  }
 });
 app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
   try {
@@ -3413,9 +3469,10 @@ function rt(extKey) {
   if (!RT.has(key)) {
     let p = {};
     try { p = JSON.parse(readFileSync(qpath(key), 'utf8')); } catch {}
-    RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || null, agent: p.agent || null,
+    const codex = isUuid(key) ? (loadCodex().sessions || {})[key] : null;
+    RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (codex && codex.cwd) || null, agent: p.agent || (codex ? 'codex' : null),
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
-      settings: normalizeSettings(p.settings || {}),
+      settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
       context: p.context || null,
       queue: recoverPersistedQueue(p), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, canceled: false });
   }
@@ -3489,10 +3546,17 @@ function onTailEvent(s, ev) {
   if (ev.kind === 'user') {
     // our own injected message echoes back as a user entry; skip one per inject.
     if (s.expectUserEcho > 0) { s.expectUserEcho--; return; }
-    if (ev.text && !ev.text.startsWith('<') && !ev.text.startsWith('Caveat:')) bcast(s, { type: 'remote_user', text: ev.text });
+    if (ev.text && !ev.text.startsWith('<') && !ev.text.startsWith('Caveat:')) {
+      s.curText = ''; s.curTools = []; s.curParts = [];
+      bcast(s, { type: 'remote_user', text: ev.text });
+    }
     return;
   }
-  if (ev.kind === 'text') { s.curText += ev.text; pushTextPart(s, ev.text); bcast(s, { type: 'text', delta: ev.text }); }
+  if (ev.kind === 'text') {
+    const last = s.curParts[s.curParts.length - 1];
+    const delta = s.agent === 'codex' && last && last.t === 'text' && last.text ? `\n\n${ev.text}` : ev.text;
+    s.curText += delta; pushTextPart(s, delta); bcast(s, { type: 'text', delta });
+  }
   else if (ev.kind === 'thinking') bcast(s, { type: 'thinking', delta: ev.text });
   else if (ev.kind === 'tool') {
     const t = { type: 'tool', id: ev.id, name: ev.name, input: summarizeToolInput(ev.name, ev.input), detail: ev.input };
@@ -3507,6 +3571,7 @@ function onTailEvent(s, ev) {
     bcast(s, { type: 'notice', text: ev.text });
   } else if (ev.kind === 'turn_end') {
     if (s.onTurnEnd) s.onTurnEnd();
+    else if (s.agent === 'codex') bcast(s, { type: 'done', sessionId: s.sessionId, external: true });
     s.turnCount = (s.turnCount || 0) + 1;
     if (s.sessionId) {
       s.context = contextForSession(s.sessionId, { agent: s.agent || 'claude' });
@@ -3561,14 +3626,16 @@ function recentImagesForHistory(sessionId, hist) {
   return out.reverse();
 }
 
-function triggerAttentionUpdate(s) {
+async function triggerAttentionUpdate(s) {
   if (!s.sessionId || s._attnUpdating) return;
   // Never run for automated / headless `claude -p` sessions the box app merely
   // tracks (dream-cycle, linear-dispatch, healer, brain, career-ops, box-attention).
   // Morning-brief docs are only for real interactive sessions the user started.
   if (AUTO_DIR_RE.test(s.cwd || '') || isAutoFile(jsonlPath(s.sessionId))) return;
   s._attnUpdating = true;
-  const hist = sessionHistory(s.sessionId);
+  let hist;
+  try { hist = await sessionHistory(s.sessionId); }
+  catch { s._attnUpdating = false; return; }
   if (!hist || !hist.messages || hist.messages.length < 2) { s._attnUpdating = false; return; }
   // Stored per SESSION (not cwd) so concurrent ~/development sessions don't clobber.
   const attFile = sessionAttFile(s.sessionId);
@@ -3632,8 +3699,14 @@ ${recentImgs.map(({ paths, caption }) => `- ${paths.join(', ')}${caption ? `\n  
     finally { s._attnUpdating = false; }
   })();
 }
-function ensureTail(s, fromLine) {
+function ensureTail(s, fromLine, codexFromOffset = null) {
   if (!s.sessionId || s.tailStop || s._tailWait) return;
+  if (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId]) {
+    const rec = (loadCodex().sessions || {})[s.sessionId] || {};
+    const rollout = rec.transcriptPath || findCodexRollout(CODEX_HOME, s.sessionId);
+    if (rollout) s.tailStop = tailCodexRollout(rollout, (ev) => onTailEvent(s, ev), { fromOffset: codexFromOffset });
+    return;
+  }
   const begin = (jf) => {
     if (s.tailStop) return;
     const start = fromLine != null ? fromLine : readJsonl(jf).lines;
@@ -3738,6 +3811,24 @@ function enqueue(extKey, msg) {
   return msg.qid;
 }
 
+function nativeCodexTurnActive(s) {
+  if (!s || !s.sessionId || (s.agent && s.agent !== 'codex')) return false;
+  const rec = (loadCodex().sessions || {})[s.sessionId];
+  if (!rec || rec.source !== 'native' || !runningCodexThreadIds().has(s.sessionId)) return false;
+  return codexRolloutState(rec.transcriptPath || findCodexRollout(CODEX_HOME, s.sessionId)).busy;
+}
+
+function waitForNativeCodexTurn(s) {
+  if (s._nativeWait || !s.queue.length) return;
+  s._nativeWait = setInterval(() => {
+    if (!s.queue.length) { clearInterval(s._nativeWait); s._nativeWait = null; return; }
+    if (nativeCodexTurnActive(s)) return;
+    clearInterval(s._nativeWait); s._nativeWait = null;
+    runWorker(s);
+  }, 1000);
+  bcast(s, { type: 'native_wait', sessionId: s.sessionId, msg: 'Queued — waiting for the terminal Codex turn to finish.' });
+}
+
 // A synchronous facade over the normal Box queue for the experimental voice adapter.
 // It deliberately uses the existing Claude/Codex turn runners: context, tool streaming,
 // sandbox settings, remote-control ownership, and session persistence stay identical to
@@ -3829,7 +3920,13 @@ function combineQueued(batch) {
   };
 }
 async function runWorker(s) {
-  if (s.running) return; s.running = true;
+  if (s.running) return;
+  // A directly-launched Codex TUI and `codex exec resume` are separate clients. Starting
+  // the latter while the TUI is mid-turn can race/fork the same thread. Keep the Box message
+  // durably queued and launch it against the same id immediately after the terminal emits its
+  // final answer (or exits).
+  if (nativeCodexTurnActive(s)) { waitForNativeCodexTurn(s); return; }
+  s.running = true;
   while (s.queue.length) {
     const batch = s.queue.splice(0, s.queue.length);   // drain ALL currently queued
     const msg = combineQueued(batch);
@@ -4428,7 +4525,7 @@ wss.on('connection', (ws) => {
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
-      if (s.sessionId) { ensureTail(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
+      if (s.sessionId) { ensureTail(s, undefined, m.liveCursor); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
       ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
