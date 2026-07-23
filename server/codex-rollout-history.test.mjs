@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, parseCodexLiveEntry, parseCodexRollout,
+  tailCodexRollout,
 } from './codex-rollout-history.mjs';
 
 const rows = [
@@ -52,6 +53,16 @@ try {
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }) + '\n');
   assert.equal(codexRolloutState(file).phase, 'final_answer');
   assert.equal(codexRolloutState(file).busy, false);
+
+  const streamed = [];
+  const stop = tailCodexRollout(file, (event) => streamed.push(event));
+  appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'one live message' } }) + '\n');
+  for (let i = 0; i < 25 && !streamed.length; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(streamed.filter((event) => event.kind === 'user').length, 1);
+  stop();
+  appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'must not replay after stop' } }) + '\n');
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(streamed.filter((event) => event.kind === 'user').length, 1);
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

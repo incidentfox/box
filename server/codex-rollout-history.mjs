@@ -291,8 +291,10 @@ export function tailCodexRollout(file, onEvent, { fromOffset = null } = {}) {
     offset = fromOffset == null ? size : Math.max(0, Math.min(Number(fromOffset) || 0, size));
   } catch {}
   let pending = Buffer.alloc(0), droppingOversize = false, reading = false, dirty = false;
+  let activeStream = null, stopped = false;
 
   const consume = (chunk) => {
+    if (stopped) return;
     let segmentStart = 0;
     for (let i = 0; i < chunk.length; i++) {
       if (chunk[i] !== 10) continue;
@@ -319,6 +321,7 @@ export function tailCodexRollout(file, onEvent, { fromOffset = null } = {}) {
   };
 
   const pump = () => {
+    if (stopped) return;
     if (reading) { dirty = true; return; }
     let size = 0; try { size = statSync(file).size; } catch { return; }
     if (size < offset) { offset = 0; pending = Buffer.alloc(0); droppingOversize = false; }
@@ -326,12 +329,24 @@ export function tailCodexRollout(file, onEvent, { fromOffset = null } = {}) {
     const end = size;
     reading = true; dirty = false;
     const stream = createReadStream(file, { start: offset, end: end - 1, highWaterMark: STREAM_CHUNK_BYTES });
+    activeStream = stream;
     stream.on('data', consume);
-    stream.on('error', () => { reading = false; });
-    stream.on('end', () => { offset = end; reading = false; if (dirty) pump(); });
+    stream.on('error', () => { if (activeStream === stream) activeStream = null; reading = false; });
+    stream.on('end', () => {
+      if (activeStream === stream) activeStream = null;
+      if (!stopped) offset = end;
+      reading = false;
+      if (!stopped && dirty) pump();
+    });
   };
   let watcher = null;
   try { watcher = watch(file, { persistent: false }, pump); } catch {}
   const poll = setInterval(pump, 1000);
-  return () => { try { watcher && watcher.close(); } catch {}; clearInterval(poll); };
+  return () => {
+    stopped = true;
+    try { watcher && watcher.close(); } catch {}
+    clearInterval(poll);
+    try { activeStream && activeStream.destroy(); } catch {}
+    activeStream = null;
+  };
 }
