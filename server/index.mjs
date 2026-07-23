@@ -3543,6 +3543,10 @@ function pushTextPart(s, text) {
 // the source of truth: it shows turns we inject AND turns driven from any other
 // device. Started once per session (from current EOF — history loads via REST).
 function onTailEvent(s, ev) {
+  // A Box-owned Codex turn is already rendered from `codex exec --json`. Its rollout is
+  // written at the same time, so consuming both streams would replay the same user/text/tool
+  // events and visibly duplicate the turn. The rollout tail owns only external/native turns.
+  if (s.agent === 'codex' && s.proc) return;
   if (ev.kind === 'user') {
     // our own injected message echoes back as a user entry; skip one per inject.
     if (s.expectUserEcho > 0) { s.expectUserEcho--; return; }
@@ -4049,6 +4053,10 @@ function runTurn(s, msg) {
 	}
 function runCodexTurn(s, msg, resolve) {
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  // Existing/native chats may already have a rollout watcher. Pause it while this Box-owned
+  // turn runs; codexEngine is the single live source until the child exits, then finish()
+  // restarts the watcher from the new EOF for future terminal-driven activity.
+  if (s.sessionId) stopTail(s);
   let done = false;
   // Unique per turn so flushCodexAssistant upserts ONE live row and never collides with a
   // stale live row left by a turn the box was restarted out of (time + seq survives a
@@ -4097,6 +4105,7 @@ function runCodexTurn(s, msg, resolve) {
       deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
+    if (s.sessionId) ensureTail(s);
     if (s.sessionId && !s.canceled) triggerAttentionUpdate(s);
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
