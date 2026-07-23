@@ -143,6 +143,13 @@ function renderRoute(s) {
   navSuppress = true;
   try {
     if (!TOKEN) { show('login'); return; }
+    // On a cold load of a deep-linked desktop route, CSS keeps the sessions screen
+    // visible as the left sidebar even though the active route is chat/board/etc.
+    // Hydrate that sidebar independently; otherwise it stays blank until another
+    // navigation happens to fetch the session feed.
+    if (isDesktopShell() && s && s.view !== 'login' && s.view !== 'sessions') {
+      fetchSessions(curFilter || 'all').catch(() => {});
+    }
     // leaving the chat → drop the live socket (matches the old goBackFromChat)
     if (s && s.view !== 'chat' && s.view !== 'chatAttn' && ws) { try { ws.close(); } catch {} }
     const chatVisible = () => !$('chat').classList.contains('hidden');
@@ -1318,6 +1325,10 @@ $('newBtn').onclick = () => {
     fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: defaultCwd, agent }); },
   }));
   openSheet('New chat', rows);
+};
+if ($('homeLink')) $('homeLink').onclick = (e) => {
+  e.preventDefault();
+  openSessions('all');
 };
 if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
 if ($('sessionMenuBtn')) $('sessionMenuBtn').onclick = openSessionMenu;
