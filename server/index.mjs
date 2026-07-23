@@ -26,7 +26,7 @@ import { CodexExecEngine } from './codex-exec-engine.mjs';
 import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
 } from './codex-rollout-history.mjs';
-import { recoverPersistedQueue } from './queue-state.mjs';
+import { prepareRecoveredCodexMessage, recoverPersistedQueue } from './queue-state.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
@@ -1233,7 +1233,10 @@ function appendCodexMessage(id, role, text, extra = {}) {
   const now = Date.now();
   const prev = state.sessions[id] || { id, agent: 'codex', title: 'Codex chat', cwd: DEFAULT_CWD, created: now };
   const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
-  saveCodexMessages(id, [...loadCodexMessages(id, prev), { role, parts, ts: extra.ts || now }]);
+  const message = { role, parts, ts: extra.ts || now };
+  if (extra.qid) message.qid = extra.qid;
+  if (extra.recovered) message.recovered = true;
+  saveCodexMessages(id, [...loadCodexMessages(id, prev), message]);
   delete prev.messages;
   const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
   if (role === 'user' && (!prev.title || prev.title === 'Codex chat')) prev.title = plain.slice(0, 80) || 'Codex chat';
@@ -3923,6 +3926,22 @@ function combineQueued(batch) {
     title: batch.find((m) => m.title)?.title || batch[0].title || '',
   };
 }
+
+function codexUserQidPersisted(sessionId, qid) {
+  if (!sessionId || !qid) return false;
+  const rec = (loadCodex().sessions || {})[sessionId] || null;
+  return loadCodexMessages(sessionId, rec).some((message) => message && message.role === 'user' && message.qid === qid);
+}
+
+function prepareRecoveredMessage(s, message) {
+  if (!message || !message.recovered || message.agent !== 'codex') return message;
+  // If the original user row made it to durable history, replaying its exact text after a
+  // service restart creates a duplicate user turn and may repeat completed writes. Resume with
+  // an explicit continuation instead. If it never landed, retain the original text so a crash
+  // between queue persistence and Codex startup cannot lose the request.
+  return prepareRecoveredCodexMessage(message, { originalLanded: codexUserQidPersisted(s.sessionId, message.qid) });
+}
+
 async function runWorker(s) {
   if (s.running) return;
   // A directly-launched Codex TUI and `codex exec resume` are separate clients. Starting
@@ -3933,7 +3952,7 @@ async function runWorker(s) {
   s.running = true;
   while (s.queue.length) {
     const batch = s.queue.splice(0, s.queue.length);   // drain ALL currently queued
-    const msg = combineQueued(batch);
+    const msg = combineQueued(batch.map((message) => prepareRecoveredMessage(s, message)));
     // Removing a message from `queue` must not remove it from durable state. A deploy or
     // crash can happen before Codex emits anything; retain the active turn separately so
     // the replacement Box process puts it back at the front of the queue on startup.
@@ -4079,7 +4098,7 @@ function runCodexTurn(s, msg, resolve) {
   if (!s.sessionId) {
     s.provKey = s.key;
     ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-    appendCodexMessage(s.provKey, 'user', userText, { parts: userParts });
+    appendCodexMessage(s.provKey, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered });
     addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
@@ -4132,7 +4151,7 @@ function runCodexTurn(s, msg, resolve) {
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
-        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts }); // provisional path already appended it
+        if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered }); // provisional path already appended it
         persist(s);
         if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'codex' }); } catch {} }
         bcast(s, { type: 'session', id: s.sessionId, agent: 'codex', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
