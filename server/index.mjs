@@ -1063,7 +1063,7 @@ const DEFAULT_SETTINGS = {
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
-  claude: { model: 'opus', effort: 'xhigh' },
+  claude: { model: 'claude-opus-5', effort: 'xhigh' },
 };
 const refreshRuntimeDefaults = () => {
   DEFAULT_CWD = appDefaultCwd();
