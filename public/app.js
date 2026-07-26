@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
-  claude: { model: 'opus', effort: 'xhigh' },
+  claude: { model: 'claude-opus-5', effort: 'xhigh' },
 };
 const AGENT_META = {
   claude: { label: 'Claude', icon: '⌘' },
@@ -3244,7 +3244,7 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-sol' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'opus');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-sol' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'claude-opus-5');
   const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
@@ -3803,9 +3803,10 @@ const codexEffortsForModel = (model) => String(model || '').startsWith('gpt-5.6'
   ? CODEX_EFFORTS.filter((effort) => effort.id !== 'max')
   : CODEX_EFFORTS;
 const CLAUDE_MODELS = [
-  { id: 'opus', label: 'Opus 4.8', desc: 'Default — 1M context, most capable' },
+  { id: 'claude-opus-5', label: 'Opus 5', desc: 'Default — newest, most capable (1M context)' },
+  { id: 'opus', label: 'Opus 4.8', desc: 'Previous Opus' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
-  { id: 'fable', label: 'Fable 5', desc: 'Newest — fast, fewer check-ins (heavier usage)' },
+  { id: 'fable', label: 'Fable 5', desc: 'Fast, fewer check-ins (heavier usage)' },
 ];
 const CLAUDE_EFFORTS = [
   { id: 'low', label: 'Low' },
