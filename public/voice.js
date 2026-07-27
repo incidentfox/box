@@ -688,7 +688,10 @@ async function voAdapterStartStreamingStt() {
   voAdapterSttProc = voAdapterAudioCtx.createScriptProcessor(4096, 1, 1);
   voAdapterSttSink = voAdapterAudioCtx.createGain(); voAdapterSttSink.gain.value = 0;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/stt?token=${encodeURIComponent(TOKEN)}&rate=${rate}`);
+  // Pinned to Deepgram even though mic dictation now defaults to ElevenLabs Scribe: turn
+  // submission below hangs off the `endpoint` message, and only Deepgram reports
+  // end-of-speech. On Scribe this loop would paint a transcript and never send it.
+  const ws = new WebSocket(`${proto}://${location.host}/stt?token=${encodeURIComponent(TOKEN)}&rate=${rate}&engine=deepgram`);
   const pendingPcm = [];
   voAdapterSttWs = ws;
   ws.onopen = () => { while (pendingPcm.length && ws.readyState === WebSocket.OPEN) ws.send(pendingPcm.shift()); };

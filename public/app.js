@@ -4995,8 +4995,11 @@ let sttWs, sttStream, audioCtx, sttProc, recT0, recTimer, recPrefix = '';
 let committedText = '', partialText = '', media, chunks = [];
 // Full-recording capture: we accumulate the same 16-bit PCM frames we stream to STT
 // (browser-agnostic — works on iOS Safari where MediaRecorder is unreliable) and, on
-// stop, encode a WAV and batch-transcribe the WHOLE clip (Deepgram nova-3). That batch
-// pass is the source of truth, so realtime garble/overwrites never reach the final text.
+// stop, encode a WAV and batch-transcribe the WHOLE clip (ElevenLabs Scribe v2). That batch
+// pass is the source of truth, so realtime garble/overwrites never reach the final text —
+// which matters most in Mandarin, where Scribe's realtime pass is noticeably weaker than
+// its batch pass. Expect the final text to land a beat later than it used to: Scribe takes
+// ~17s on a 60s clip where Deepgram took ~1.4s.
 let pcmFrames = [], pcmRate = 16000, pcmSamples = 0;
 const REC_MAX_SEC = 1800;                  // absolute ceiling (30 min) so a left-on mic can't OOM the page
 const REC_MAX_BYTES = 23 * 1024 * 1024;    // keep the wav under the server's 25MB upload limit (binds first at high sample rates)

@@ -159,7 +159,8 @@ respawns it):
 | `CC_WORKSPACE` | Install-time fallback for the default directory new chats open in. You can override this later in the app's Settings sheet. |
 | `OWNER_NAME` | Your name, used in the per-session morning brief. |
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
-| `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). |
+| `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). Set either or both; `STT_ENGINE` picks which leads. |
+| `STT_ENGINE` | `eleven` (default — best accuracy, the only one that transcribes Mandarin) or `deepgram` (~3x faster, English only in practice). |
 | `LINEAR_TEAM_KEY` + `NEEDS_LABEL` | Name the local Board's tickets + the "needs you" label. The Board works with no Linear account (local SQLite clone) by default. |
 | `LINEAR_API_KEY` + `LINEAR_TEAM_ID` | Drive a REAL Linear workspace instead of the local clone (optional). `LINEAR_LOCAL=off` disables the Board entirely. |
 | `OPENAI_API_KEY` + `OPENAI_ENDPOINT` | Enable cheap per-session attention/status summaries (optional). |

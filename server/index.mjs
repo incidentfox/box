@@ -27,6 +27,7 @@ import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
 } from './codex-rollout-history.mjs';
 import { prepareRecoveredCodexMessage, recoverPersistedQueue } from './queue-state.mjs';
+import { sttEngineOrder, stripNonSpeechTags } from './stt-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
@@ -286,11 +287,14 @@ function hookPayload(spec) {
   return { id: spec.id, title: spec.title, file: spec.file, event: spec.event, path, livePath: live, defaultPath: fallback, source: existsSync(live) ? 'live' : 'repo-default', content, defaultContent, overridden: existsSync(live) && content !== defaultContent };
 }
 const STT_MODELS = cfg('STT_MODEL', 'scribe_v2,scribe_v1').split(',');
-// Voice (speech-to-text) is OPTIONAL. ElevenLabs Scribe is the zero-friction pick;
-// Deepgram nova-3 is the higher-quality batch transcriber. Leave both unset to disable voice.
+// Voice (speech-to-text) is OPTIONAL. ElevenLabs Scribe is both the zero-friction pick and
+// the more accurate one; Deepgram nova-3 is the fast fallback. Leave both unset to disable
+// voice. `STT_ENGINE=deepgram` swaps the order — see server/stt-engine.mjs for the numbers.
 const ELEVEN_KEY = cfg('ELEVENLABS_API_KEY');
 const DEEPGRAM_KEY = cfg('DEEPGRAM_API_KEY');
 const DG_MODEL = cfg('DG_STT_MODEL', 'nova-3');
+const STT_ENGINE = cfg('STT_ENGINE', 'eleven');
+const sttAvailable = () => ({ eleven: !!ELEVEN_KEY, deepgram: !!DEEPGRAM_KEY });
 
 // ---- personalization + optional integrations ------------------------------
 // Your name, used in the morning-brief status doc the app keeps per session.
@@ -3367,8 +3371,10 @@ function persistClip(buffer, mimetype) {
 }
 function logVoice(meta) { try { writeFileSync(VOICE_LOG, JSON.stringify({ ts: new Date().toISOString(), ...meta }) + '\n', { flag: 'a' }); } catch {} }
 
-// Deepgram batch transcription of a clip buffer. nova-3 + language=multi handles
-// EN+中文 without the cross-language hallucinations the ElevenLabs auto-detect hits.
+// Deepgram batch transcription of a clip buffer. Fast (median 511ms, 1.4s on a 62s clip —
+// 3x quicker than anything else) but `language=multi` returns an EMPTY string on Mandarin
+// and mangles half the domain vocabulary, so it is the fallback, not the primary. An
+// earlier version of this comment claimed the reverse; see server/stt-engine.mjs.
 async function transcribeDeepgram(buffer, mimetype) {
   if (!DEEPGRAM_KEY) throw new Error('no DEEPGRAM key');
   const u = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(DG_MODEL)}&language=multi&smart_format=true&punctuate=true`;
@@ -3385,19 +3391,44 @@ async function transcribeEleven(buffer, mimetype, originalname) {
     try {
       const form = new FormData();
       form.append('model_id', model.trim());
+      // Without this, a near-silent clip transcribes as the literal string "[pause]".
+      form.append('tag_audio_events', 'false');
       form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), originalname || 'clip.webm');
       const r = await fetch('https://api.elevenlabs.io/v1/speech-to-text', { method: 'POST', headers: { 'xi-api-key': ELEVEN_KEY }, body: form });
-      if (r.ok) { const d = await r.json(); return { text: (d.text || '').trim(), model: `eleven:${model.trim()}` }; }
+      if (r.ok) { const d = await r.json(); return { text: stripNonSpeechTags(d.text), model: `eleven:${model.trim()}` }; }
       lastErr = `${model.trim()} -> ${r.status}`;
     } catch (e) { lastErr = String(e.message || e); }
   }
   throw new Error(lastErr || 'eleven failed');
 }
-// Try Deepgram first, fall back to ElevenLabs. Returns {text, model, engine}.
+// Second-opinion engine for /api/retranscribe only — never in the default path. It scored
+// best of any engine on the proper nouns used here (Carisk / Claude Code / W-9), which is
+// the exact case that endpoint exists for, but it truncates: it cut a 62s clip's Mandarin
+// to 23% and dropped trailing content on 4 of 13 English clips. Ask for it deliberately.
+async function transcribeOpenai(buffer, mimetype, originalname) {
+  if (!OPENAI_KEY) throw new Error('no OPENAI key');
+  const form = new FormData();
+  form.append('model', 'gpt-4o-transcribe');
+  form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), originalname || 'clip.webm');
+  const r = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${OPENAI_KEY}` }, body: form });
+  if (!r.ok) throw new Error(`openai ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const d = await r.json();
+  return { text: (d.text || '').trim(), model: 'openai:gpt-4o-transcribe' };
+}
+// Try engines in STT_ENGINE order (Scribe first by default), taking the first non-empty
+// transcript. Empty counts as a failure and falls through — which is how the one Mandarin
+// clip in the voice log ever got transcribed at all: Deepgram returned "" and Scribe
+// rescued it by accident. Now Scribe just goes first. Returns {text, model}.
 async function transcribeBuffer(buffer, mimetype, originalname) {
   const errs = [];
-  for (const fn of [() => transcribeDeepgram(buffer, mimetype), () => transcribeEleven(buffer, mimetype, originalname)]) {
-    try { const r = await fn(); if (r.text) return r; errs.push(`${r.model}: empty`); }
+  const impl = {
+    eleven: () => transcribeEleven(buffer, mimetype, originalname),
+    deepgram: () => transcribeDeepgram(buffer, mimetype),
+  };
+  const order = sttEngineOrder(STT_ENGINE, sttAvailable());
+  if (!order.length) throw new Error('no STT key');
+  for (const name of order) {
+    try { const r = await impl[name](); if (r.text) return r; errs.push(`${r.model}: empty`); }
     catch (e) { errs.push(String(e.message || e)); }
   }
   throw new Error(errs.join(' | '));
@@ -3418,7 +3449,7 @@ app.post('/api/transcribe', requireAuth, uploadMem.single('audio'), async (req, 
 });
 
 // Re-transcribe a previously-saved clip (recover a garbled message). Pass ?clip=<name>
-// (from VOICE_DIR) or the most recent clip if omitted. Optional ?engine=deepgram|eleven.
+// (from VOICE_DIR) or the most recent clip if omitted. Optional ?engine=eleven|deepgram|openai.
 app.get('/api/retranscribe', requireAuth, async (req, res) => {
   try {
     let clip = (req.query.clip || '').toString().replace(/[^\w.\-:]/g, '');
@@ -3433,6 +3464,7 @@ app.get('/api/retranscribe', requireAuth, async (req, res) => {
     const engine = (req.query.engine || '').toString();
     const r = engine === 'eleven' ? await transcribeEleven(buffer, mimetype, clip)
       : engine === 'deepgram' ? await transcribeDeepgram(buffer, mimetype)
+      : engine === 'openai' ? await transcribeOpenai(buffer, mimetype, clip)
       : await transcribeBuffer(buffer, mimetype, clip);
     logVoice({ clip, model: r.model, retranscribe: true, text: r.text });
     res.json({ text: r.text, model: r.model, clip });
@@ -4474,10 +4506,16 @@ function runMacTurn(s, msg, resolve) {
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 // ---- realtime STT relay: client streams 16-bit PCM → we relay to a realtime STT
-// provider → partial/committed transcripts back. PRIMARY = Deepgram streaming
-// (nova-3, language=multi) — far less prone to the multilingual hallucination
-// (Hindi/Russian garbage) that ElevenLabs Scribe auto-detect hits on EN+中文. Falls
-// back to ElevenLabs Scribe v2 realtime only when no Deepgram key is present.
+// provider → partial/committed transcripts back. PRIMARY = ElevenLabs `scribe_v2_realtime`.
+// Deepgram streaming (nova-3, language=multi) was primary until it was measured against the
+// box's own clips: on Mandarin it emits space-separated Cantonese salad behind German and
+// Korean partials, where Scribe emits a usable Chinese sentence. Deepgram is now the
+// fallback; `?engine=` pins one per connection and STT_ENGINE sets the default.
+//
+// The two providers are NOT interchangeable: only Deepgram reports end-of-speech, which
+// hands-free voice mode needs to know when to submit a turn (see the `endpoint` message
+// below and its sole consumer in public/voice.js). So voice mode pins itself to Deepgram
+// and this default governs the mic-dictation path, which only consumes partial/committed.
 const sttWss = new WebSocketServer({ noServer: true });
 
 // Deepgram realtime: raw PCM frames go straight onto the socket (binary), JSON control
@@ -4520,8 +4558,8 @@ function sttEleven(client, rate) {
   el.on('open', () => { elOpen = true; for (const b of queue) sendChunk(b); queue.length = 0; });
   el.on('message', (data) => {
     let o; try { o = JSON.parse(data.toString()); } catch { return; }
-    if (o.message_type === 'partial_transcript') client.send(JSON.stringify({ type: 'partial', text: o.text || '' }));
-    else if (o.message_type === 'committed_transcript') client.send(JSON.stringify({ type: 'committed', text: o.text || '' }));
+    if (o.message_type === 'partial_transcript') client.send(JSON.stringify({ type: 'partial', text: stripNonSpeechTags(o.text) }));
+    else if (o.message_type === 'committed_transcript') client.send(JSON.stringify({ type: 'committed', text: stripNonSpeechTags(o.text) }));
     else if (o.message_type === 'session_started') { try { client.send(JSON.stringify({ type: 'ready' })); } catch {} }
   });
   el.on('error', (e) => { try { client.send(JSON.stringify({ type: 'error', msg: String(e.message || e) })); } catch {} });
@@ -4535,8 +4573,12 @@ function sttEleven(client, rate) {
 
 sttWss.on('connection', (client, url) => {
   const rate = Number(url.searchParams.get('rate')) || 16000;
-  if (DEEPGRAM_KEY) return sttDeepgram(client, rate);
-  if (ELEVEN_KEY) return sttEleven(client, rate);
+  // Only the FIRST configured engine is used: a realtime socket has already streamed the
+  // audio by the time an engine could be judged to have failed, so there is nothing to
+  // retry with. The order still matters — it decides which engine a one-key box gets.
+  const engine = sttEngineOrder(url.searchParams.get('engine') || STT_ENGINE, sttAvailable())[0];
+  if (engine === 'eleven') return sttEleven(client, rate);
+  if (engine === 'deepgram') return sttDeepgram(client, rate);
   try { client.send(JSON.stringify({ type: 'error', msg: 'no STT key' })); } catch {} client.close();
 });
 
@@ -4641,7 +4683,9 @@ server.listen(PORT, () => {
   console.log(`\ncc-mobile (chat) on http://localhost:${PORT}`);
   console.log(`auth token: ${AUTH_TOKEN}`);
   console.log(`default cwd: ${DEFAULT_CWD}`);
-  console.log(`voice: primary=${DEEPGRAM_KEY ? `Deepgram(${DG_MODEL})` : 'none'} fallback=${ELEVEN_KEY ? 'ElevenLabs Scribe' : 'none'}; clips→${VOICE_DIR}\n`);
+  const sttLabel = { eleven: `ElevenLabs Scribe(${STT_MODELS[0].trim()})`, deepgram: `Deepgram(${DG_MODEL})` };
+  const sttOrder = sttEngineOrder(STT_ENGINE, sttAvailable()).map((e) => sttLabel[e]);
+  console.log(`voice: primary=${sttOrder[0] || 'none'} fallback=${sttOrder[1] || 'none'}; clips→${VOICE_DIR}\n`);
 });
 
 // one-time: learn the real skill/command list from a claude init (kill before it answers)
