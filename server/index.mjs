@@ -3818,6 +3818,22 @@ function enqueue(extKey, msg) {
   return msg.qid;
 }
 
+// `lastActivityAt` is only advanced by live tail events, and the tail runs ONLY while someone
+// is subscribed. A Codex turn that has been working away unwatched therefore reports the moment
+// its prompt was sent — so reopening it after 20 minutes reads "last activity 20m ago" as if it
+// had stalled. The rollout file's mtime is the honest answer; refresh from it on (re)subscribe.
+function refreshCodexActivity(s) {
+  if (!s || !s.running || !s.sessionId) return;
+  const rec = (loadCodex().sessions || {})[s.sessionId];
+  if (!rec && s.agent !== 'codex') return;
+  try {
+    const file = (rec && rec.transcriptPath) || findCodexRollout(CODEX_HOME, s.sessionId);
+    if (!file) return;
+    const mtime = Math.round(statSync(file).mtimeMs);
+    if (mtime > (s.lastActivityAt || 0)) s.lastActivityAt = mtime;
+  } catch {}
+}
+
 function nativeCodexTurnActive(s) {
   if (!s || !s.sessionId || (s.agent && s.agent !== 'codex')) return false;
   const rec = (loadCodex().sessions || {})[s.sessionId];
@@ -4553,7 +4569,7 @@ wss.on('connection', (ws) => {
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
-      if (s.sessionId) { ensureTail(s, undefined, m.liveCursor); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
+      if (s.sessionId) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
       ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
