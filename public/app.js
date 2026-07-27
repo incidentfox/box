@@ -2946,14 +2946,30 @@ function onSync(o) {
     kids.forEach((el, i) => { if (el.classList && el.classList.contains('msg') && el.classList.contains('user')) lastUser = i; });
     const tail = lastUser >= 0 ? kids.slice(lastUser + 1) : kids;
     const lastUserEl = lastUser >= 0 ? kids[lastUser] : null;
-    const sameText = !!lastUserEl && (lastUserEl.dataset.rawText || '') === (o.curUser || '');
-    // A freshly-rendered turn owns liveUser. After a reload, the current user is either
-    // the final history row (no output yet) or is followed by a persisted `live` reply.
-    const hasCurrentUser = sameText && (lastUserEl === liveUser || tail.length === 0 || tail.some((el) => el.dataset && el.dataset.historyLive === 'true'));
+    // Matching text is the whole proof: the last user bubble on screen IS this turn's prompt.
+    // (On the reconnect race above the texts differ, so we still append below.) This used to
+    // additionally demand `lastUserEl === liveUser || tail.length === 0 || a `live`-flagged
+    // tail row` — but a Codex thread backed by a ROLLOUT file renders its in-flight turn as
+    // ordinary history rows that carry no `live` flag, so all three failed on a mid-turn open
+    // and the prompt was appended a SECOND time below the answer it had already produced.
+    const hasCurrentUser = !!lastUserEl && (lastUserEl.dataset.rawText || '') === (o.curUser || '');
+    // Whether to REDRAW that turn is a separate question. `curParts` only holds what the live
+    // tail has seen, and the tail starts at the history cursor — so opening a session whose
+    // turn began earlier gives an EMPTY snapshot while the durable transcript already holds
+    // the whole answer. Wiping the tail then would blank a running turn.
+    const durableLiveHistory = ['codex', 'gemini', 'mac'].includes(o.agent || cur.agent);
+    const liveRows = tail.filter((el) => el.dataset && el.dataset.historyLive === 'true');
+    // Rollout-backed Codex history has no removable `live` row: those durable rows ARE the
+    // turn, so the snapshot must never be drawn on top of them.
+    const historyOwnsTurn = hasCurrentUser && durableLiveHistory && tail.length > 0 && !liveRows.length;
+    const snapshotHasTurn = (Array.isArray(o.curParts) && o.curParts.length > 0) || !!o.curText || (o.curTools || []).length > 0;
+    const redraw = snapshotHasTurn && !historyOwnsTurn;
     if (hasCurrentUser) {
-      const durableLiveHistory = ['codex', 'gemini', 'mac'].includes(o.agent || cur.agent);
-      for (const el of tail) {
-        if (!durableLiveHistory || (el.dataset && el.dataset.historyLive === 'true')) el.remove();
+      liveUser = lastUserEl; // adopt it, so a later reconnect recognises the turn as ours
+      if (redraw) {
+        for (const el of tail) {
+          if (!durableLiveHistory || (el.dataset && el.dataset.historyLive === 'true')) el.remove();
+        }
       }
     } else if (o.curUser || (o.curUserImages || []).length) {
       // sync arrived before turn_start (or REST history had not persisted the user yet):
@@ -2962,7 +2978,7 @@ function onSync(o) {
     }
     startAssistant();
     setLiveActivity(o.activityLabel || 'Working', o.activityAt || Date.now());
-    if (Array.isArray(o.curParts) && o.curParts.length) {
+    if (redraw && Array.isArray(o.curParts) && o.curParts.length) {
       // Any persisted text/tool proves the turn has started. Drop the generic
       // three-dot placeholder so reconnects show the real phase line instead.
       clearLoading();
@@ -2979,7 +2995,7 @@ function onSync(o) {
           live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
         } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.copyText += p.text; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
       }
-    } else {
+    } else if (redraw) {
       // legacy fallback (server snapshot without curParts)
       (o.curTools || []).forEach((t) => { live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.body.insertBefore(toolChip(t.name, t.input || '', { input: t.detail, result: t.result }), live.textEl); const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; live.body.appendChild(nt); live.textEl = nt; });
       if (o.curText) { clearLoading(); live.raw = o.curText; live.copyText = o.curText; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
