@@ -243,6 +243,33 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
   background: var(--card); border: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.2;
 }
 
+/* Active goal / scheduler state. Hidden unless at least one mode is active. */
+.sessionModes {
+  flex: none; display: flex; gap: 8px; overflow-x: auto; padding: 8px 10px;
+  border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--subtle) 72%, var(--bg));
+  -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; scrollbar-width: none;
+}
+.sessionModes::-webkit-scrollbar { display: none; }
+.sessionMode {
+  flex: 1 1 0; min-width: 220px; max-width: 420px; display: grid; grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px; align-items: center; padding: 9px 11px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); color: var(--ink); text-align: left; box-shadow: 0 1px 2px rgba(40,30,20,.04);
+}
+.sessionMode:active { transform: scale(.99); filter: brightness(.97); }
+.sessionModeGlyph {
+  width: 27px; height: 27px; display: grid; place-items: center; border-radius: 9px;
+  background: var(--subtle-2); font-size: 14px; font-weight: 750;
+}
+.sessionMode.goal .sessionModeGlyph { background: color-mix(in srgb, var(--green) 15%, var(--card)); color: var(--green); }
+.sessionMode.wake .sessionModeGlyph { background: color-mix(in srgb, #3b82f6 14%, var(--card)); color: #3274d9; }
+.sessionMode.auto .sessionModeGlyph { background: color-mix(in srgb, #8b5cf6 14%, var(--card)); color: #7c4fd7; }
+.sessionModeCopy { min-width: 0; }
+.sessionModeTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 750; }
+.sessionModeDesc {
+  margin-top: 2px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  color: var(--muted); font-size: 11.5px; line-height: 1.25;
+}
+
 /* sessions list */
 /* sessions header + compose */
 .sbar .apptitle { color: inherit; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; text-decoration: none; }
@@ -491,6 +518,7 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .iconbtn:active { filter: brightness(.93); }
 
 @media (max-width: 430px) {
+  .sessionMode { flex: 0 0 min(82vw, 320px); min-width: 0; }
   .toolsRow { gap: 5px; }
   .inputWrap { padding-inline: 9px; }
   .chip { padding-inline: 9px; font-size: 12.5px; }
