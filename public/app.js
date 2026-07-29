@@ -6,7 +6,7 @@ let ws = null;
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off' },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
@@ -3112,7 +3112,54 @@ function enqueueText(text, opts = {}) {
   else ws.addEventListener('open', () => { ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); go(); }, { once: true });
   refreshButton(); scrollBottom();
 }
-function submit() {
+function clearComposerInput() {
+  $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); refreshButton();
+}
+async function handleNativeSlash(text) {
+  const match = String(text || '').match(/^\/([a-z][\w-]*)(?:\s+([\s\S]*))?$/i);
+  if (!match) return false;
+  const name = match[1].toLowerCase();
+  const args = String(match[2] || '').trim();
+  if (name === 'schedule') { openScheduleSheet(); return true; }
+  if (name === 'autocontinue') { openAutoContinueSheet(); return true; }
+  if (cur.agent !== 'codex') return false;
+  if (name === 'goal') return setGoalFromSlash(args);
+  if (name === 'model') { openModelSheet(); return true; }
+  if (name === 'fast') { toggleCodexFast(); return true; }
+  if (name === 'permissions') { openApprovalsSheet(); return true; }
+  if (name === 'personality') {
+    if (['friendly', 'pragmatic', 'none'].includes(args)) { cur.settings.codex.personality = args; sendSettings(); toast(`Personality: ${args}`); }
+    else openPersonalitySheet();
+    return true;
+  }
+  if (name === 'skills') { openCodexSkillsSheet(); return true; }
+  if (name === 'status') { openStatusSheet(); return true; }
+  if (name === 'compact') { compactCodexThread(); return true; }
+  if (name === 'copy' || name === 'raw') { openCopySheet(); return true; }
+  if (name === 'rename') {
+    if (!args) renameChat(cur);
+    else {
+      cur.title = args.slice(0, 80); setChatTitle(cur.title);
+      if (cur.id) await api(`/api/sessions/${encodeURIComponent(cur.id)}/rename`, { method: 'POST', body: JSON.stringify({ name: cur.title }) });
+      toast('Chat renamed');
+    }
+    return true;
+  }
+  if (name === 'archive') { if (cur.id) openArchiveConfirm({ id: cur.id, title: cur.title, archived: cur.archived }, { leaveChat: true }); else toast('Nothing to archive yet'); return true; }
+  if (name === 'delete') { confirmDeleteCodexThread(); return true; }
+  if (name === 'resume' || name === 'exit') { openSessions('all'); return true; }
+  if (name === 'new' || name === 'clear') { openChat({ id: null, title: 'New Codex chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings }); return true; }
+  if (name === 'fork') { confirmFork(); return true; }
+  if (name === 'side') { if (args) await runBtw(args); else putComposer('/side '); return true; }
+  if (name === 'mention' || name === 'ide') { putComposer(args ? `@${args} ` : '@'); setTimeout(onType, 30); return true; }
+  if (name === 'theme') { toggleTheme(); return true; }
+  if (name === 'review') { reviewCurrent(); return true; }
+  if (name === 'logout') { confirmCodexLogout(); return true; }
+  if (name === 'ps') { openBackgroundTerminals(); return true; }
+  if (name === 'stop') { confirmStopBackgroundTerminals(); return true; }
+  return false;
+}
+async function submit() {
   const text = $('input').value.trim();
   if (!text && !images.length) return;
   hideSuggest();
@@ -3139,6 +3186,12 @@ function submit() {
   if (btw) {
     $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); refreshButton();
     return runBtw(btw[1] || '');
+  }
+  if (await handleNativeSlash(text)) {
+    // Some native commands intentionally replaced the composer (for example
+    // /mention and argument-less /side); preserve that replacement.
+    if ($('input').value.trim() === text) clearComposerInput();
+    return;
   }
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
@@ -3433,6 +3486,8 @@ const BUILTIN_CMDS = {
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
     { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
+    { name: 'schedule', desc: 'Wake this session at a scheduled time', action: 'schedule' },
+    { name: 'autocontinue', desc: 'Keep this session working during business hours', action: 'autocontinue' },
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
     { name: 'switch', desc: 'Move THIS chat to another Claude account', action: 'switch-account' },
@@ -3449,12 +3504,14 @@ const BUILTIN_CMDS = {
     { name: 'settings', desc: 'Open Box app settings', action: 'settings' },
     { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
+    { name: 'schedule', desc: 'Wake this session at a scheduled time', action: 'schedule' },
+    { name: 'autocontinue', desc: 'Keep this session working during business hours', action: 'autocontinue' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Codex model / reasoning effort', action: 'model' },
     { name: 'permissions', desc: 'Change approval & sandbox mode', action: 'approvals' },
     { name: 'approvals', desc: 'Change approval & sandbox mode', action: 'approvals' },
     { name: 'status', desc: 'Show current Box/Codex thread state', action: 'status' },
-    { name: 'compact', desc: 'Summarize & compact the thread', send: true },
+    { name: 'compact', desc: 'Summarize & compact the thread', action: 'compact' },
     { name: 'btw', desc: 'Ask a side question in a child thread', action: 'btw' },
     { name: 'fork', desc: 'Branch this thread into a child with parent context', action: 'fork' },
     { name: 'new', desc: 'Start a fresh Codex thread', action: 'new' },
@@ -3502,8 +3559,9 @@ const BUILTIN_CMDS = {
 async function showCommands(tok) {
   const agent = agentType(cur.agent);
   let list = (BUILTIN_CMDS[agent] || []).map((c) => ({ ...c, kind: 'builtin' }));
-  if (!commandsCache[agent]) commandsCache[agent] = (await (await api('/api/commands?agent=' + agent)).json()).commands;
-  list = list.concat(commandsCache[agent]);
+  if (!commandsCache[agent]) commandsCache[agent] = (await (await api('/api/commands?agent=' + agent)).json()).commands || [];
+  const seen = new Set(list.map((command) => command.name));
+  list = list.concat(commandsCache[agent].filter((command) => !seen.has(command.name) && seen.add(command.name)));
   const items = list.filter((c) => c.name.toLowerCase().startsWith(tok.frag.toLowerCase())).slice(0, 80)
     .map((c) => ({ ic: c.kind === 'builtin' ? '⚙' : '', nm: '/' + c.name, ds: c.desc || '', fn: () => runSlashCommand(c, tok) }));
   renderSuggest(items);
@@ -3729,6 +3787,8 @@ function openStatusSheet() {
   if (cur.parentId) rows.push({ ic: '', label: 'Parent', desc: `${cur.parentTitle || 'Parent chat'} (${cur.parentId.slice(0, 8)})`, fn: () => {} });
   if (agent === 'codex') {
     rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.reasoningEffort || 'default'}`, fn: openModelSheet });
+    rows.push({ ic: '', label: 'Fast mode', desc: cfg.serviceTier === 'fast' ? 'On · 1.5x speed, increased usage' : 'Off', fn: toggleCodexFast });
+    rows.push({ ic: '', label: 'Personality', desc: cfg.personality || 'default', fn: openPersonalitySheet });
     rows.push({ ic: '◆', label: 'Permissions', desc: sandboxLabel(cfg.sandbox || 'off'), fn: openApprovalsSheet });
   }
   else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: openModelSheet });
@@ -3741,6 +3801,7 @@ function openStatusSheet() {
     fn: () => continueWithAgent(cur.agent === 'codex' ? 'claude' : 'codex'),
   });
   if (cur.id && cur.agent !== 'codex') rows.push({ ic: '', label: 'Switch account', desc: 'move this chat to another Claude account', fn: () => openAccountSwitch() });
+  if (cur.id) rows.push({ ic: '⏰', label: 'Schedule', desc: 'Wake-ups and business-hours auto-continue', fn: openScheduleSheet });
   openSheet('Status', rows);
 }
 function reviewCurrent() {
@@ -3766,11 +3827,29 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'settings') return openAppSettings();
   if (cmd.action === 'prompts') return openPromptHub();
   if (cmd.action === 'workspace') return openChatWorkspaceSheet();
+  if (cmd.action === 'schedule') return openScheduleSheet();
+  if (cmd.action === 'autocontinue') return openAutoContinueSheet();
   if (cmd.action === 'model') return openModelSheet();
+  if (cmd.action === 'fast') return toggleCodexFast();
+  if (cmd.action === 'personality') return openPersonalitySheet();
   if (cmd.action === 'macscreen') return viewMacScreen();
   if (cmd.action === 'theme') return toggleTheme();
   if (cmd.action === 'approvals') return openApprovalsSheet();
   if (cmd.action === 'status') return openStatusSheet();
+  if (cmd.action === 'goal') return openGoalSheet();
+  if (cmd.action === 'skills') return openCodexSkillsSheet();
+  if (cmd.action === 'compact') return compactCodexThread();
+  if (cmd.action === 'copy') return openCopySheet();
+  if (cmd.action === 'rename') return renameChat(cur);
+  if (cmd.action === 'archive') return cur.id ? openArchiveConfirm({ id: cur.id, title: cur.title, archived: cur.archived }, { leaveChat: true }) : toast('Nothing to archive yet');
+  if (cmd.action === 'delete') return confirmDeleteCodexThread();
+  if (cmd.action === 'resume' || cmd.action === 'exit') return openSessions('all');
+  if (cmd.action === 'logout-codex') return confirmCodexLogout();
+  if (cmd.action === 'ps') return openBackgroundTerminals();
+  if (cmd.action === 'stop') return confirmStopBackgroundTerminals();
+  if (cmd.action === 'mention') { putComposer('@'); setTimeout(onType, 30); return; }
+  if (cmd.action === 'compose') return putComposer(`/${cmd.name} `);
+  if (cmd.action === 'side') return putComposer('/side ');
   if (cmd.action === 'fork') return confirmFork();
   if (cmd.action === 'btw') { $('input').value = '/btw '; autoGrow(); refreshButton(); focusComposerSoon(); return; }
   if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
@@ -3893,6 +3972,246 @@ function openApprovalsSheet() {
       toast(`Codex permissions: ${s.label}`);
     },
   })));
+}
+
+function putComposer(text) {
+  const input = $('input'); input.value = text; saveDraft(cur.key, text);
+  autoGrow(); updateSend(); focusComposerSoon();
+}
+
+function toggleCodexFast() {
+  cur.settings = normalizeSettings(cur.settings);
+  const enabled = cur.settings.codex.serviceTier !== 'fast';
+  cur.settings.codex.serviceTier = enabled ? 'fast' : '';
+  sendSettings();
+  toast(enabled ? 'Fast mode on · 1.5x speed, increased usage' : 'Fast mode off');
+}
+
+function openPersonalitySheet() {
+  cur.settings = normalizeSettings(cur.settings);
+  const active = cur.settings.codex.personality || '';
+  const choices = [
+    { id: 'friendly', label: 'Friendly', desc: 'Warm and collaborative' },
+    { id: 'pragmatic', label: 'Pragmatic', desc: 'Direct and outcome-focused' },
+    { id: 'none', label: 'None', desc: 'No personality instructions' },
+  ];
+  openSheet('Codex personality', choices.map((choice) => ({
+    ic: '', label: choice.label, desc: choice.desc, sel: active === choice.id,
+    fn: () => { cur.settings.codex.personality = choice.id; sendSettings(); toast(`Personality: ${choice.label}`); },
+  })));
+}
+
+async function codexGoal(method = 'GET', body) {
+  if (!cur.id) throw new Error('Send one message first so this chat has a session id');
+  const response = await api(`/api/codex/threads/${encodeURIComponent(cur.id)}/goal`, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Goal update failed');
+  return data;
+}
+
+function openGoalEditor(goal = null) {
+  openTextEditor({
+    title: goal ? 'Edit goal' : 'Start goal',
+    text: goal && goal.objective || '',
+    meta: 'The goal persists across turns and compaction. Maximum 4,000 characters.',
+    save: async (objective) => {
+      objective = objective.trim();
+      if (!objective || objective.length > 4000) throw new Error('Goal must be 1-4000 characters');
+      if (!cur.id) { enqueueText(`/goal ${objective}`, { displayText: `/goal ${objective}` }); return; }
+      await codexGoal('PUT', { objective, status: 'active' });
+      toast(goal ? 'Goal updated' : 'Goal started');
+    },
+  });
+}
+
+async function openGoalSheet() {
+  if (!cur.id) return openGoalEditor();
+  const inner = $('sheetInner'); inner.innerHTML = '<h3>Goal</h3><p class="sheetText">Loading persisted goal…</p>'; showSheet();
+  let goal = null;
+  try { goal = (await codexGoal()).goal || null; }
+  catch (error) { closeSheet(); return toast(String(error.message || error)); }
+  if (!goal) return openGoalEditor();
+  const status = goal.status || 'active';
+  const objective = String(goal.objective || '');
+  openSheet('Goal', [
+    { ic: status === 'active' ? '●' : 'Ⅱ', label: status === 'active' ? 'Active' : 'Paused', desc: objective, fn: () => openGoalSheet() },
+    { ic: '✎', label: 'Edit goal', desc: 'Replace the objective and reset its usage accounting', fn: () => openGoalEditor(goal) },
+    status === 'active'
+      ? { ic: 'Ⅱ', label: 'Pause', desc: 'Keep the goal but stop automatic continuation', fn: async () => { try { await codexGoal('PUT', { status: 'paused' }); toast('Goal paused'); } catch (e) { toast(e.message); } } }
+      : { ic: '▶', label: 'Resume', desc: 'Continue working toward this goal', fn: async () => { try { await codexGoal('PUT', { status: 'active' }); toast('Goal resumed'); } catch (e) { toast(e.message); } } },
+    { ic: '×', label: 'Clear goal', desc: 'Remove the persisted objective from this chat', fn: () => openSheet('Clear this goal?', [
+      { ic: '×', label: 'Clear goal', desc: objective, fn: async () => { try { await codexGoal('DELETE'); toast('Goal cleared'); } catch (e) { toast(e.message); } } },
+      { ic: '', label: 'Cancel', fn: () => {} },
+    ]) },
+  ]);
+}
+
+async function setGoalFromSlash(args) {
+  const value = String(args || '').trim();
+  if (!cur.id) {
+    if (!value || value === 'edit') { openGoalEditor(); return true; }
+    if (['pause', 'resume', 'clear'].includes(value)) { toast('Send one message before changing goal state'); return true; }
+    enqueueText(`/goal ${value}`, { displayText: `/goal ${value}` });
+    return true;
+  }
+  if (!value || value === 'edit') { openGoalSheet(); return true; }
+  try {
+    if (value === 'pause') await codexGoal('PUT', { status: 'paused' });
+    else if (value === 'resume') await codexGoal('PUT', { status: 'active' });
+    else if (value === 'clear') await codexGoal('DELETE');
+    else await codexGoal('PUT', { objective: value, status: 'active' });
+    toast(value === 'clear' ? 'Goal cleared' : value === 'pause' ? 'Goal paused' : value === 'resume' ? 'Goal resumed' : 'Goal started');
+  } catch (error) { toast(String(error.message || error)); }
+  return true;
+}
+
+async function openCodexSkillsSheet() {
+  const agent = agentType(cur.agent);
+  if (!commandsCache[agent]) commandsCache[agent] = (await (await api(`/api/commands?agent=${agent}`)).json()).commands || [];
+  const skills = commandsCache[agent].filter((command) => command.kind === 'skill');
+  if (!skills.length) return toast('No skills found');
+  openSheet('Skills', skills.map((skill) => ({ ic: '', label: skill.name, desc: skill.desc || 'Use this skill for the next request', fn: () => enqueueText(`Use the ${skill.name} skill.`) })));
+}
+
+async function compactCodexThread() {
+  if (!cur.id) return toast('Send one message before compacting');
+  try {
+    const response = await api(`/api/codex/threads/${encodeURIComponent(cur.id)}/compact`, { method: 'POST', body: '{}' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Compaction failed');
+    toast('Codex compaction started');
+  } catch (error) { toast(String(error.message || error)); }
+}
+
+async function openBackgroundTerminals() {
+  if (!cur.id) return toast('No active session yet');
+  try {
+    const response = await api(`/api/codex/threads/${encodeURIComponent(cur.id)}/background-terminals`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not list terminals');
+    const terminals = data.data || data.terminals || [];
+    openSheet('Background terminals', terminals.length ? terminals.map((terminal) => ({ ic: '›', label: terminal.command || terminal.processId || 'terminal', desc: terminal.status || terminal.cwd || '', fn: () => {} })) : [{ ic: '', label: 'No background terminals', fn: () => {} }]);
+  } catch (error) { toast(String(error.message || error)); }
+}
+
+function confirmStopBackgroundTerminals() {
+  if (!cur.id) return toast('No active session yet');
+  openSheet('Stop all background terminals?', [
+    { ic: '■', label: 'Stop all', desc: 'Terminate background commands owned by this Codex thread', fn: async () => {
+      try {
+        const response = await api(`/api/codex/threads/${encodeURIComponent(cur.id)}/background-terminals`, { method: 'DELETE' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Stop failed'); toast('Background terminals stopped');
+      } catch (error) { toast(String(error.message || error)); }
+    } },
+    { ic: '', label: 'Cancel', fn: () => {} },
+  ]);
+}
+
+function confirmDeleteCodexThread() {
+  if (!cur.id) return toast('Nothing to delete yet');
+  const id = cur.id;
+  openSheet('Permanently delete this session?', [
+    { ic: '×', label: 'Delete permanently', desc: 'Deletes this Codex transcript and descendant sessions. This cannot be undone.', fn: async () => {
+      try {
+        const response = await api(`/api/codex/threads/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Delete failed'); toast('Session deleted'); openSessions('all');
+      } catch (error) { toast(String(error.message || error)); }
+    } },
+    { ic: '', label: 'Cancel', fn: () => {} },
+  ]);
+}
+
+function confirmCodexLogout() {
+  openSheet('Log out of Codex on this box?', [
+    { ic: '×', label: 'Log out of Codex', desc: 'Future Codex turns will require signing in again', fn: async () => {
+      try {
+        const response = await api('/api/providers/logout', { method: 'POST', body: JSON.stringify({ provider: 'codex' }) });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.error) throw new Error(data.error || 'Logout failed'); toast('Logged out of Codex');
+      } catch (error) { toast(String(error.message || error)); }
+    } },
+    { ic: '', label: 'Cancel', fn: () => {} },
+  ]);
+}
+
+async function loadSessionSchedule() {
+  if (!cur.id) throw new Error('Send one message first so this chat has a session id');
+  const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/schedule`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Could not load schedule');
+  return data;
+}
+
+function defaultWakeLocalValue() {
+  const next = new Date(); next.setDate(next.getDate() + (next.getHours() >= 5 ? 1 : 0)); next.setHours(5, 0, 0, 0);
+  return new Date(next.getTime() - next.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
+function openWakeEditor() {
+  if (!cur.id) return toast('Send one message before scheduling it');
+  const inner = $('sheetInner'); inner.innerHTML = '<h3>Schedule wake-up</h3><p class="sheetText">Box will enqueue this message even after a restart or transcript compaction.</p>';
+  const when = document.createElement('input'); when.type = 'datetime-local'; when.className = 'sheetInput'; when.value = defaultWakeLocalValue(); inner.appendChild(when);
+  const message = document.createElement('textarea'); message.className = 'sheetTextarea'; message.value = 'Continue working toward the active goal.'; inner.appendChild(message);
+  const error = document.createElement('p'); error.className = 'err sheetErr'; inner.appendChild(error);
+  const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div><div>Schedule wake-up</div><div class="muted" style="font-size:12.5px">Uses this device’s timezone for the selected time</div></div>';
+  save.onclick = async () => {
+    error.textContent = '';
+    try {
+      const at = new Date(when.value); if (!Number.isFinite(at.getTime())) throw new Error('Choose a valid time');
+      const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/wakeups`, { method: 'POST', body: JSON.stringify({ at: at.toISOString(), message: message.value }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Schedule failed'); closeSheet(); toast(`Wake-up scheduled for ${at.toLocaleString()}`);
+    } catch (e) { error.textContent = String(e.message || e); }
+  };
+  inner.appendChild(save); showSheet();
+}
+
+async function openScheduleSheet() {
+  if (!cur.id) return toast('Send one message before scheduling it');
+  let data; try { data = await loadSessionSchedule(); } catch (error) { return toast(String(error.message || error)); }
+  const pending = (data.wakeups || []).filter((wake) => !wake.firedAt);
+  const rows = [
+    { ic: '＋', label: 'Schedule a wake-up', desc: 'Send a message to this session at a specific time', fn: openWakeEditor },
+    { ic: data.autoContinue.enabled ? '●' : '○', label: 'Business-hours auto-continue', desc: data.autoContinue.enabled ? `${data.autoContinue.start}–${data.autoContinue.end} · ${data.autoContinue.timeZone}` : 'Off', fn: () => openAutoContinueEditor(data.autoContinue) },
+  ];
+  for (const wake of pending) rows.push({ ic: '⏰', label: new Date(wake.at).toLocaleString(), desc: wake.message, fn: () => openSheet('Cancel this wake-up?', [
+    { ic: '×', label: 'Cancel wake-up', desc: new Date(wake.at).toLocaleString(), fn: async () => { const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/wakeups/${encodeURIComponent(wake.id)}`, { method: 'DELETE' }); toast(response.ok ? 'Wake-up canceled' : 'Could not cancel wake-up'); } },
+    { ic: '', label: 'Keep it', fn: () => {} },
+  ]) });
+  openSheet('Session schedule', rows);
+}
+
+async function openAutoContinueSheet() {
+  if (!cur.id) return toast('Send one message before enabling auto-continue');
+  try { const data = await loadSessionSchedule(); openAutoContinueEditor(data.autoContinue); }
+  catch (error) { toast(String(error.message || error)); }
+}
+
+function openAutoContinueEditor(policy) {
+  policy ||= {};
+  const inner = $('sheetInner'); inner.innerHTML = '<h3>Business-hours auto-continue</h3><p class="sheetText">When this session is idle inside the window, Box re-enqueues a guarded continuation. Paused, completed, blocked, and needs-input Codex goals are left alone.</p>';
+  const enabled = document.createElement('select'); enabled.className = 'sheetInput'; enabled.innerHTML = '<option value="on">Enabled</option><option value="off">Disabled</option>'; enabled.value = policy.enabled ? 'on' : 'off'; inner.appendChild(enabled);
+  const timeRow = document.createElement('div'); timeRow.style.display = 'grid'; timeRow.style.gridTemplateColumns = '1fr 1fr'; timeRow.style.gap = '8px';
+  const start = document.createElement('input'); start.type = 'time'; start.className = 'sheetInput'; start.value = policy.start || '05:00';
+  const end = document.createElement('input'); end.type = 'time'; end.className = 'sheetInput'; end.value = policy.end || '17:00'; timeRow.append(start, end); inner.appendChild(timeRow);
+  const zone = document.createElement('input'); zone.className = 'sheetInput'; zone.value = policy.timeZone || 'America/Los_Angeles'; zone.placeholder = 'America/Los_Angeles'; inner.appendChild(zone);
+  const days = document.createElement('select'); days.className = 'sheetInput'; days.innerHTML = '<option value="weekdays">Monday–Friday</option><option value="daily">Every day</option>'; days.value = Array.isArray(policy.days) && policy.days.includes(0) ? 'daily' : 'weekdays'; inner.appendChild(days);
+  const delay = document.createElement('input'); delay.type = 'number'; delay.min = '1'; delay.max = '60'; delay.className = 'sheetInput'; delay.value = policy.delayMinutes || 3; delay.placeholder = 'Minutes between continuations'; inner.appendChild(delay);
+  const message = document.createElement('textarea'); message.className = 'sheetTextarea'; message.value = policy.message || 'Continue working toward the active goal.'; inner.appendChild(message);
+  const error = document.createElement('p'); error.className = 'err sheetErr'; inner.appendChild(error);
+  const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div><div>Save</div><div class="muted" style="font-size:12.5px">Persists across Box restarts and compaction</div></div>';
+  save.onclick = async () => {
+    error.textContent = '';
+    try {
+      const body = { enabled: enabled.value === 'on', start: start.value, end: end.value, timeZone: zone.value.trim(), days: days.value === 'daily' ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5], delayMinutes: Number(delay.value), message: message.value };
+      const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/autocontinue`, { method: 'PUT', body: JSON.stringify(body) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Save failed'); closeSheet(); toast(body.enabled ? 'Business-hours auto-continue enabled' : 'Auto-continue disabled');
+    } catch (e) { error.textContent = String(e.message || e); }
+  };
+  inner.appendChild(save); showSheet();
 }
 
 /* ---------- rename ---------- */

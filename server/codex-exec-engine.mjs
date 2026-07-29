@@ -62,6 +62,8 @@ export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings =
   const cfgArgs = [];
   if (settings.model) cfgArgs.push('--model', settings.model);
   if (settings.reasoningEffort) cfgArgs.push('-c', `model_reasoning_effort="${settings.reasoningEffort}"`);
+  if (settings.serviceTier === 'fast') cfgArgs.push('-c', 'service_tier="fast"', '-c', 'features.fast_mode=true');
+  if (['friendly', 'pragmatic', 'none'].includes(settings.personality)) cfgArgs.push('-c', `personality="${settings.personality}"`);
   // Sandbox policy. DEFAULT = OFF (full access, no prompts) — the box is a single-user trust
   // boundary, so confining Codex just gets in the owner's way. Self-hosters who DO want Codex
   // confined can set `CODEX_SANDBOX=workspace-write` (or `read-only`) in their .env; anything

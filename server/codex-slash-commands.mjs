@@ -1,0 +1,53 @@
+// Runtime-visible Codex CLI slash commands on Linux (Codex 0.145.0).
+//
+// Keep this list in the same order as the TUI popup. `action` tells the Box web
+// client whether it has a native equivalent or should pass the exact command to
+// the Codex turn. Box-only commands are kept separately in public/app.js.
+export const CODEX_TUI_COMMANDS = [
+  { name: 'model', desc: 'Choose what model and reasoning effort to use', action: 'model' },
+  { name: 'fast', desc: '1.5x speed, increased usage', action: 'fast' },
+  { name: 'ide', desc: 'Include current selection, open files, and other IDE context', action: 'mention' },
+  { name: 'permissions', desc: 'Choose what Codex is allowed to do', action: 'approvals' },
+  { name: 'keymap', desc: 'Remap TUI shortcuts', action: 'agent-command' },
+  { name: 'vim', desc: 'Toggle Vim mode for the composer', action: 'agent-command' },
+  { name: 'experimental', desc: 'Toggle experimental features', action: 'agent-command' },
+  { name: 'approve', desc: 'Approve one retry of a recent auto-review denial', action: 'agent-command' },
+  { name: 'memories', desc: 'Configure memory use and generation', action: 'agent-command' },
+  { name: 'skills', desc: 'Use skills to improve how Codex performs specific tasks', action: 'skills' },
+  { name: 'import', desc: 'Import setup, this project, and recent chats from Claude Code', action: 'agent-command' },
+  { name: 'hooks', desc: 'View and manage lifecycle hooks', action: 'agent-command' },
+  { name: 'review', desc: 'Review my current changes and find issues', action: 'review' },
+  { name: 'rename', desc: 'Rename the current thread', action: 'rename' },
+  { name: 'new', desc: 'Start a new chat during a conversation', action: 'new' },
+  { name: 'archive', desc: 'Archive this session and exit', action: 'archive' },
+  { name: 'delete', desc: 'Permanently delete this session and exit', action: 'delete' },
+  { name: 'resume', desc: 'Resume a saved chat', action: 'resume' },
+  { name: 'fork', desc: 'Fork the current chat', action: 'fork' },
+  { name: 'init', desc: 'Create an AGENTS.md file with instructions for Codex', action: 'agent-command' },
+  { name: 'compact', desc: 'Summarize conversation to prevent hitting the context limit', action: 'compact' },
+  { name: 'plan', desc: 'Switch to Plan mode', action: 'compose' },
+  { name: 'goal', desc: 'Set or view the goal for a long-running task', action: 'goal' },
+  { name: 'agent', desc: 'Switch the active agent thread', action: 'agent-command' },
+  { name: 'side', desc: 'Start a side conversation in an ephemeral fork', action: 'side' },
+  { name: 'copy', desc: 'Copy last response as markdown', action: 'copy' },
+  { name: 'raw', desc: 'Toggle raw scrollback mode for copy-friendly terminal selection', action: 'copy' },
+  { name: 'diff', desc: 'Show git diff (including untracked files)', action: 'agent-command' },
+  { name: 'mention', desc: 'Mention a file', action: 'mention' },
+  { name: 'status', desc: 'Show current session configuration and token usage', action: 'status' },
+  { name: 'title', desc: 'Configure which items appear in the terminal title', action: 'agent-command' },
+  { name: 'statusline', desc: 'Configure which items appear in the status line', action: 'agent-command' },
+  { name: 'theme', desc: 'Choose a syntax highlighting theme', action: 'theme' },
+  { name: 'pets', desc: 'Choose or hide the terminal pet', action: 'agent-command' },
+  { name: 'mcp', desc: 'List configured MCP tools; use /mcp verbose for details', action: 'agent-command' },
+  { name: 'plugins', desc: 'Browse plugins', action: 'agent-command' },
+  { name: 'logout', desc: 'Log out of Codex', action: 'logout-codex' },
+  { name: 'exit', desc: 'Exit Codex', action: 'exit' },
+  { name: 'feedback', desc: 'Send logs to maintainers', action: 'agent-command' },
+  { name: 'ps', desc: 'List background terminals', action: 'ps' },
+  { name: 'stop', desc: 'Stop all background terminals', action: 'stop' },
+  { name: 'clear', desc: 'Clear the terminal and start a new chat', action: 'new' },
+  { name: 'personality', desc: 'Choose a communication style for Codex', action: 'personality' },
+  { name: 'subagents', desc: 'Switch the active agent thread', action: 'agent-command' },
+].map((command) => ({ ...command, kind: 'builtin' }));
+
+export const CODEX_TUI_COMMAND_NAMES = CODEX_TUI_COMMANDS.map(({ name }) => name);

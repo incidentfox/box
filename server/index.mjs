@@ -23,6 +23,9 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
+import { codexRpc } from './codex-app-server-client.mjs';
+import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
+import { assistantStopsAutoContinue, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue, shouldAutoContinue, validTimeZone } from './session-scheduler.mjs';
 import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
 } from './codex-rollout-history.mjs';
@@ -73,6 +76,7 @@ function findSessionFile(id) {
 const STATE_DIR = join(HOME, '.cc-mobile');
 mkdirSync(STATE_DIR, { recursive: true });
 const NAMES_FILE = join(STATE_DIR, 'names.json');
+const SCHEDULES_FILE = join(STATE_DIR, 'session-schedules.json');
 const UPLOAD_DIR = join(STATE_DIR, 'uploads');
 mkdirSync(UPLOAD_DIR, { recursive: true });
 // Persisted voice clips (so a garbled transcript can be re-transcribed later).
@@ -374,6 +378,8 @@ function childEnv() {
 // ---- helpers: names store -------------------------------------------------
 const loadNames = () => { try { return JSON.parse(readFileSync(NAMES_FILE, 'utf8')); } catch { return {}; } };
 const saveNames = (n) => { writeFileSync(NAMES_FILE, JSON.stringify(n, null, 2)); invalidateSessionLists(); };
+const loadSchedules = () => loadJsonCached(SCHEDULES_FILE, () => ({ version: 1, sessions: {} }));
+const saveSchedules = (state) => { writeJsonAtomic(SCHEDULES_FILE, state); rememberJsonCache(SCHEDULES_FILE, state); };
 
 // ---- helpers: sessions ----------------------------------------------------
 function readRcRegistry() {
@@ -1063,7 +1069,7 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: appCodexSandbox() },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
@@ -2352,7 +2358,119 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   res.json({ ok: true, synced: wrote });
 });
 app.get('/api/commands', requireAuth, (req, res) => res.json({
-  commands: req.query.agent === 'codex' ? scanCodexCommands() : (req.query.agent === 'gemini' || req.query.agent === 'agy' || req.query.agent === 'mac') ? [] : scanCommands(),
+  commands: req.query.agent === 'codex'
+    ? [...CODEX_TUI_COMMANDS, ...scanCodexCommands()]
+    : (req.query.agent === 'gemini' || req.query.agent === 'agy' || req.query.agent === 'mac') ? [] : scanCommands(),
+}));
+
+const codexControlRoute = (fn) => [requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const session = (loadCodex().sessions || {})[id];
+  if (!isUuid(id) || !session) return res.status(404).json({ error: 'Codex session not found' });
+  try { res.json(await fn(id, session, req)); }
+  catch (error) { res.status(400).json({ error: String(error && error.message || error) }); }
+}];
+
+// Native Codex thread controls used by Box slash commands. These operate on the
+// same persisted state as the TUI rather than sending slash text as a model prompt.
+app.get('/api/codex/threads/:id/goal', ...codexControlRoute((id) => codexRpc('thread/goal/get', { threadId: id })));
+app.put('/api/codex/threads/:id/goal', ...codexControlRoute((id, _session, req) => {
+  const objective = req.body && req.body.objective != null ? String(req.body.objective).trim() : undefined;
+  const status = req.body && req.body.status != null ? String(req.body.status) : undefined;
+  if (objective !== undefined && (!objective || objective.length > 4000)) throw new Error('Goal must be 1-4000 characters');
+  if (status !== undefined && !['active', 'paused'].includes(status)) throw new Error('Goal status must be active or paused');
+  return codexRpc('thread/goal/set', { threadId: id, ...(objective !== undefined ? { objective } : {}), ...(status !== undefined ? { status } : {}) });
+}));
+app.delete('/api/codex/threads/:id/goal', ...codexControlRoute((id) => codexRpc('thread/goal/clear', { threadId: id })));
+app.post('/api/codex/threads/:id/compact', ...codexControlRoute((id) => codexRpc('thread/compact/start', { threadId: id }, { lingerMs: 60_000 })));
+app.get('/api/codex/threads/:id/background-terminals', ...codexControlRoute((id) => codexRpc('thread/backgroundTerminals/list', { threadId: id })));
+app.delete('/api/codex/threads/:id/background-terminals', ...codexControlRoute((id) => codexRpc('thread/backgroundTerminals/clean', { threadId: id })));
+
+app.delete('/api/codex/threads/:id', ...codexControlRoute(async (id) => {
+  const state = rt(id);
+  if (state.running || state.inflight || state.queue.length || runningCodexThreadIds().has(id)) throw new Error('Stop the active turn before deleting this session');
+  await codexRpc('thread/delete', { threadId: id });
+  const codexState = loadCodex();
+  delete codexState.sessions[id];
+  saveCodex(codexState);
+  try { unlinkSync(codexMsgFile(id)); } catch {}
+  try { unlinkSync(qpath(id)); } catch {}
+  try { unlinkSync(sessionAttFile(id)); } catch {}
+  try { unlinkSync(sessionAttOff(id)); } catch {}
+  const archived = loadArchived(); archived.delete(id); saveArchived(archived);
+  const archivedAt = loadArchivedAt(); delete archivedAt[id]; saveArchivedAt(archivedAt);
+  const favorites = loadFavorites(); favorites.delete(id); saveFavorites(favorites);
+  const names = loadNames(); delete names[id]; saveNames(names);
+  const schedules = loadSchedules(); if (schedules.sessions) { delete schedules.sessions[id]; saveSchedules(schedules); }
+  deleteRunning(id); RT.delete(resolveKey(id)); ALIAS.delete(id);
+  return { ok: true };
+}));
+
+function scheduledSessionAgent(id) {
+  if ((loadCodex().sessions || {})[id]) return 'codex';
+  if ((loadGemini().sessions || {})[id]) return 'gemini';
+  if ((loadAgy().sessions || {})[id]) return 'agy';
+  if ((loadMac().sessions || {})[id]) return 'mac';
+  if (findSessionFile(id)) return 'claude';
+  return '';
+}
+const scheduleRoute = (fn) => [requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  const agent = scheduledSessionAgent(id);
+  if (!agent) return res.status(404).json({ error: 'Session not found' });
+  try { res.json(await fn(id, agent, req)); }
+  catch (error) { res.status(400).json({ error: String(error && error.message || error) }); }
+}];
+function scheduleRecord(state, id, agent) {
+  state.sessions ||= {};
+  state.sessions[id] ||= { agent, wakeups: [], autoContinue: normalizeAutoContinue({}) };
+  state.sessions[id].agent = agent;
+  state.sessions[id].wakeups = Array.isArray(state.sessions[id].wakeups) ? state.sessions[id].wakeups : [];
+  state.sessions[id].autoContinue = normalizeAutoContinue(state.sessions[id].autoContinue || {});
+  return state.sessions[id];
+}
+
+app.get('/api/sessions/:id/schedule', ...scheduleRoute((id, agent) => {
+  const state = loadSchedules();
+  const record = scheduleRecord(state, id, agent);
+  return { sessionId: id, agent, wakeups: record.wakeups, autoContinue: record.autoContinue };
+}));
+app.post('/api/sessions/:id/wakeups', ...scheduleRoute((id, agent, req) => {
+  const at = new Date(String(req.body && req.body.at || ''));
+  if (!Number.isFinite(at.getTime())) throw new Error('Choose a valid wake time');
+  const message = String(req.body && req.body.message || DEFAULT_CONTINUE_MESSAGE).trim().slice(0, 4000);
+  if (!message) throw new Error('Wake message cannot be empty');
+  const state = loadSchedules();
+  const record = scheduleRecord(state, id, agent);
+  const wakeup = { id: randomUUID(), at: at.toISOString(), message, createdAt: new Date().toISOString(), firedAt: null };
+  record.wakeups.push(wakeup);
+  saveSchedules(state);
+  return { ok: true, wakeup };
+}));
+app.delete('/api/sessions/:id/wakeups/:wakeId', ...scheduleRoute((id, agent, req) => {
+  const state = loadSchedules();
+  const record = scheduleRecord(state, id, agent);
+  const before = record.wakeups.length;
+  record.wakeups = record.wakeups.filter((wake) => wake.id !== req.params.wakeId);
+  if (record.wakeups.length === before) throw new Error('Wake-up not found');
+  saveSchedules(state);
+  return { ok: true };
+}));
+app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
+  const raw = req.body || {};
+  if (raw.timeZone && !validTimeZone(raw.timeZone)) throw new Error('Invalid IANA timezone');
+  const state = loadSchedules();
+  const record = scheduleRecord(state, id, agent);
+  record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, ...raw });
+  saveSchedules(state);
+  return { ok: true, autoContinue: record.autoContinue };
+}));
+app.delete('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent) => {
+  const state = loadSchedules();
+  const record = scheduleRecord(state, id, agent);
+  record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, enabled: false });
+  saveSchedules(state);
+  return { ok: true, autoContinue: record.autoContinue };
 }));
 
 // ---- Accounts: pool/switch Claude accounts via an external account broker -----
@@ -3849,6 +3967,93 @@ function enqueue(extKey, msg) {
   runWorker(s);
   return msg.qid;
 }
+
+let scheduleTickRunning = false;
+function scheduledNeedsInput(id, agent, session) {
+  if (session.waitingActive) return true;
+  try {
+    let messages = [];
+    if (agent === 'codex') messages = loadCodexMessages(id, (loadCodex().sessions || {})[id]);
+    else if (agent === 'gemini') messages = ((loadGemini().sessions || {})[id] || {}).messages || [];
+    else if (agent === 'agy') messages = ((loadAgy().sessions || {})[id] || {}).messages || [];
+    else if (agent === 'mac') messages = ((loadMac().sessions || {})[id] || {}).messages || [];
+    else messages = fullSessionHistory(id).messages || [];
+    const last = [...messages].reverse().find((message) => message && message.role === 'assistant');
+    const text = (last && last.parts || []).filter((part) => part && part.t === 'text').map((part) => part.text || '').join('\n').trim();
+    return assistantStopsAutoContinue(text);
+  } catch { return false; }
+}
+async function runScheduleTick(now = new Date()) {
+  if (scheduleTickRunning) return;
+  scheduleTickRunning = true;
+  try {
+    const state = loadSchedules();
+    let dirty = false;
+    for (const [id] of Object.entries(state.sessions || {})) {
+      // A persisted policy may outlive a deleted transcript. Never recreate a
+      // phantom session solely because a stale schedule still names its agent.
+      const agent = scheduledSessionAgent(id);
+      if (!agent) continue;
+      const record = scheduleRecord(state, id, agent);
+      const session = rt(id);
+
+      for (const wake of dueWakeups(record.wakeups, now)) {
+        enqueue(id, {
+          text: wake.message || DEFAULT_CONTINUE_MESSAGE,
+          displayText: `⏰ Scheduled wake-up · ${new Date(wake.at).toLocaleString('en-US', { timeZone: record.autoContinue.timeZone })}`,
+          mode: 'normal', agent, cwd: session.cwd || undefined,
+        });
+        wake.firedAt = now.toISOString();
+        dirty = true;
+      }
+
+      let decision = shouldAutoContinue({
+        policy: record.autoContinue,
+        now,
+        busy: session.running || !!session.inflight || session.queue.length > 0,
+        needsInput: scheduledNeedsInput(id, agent, session),
+      });
+      if (!decision.due) continue;
+
+      // Codex goals have an authoritative persisted status. A paused, complete,
+      // or blocked goal must never be prodded by the business-hours watchdog.
+      let goalStatus = null;
+      if (agent === 'codex') {
+        try { goalStatus = (await codexRpc('thread/goal/get', { threadId: id })).goal?.status || null; }
+        catch {}
+        // The goal lookup crosses a process boundary. Re-check the live queue and
+        // input state afterwards so a user message that arrived during the RPC
+        // cannot race with an automatic continuation.
+        decision = shouldAutoContinue({
+          policy: record.autoContinue,
+          now,
+          goalStatus,
+          busy: session.running || !!session.inflight || session.queue.length > 0,
+          needsInput: scheduledNeedsInput(id, agent, session),
+        });
+        if (!decision.due) continue;
+      }
+
+      enqueue(id, {
+        text: decision.policy.message,
+        displayText: '↻ Business-hours auto-continue',
+        mode: 'normal', agent, cwd: session.cwd || undefined,
+      });
+      record.autoContinue = {
+        ...decision.policy,
+        lastEnqueuedAt: now.getTime(),
+        windowDate: decision.clock.date,
+        windowCount: decision.policy.windowCount + 1,
+      };
+      dirty = true;
+    }
+    if (dirty) saveSchedules(state);
+  } finally {
+    scheduleTickRunning = false;
+  }
+}
+setTimeout(() => runScheduleTick().catch(() => {}), 1500).unref?.();
+setInterval(() => runScheduleTick().catch(() => {}), 30_000).unref?.();
 
 // `lastActivityAt` is only advanced by live tail events, and the tail runs ONLY while someone
 // is subscribed. A Codex turn that has been working away unwatched therefore reports the moment
