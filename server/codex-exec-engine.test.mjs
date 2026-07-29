@@ -79,6 +79,14 @@ const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
   }
 }
 
+// Per-thread TUI preferences are forwarded on every exec/resume turn.
+{
+  const a = buildCodexArgs({ cwd: '/work', prompt: 'x', settings: { serviceTier: 'fast', personality: 'pragmatic' } });
+  assert.ok(a.includes('service_tier="fast"'));
+  assert.ok(a.includes('features.fast_mode=true'));
+  assert.ok(a.includes('personality="pragmatic"'));
+}
+
 // 7. Opt-in sandbox (settings.sandbox / CODEX_SANDBOX): `--sandbox <mode>` is present and — crucially
 //    for resume — comes BEFORE the `resume` token (it's a `codex exec` option, not a `resume` one),
 //    and no bypass flags leak in.
