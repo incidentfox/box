@@ -3,8 +3,8 @@ import { EventEmitter } from 'node:events';
 import { createCodexRpc } from './codex-app-server-client.mjs';
 
 function fakeSpawn(command, args) {
-  assert.equal(command, 'codex');
-  assert.deepEqual(args, ['app-server', '--stdio']);
+  assert.equal(command, 'bash');
+  assert.deepEqual(args, ['-lc', 'exec codex app-server --stdio']);
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();

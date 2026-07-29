@@ -7,7 +7,10 @@ import { spawn } from 'node:child_process';
 export function createCodexRpc({ spawnImpl = spawn, timeoutMs = 10000 } = {}) {
   return function codexRpc(method, params = {}, options = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawnImpl('codex', ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      // Match CodexExecEngine's login-shell resolution. The long-running Box
+      // service can inherit a stale systemd PATH even when the current Codex is
+      // correctly installed first in the factory user's login PATH.
+      const child = spawnImpl('bash', ['-lc', 'exec codex app-server --stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
       let settled = false;
