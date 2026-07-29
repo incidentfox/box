@@ -2285,6 +2285,8 @@ async function openChat(s) {
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
   setNewChatIntro(!s.id && !(s.carry && s.carry.length));
+  renderSessionModes(); // never flash the previous chat's active modes while this one loads
+  refreshSessionModes();
   // Linear-agent session → show an approval bar (merge PR / mark done / archive)
   const inc = (s.subcat === 'linear' || /linear-dispatch/.test(s.cwd || '')) && (String(s.cwd || '') + ' ' + (s.title || '')).match(/INC-\d+/);
   renderLinearBar(inc ? inc[0] : null, s.id);
@@ -2328,6 +2330,7 @@ async function openChat(s) {
   }
   connectWS();
   refreshAttnBadge();
+  refreshSessionModesSoon();
 }
 async function renderLinearBar(inc, sessionId) {
   const bar = $('linearBar'); if (!bar) return;
@@ -2876,17 +2879,17 @@ function onServer(o) {
   // hadHistory=false, renders the user bubble from turn_start, THEN learns its id here. If
   // the WS later reconnects mid-first-turn, onSync re-adds the user bubble (guarded only by
   // !cur.hadHistory) → the message renders twice. Marking it now suppresses that re-add.
-  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; setChatTitle(o.title); } refreshSessionsSoon(); return; }
+  if (o.type === 'session') { cur.id = o.id; cur.hadHistory = true; if (o.agent) setAgent(o.agent); if (o.parentId) cur.parentId = o.parentId; if (o.parentTitle) cur.parentTitle = o.parentTitle; if (o.title) { cur.title = o.title; setChatTitle(o.title); } refreshSessionsSoon(); refreshSessionModesSoon(); return; }
   if (o.type === 'settings') { cur.settings = normalizeSettings(o.settings); if (o.cwd) cur.cwd = o.cwd; refreshAgentChip(); return; }
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
   // force-queue + Stop), so the message doesn't render twice.
   if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', []); return; }
-  if (o.type === 'queue') return renderQueue(o.queue);
+  if (o.type === 'queue') { renderQueue(o.queue); refreshSessionModesSoon(); return; }
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
   if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
   if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images); }
-  if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); return; }
+  if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); refreshSessionModesSoon(); return; }
   if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
   else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
   else if (o.type === 'tool') {
@@ -3009,7 +3012,7 @@ function onSync(o) {
     const lastTool = [...parts].reverse().find((p) => (p.t === 'tool' || p.name) && p.name);
     if (lastTool && lastTool.name === 'AskUserQuestion' && !lastTool.result) { running = false; killGhostIndicators(); }
   } else running = false;
-  renderQueue(o.queue); refreshButton(); scrollBottom();
+  renderQueue(o.queue); refreshButton(); scrollBottom(); refreshSessionModesSoon();
 }
 let raf = 0, lastLiveRenderAt = 0;
 // While a reply streams we used to re-run md() over the ENTIRE accumulated text on every
@@ -3066,6 +3069,7 @@ function finishTurn(o) {
   if (o.sessionId && !cur.id) cur.id = o.sessionId;
   if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); setChatTitle(cur.title); }
   refreshSessionsSoon();
+  refreshSessionModesSoon();
   maybeScroll();
 }
 
@@ -4001,9 +4005,94 @@ function openPersonalitySheet() {
   })));
 }
 
-async function codexGoal(method = 'GET', body) {
-  if (!cur.id) throw new Error('Send one message first so this chat has a session id');
-  const response = await api(`/api/codex/threads/${encodeURIComponent(cur.id)}/goal`, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+let sessionModesRefreshSeq = 0;
+let sessionModesRefreshTimer = null;
+
+function modeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function modeDaysLabel(days) {
+  const normalized = Array.isArray(days) ? [...new Set(days.map(Number))].sort().join(',') : '';
+  if (normalized === '0,1,2,3,4,5,6') return 'Every day';
+  if (normalized === '1,2,3,4,5') return 'Mon–Fri';
+  const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return normalized.split(',').filter(Boolean).map((day) => labels[Number(day)]).filter(Boolean).join(', ') || 'Selected days';
+}
+
+function modeZoneLabel(timeZone) {
+  if (timeZone === 'America/Los_Angeles') return 'Pacific';
+  return String(timeZone || 'local time').split('/').pop().replace(/_/g, ' ');
+}
+
+function modeWakeLabel(at) {
+  const date = new Date(at);
+  if (!Number.isFinite(date.getTime())) return 'scheduled time';
+  return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date);
+}
+
+function renderSessionModes({ goal = null, schedule = null } = {}) {
+  const bar = $('sessionModes');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const add = (kind, glyph, title, description, fn) => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = `sessionMode ${kind}`;
+    const icon = document.createElement('span'); icon.className = 'sessionModeGlyph'; icon.textContent = glyph;
+    const copy = document.createElement('span'); copy.className = 'sessionModeCopy';
+    const heading = document.createElement('span'); heading.className = 'sessionModeTitle'; heading.textContent = title;
+    const detail = document.createElement('span'); detail.className = 'sessionModeDesc'; detail.textContent = description;
+    copy.append(heading, detail); button.append(icon, copy);
+    button.title = `${title} — ${description}`; button.onclick = fn; bar.appendChild(button);
+  };
+
+  if (goal && goal.status === 'active' && modeText(goal.objective)) {
+    add('goal', '◎', 'Active goal', modeText(goal.objective), openGoalSheet);
+  }
+
+  const pending = ((schedule && schedule.wakeups) || [])
+    .filter((wake) => wake && !wake.firedAt && Number.isFinite(Date.parse(wake.at)))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  if (pending.length) {
+    const next = pending[0];
+    const title = pending.length === 1 ? `Wake · ${modeWakeLabel(next.at)}` : `${pending.length} wakes · next ${modeWakeLabel(next.at)}`;
+    add('wake', '⏰', title, `Sends “${modeText(next.message) || 'Continue working toward the active goal.'}”`, openScheduleSheet);
+  }
+
+  const policy = schedule && schedule.autoContinue;
+  if (policy && policy.enabled) {
+    const title = `Auto-continue · ${policy.start || '05:00'}–${policy.end || '17:00'}`;
+    const cadence = Math.max(1, Number(policy.delayMinutes) || 3);
+    const description = `${modeDaysLabel(policy.days)} ${modeZoneLabel(policy.timeZone)} · every ${cadence}m when idle · sends “${modeText(policy.message)}”`;
+    add('auto', '↻', title, description, openAutoContinueSheet);
+  }
+
+  bar.classList.toggle('hidden', bar.childElementCount === 0);
+}
+
+async function refreshSessionModes() {
+  const bar = $('sessionModes');
+  if (!bar) return;
+  const id = cur && cur.id;
+  const agent = cur && agentType(cur.agent);
+  const seq = ++sessionModesRefreshSeq;
+  if (!id) { renderSessionModes(); return; }
+  const [goal, schedule] = await Promise.all([
+    agent === 'codex' ? codexGoal('GET', undefined, id).then((data) => data.goal || null).catch(() => null) : Promise.resolve(null),
+    loadSessionSchedule(id).catch(() => null),
+  ]);
+  if (seq !== sessionModesRefreshSeq || !cur || cur.id !== id) return;
+  renderSessionModes({ goal, schedule });
+}
+
+function refreshSessionModesSoon(delay = 120) {
+  clearTimeout(sessionModesRefreshTimer);
+  sessionModesRefreshTimer = setTimeout(() => { sessionModesRefreshTimer = null; refreshSessionModes(); }, delay);
+}
+
+async function codexGoal(method = 'GET', body, sessionId = cur.id) {
+  if (!sessionId) throw new Error('Send one message first so this chat has a session id');
+  const response = await api(`/api/codex/threads/${encodeURIComponent(sessionId)}/goal`, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || 'Goal update failed');
   return data;
@@ -4019,6 +4108,7 @@ function openGoalEditor(goal = null) {
       if (!objective || objective.length > 4000) throw new Error('Goal must be 1-4000 characters');
       if (!cur.id) { enqueueText(`/goal ${objective}`, { displayText: `/goal ${objective}` }); return; }
       await codexGoal('PUT', { objective, status: 'active' });
+      await refreshSessionModes();
       toast(goal ? 'Goal updated' : 'Goal started');
     },
   });
@@ -4037,10 +4127,10 @@ async function openGoalSheet() {
     { ic: status === 'active' ? '●' : 'Ⅱ', label: status === 'active' ? 'Active' : 'Paused', desc: objective, fn: () => openGoalSheet() },
     { ic: '✎', label: 'Edit goal', desc: 'Replace the objective and reset its usage accounting', fn: () => openGoalEditor(goal) },
     status === 'active'
-      ? { ic: 'Ⅱ', label: 'Pause', desc: 'Keep the goal but stop automatic continuation', fn: async () => { try { await codexGoal('PUT', { status: 'paused' }); toast('Goal paused'); } catch (e) { toast(e.message); } } }
-      : { ic: '▶', label: 'Resume', desc: 'Continue working toward this goal', fn: async () => { try { await codexGoal('PUT', { status: 'active' }); toast('Goal resumed'); } catch (e) { toast(e.message); } } },
+      ? { ic: 'Ⅱ', label: 'Pause', desc: 'Keep the goal but stop automatic continuation', fn: async () => { try { await codexGoal('PUT', { status: 'paused' }); await refreshSessionModes(); toast('Goal paused'); } catch (e) { toast(e.message); } } }
+      : { ic: '▶', label: 'Resume', desc: 'Continue working toward this goal', fn: async () => { try { await codexGoal('PUT', { status: 'active' }); await refreshSessionModes(); toast('Goal resumed'); } catch (e) { toast(e.message); } } },
     { ic: '×', label: 'Clear goal', desc: 'Remove the persisted objective from this chat', fn: () => openSheet('Clear this goal?', [
-      { ic: '×', label: 'Clear goal', desc: objective, fn: async () => { try { await codexGoal('DELETE'); toast('Goal cleared'); } catch (e) { toast(e.message); } } },
+      { ic: '×', label: 'Clear goal', desc: objective, fn: async () => { try { await codexGoal('DELETE'); await refreshSessionModes(); toast('Goal cleared'); } catch (e) { toast(e.message); } } },
       { ic: '', label: 'Cancel', fn: () => {} },
     ]) },
   ]);
@@ -4060,6 +4150,7 @@ async function setGoalFromSlash(args) {
     else if (value === 'resume') await codexGoal('PUT', { status: 'active' });
     else if (value === 'clear') await codexGoal('DELETE');
     else await codexGoal('PUT', { objective: value, status: 'active' });
+    await refreshSessionModes();
     toast(value === 'clear' ? 'Goal cleared' : value === 'pause' ? 'Goal paused' : value === 'resume' ? 'Goal resumed' : 'Goal started');
   } catch (error) { toast(String(error.message || error)); }
   return true;
@@ -4136,9 +4227,9 @@ function confirmCodexLogout() {
   ]);
 }
 
-async function loadSessionSchedule() {
-  if (!cur.id) throw new Error('Send one message first so this chat has a session id');
-  const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/schedule`);
+async function loadSessionSchedule(sessionId = cur.id) {
+  if (!sessionId) throw new Error('Send one message first so this chat has a session id');
+  const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}/schedule`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || 'Could not load schedule');
   return data;
@@ -4162,7 +4253,7 @@ function openWakeEditor() {
       const at = new Date(when.value); if (!Number.isFinite(at.getTime())) throw new Error('Choose a valid time');
       const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/wakeups`, { method: 'POST', body: JSON.stringify({ at: at.toISOString(), message: message.value }) });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'Schedule failed'); closeSheet(); toast(`Wake-up scheduled for ${at.toLocaleString()}`);
+      if (!response.ok) throw new Error(data.error || 'Schedule failed'); await refreshSessionModes(); closeSheet(); toast(`Wake-up scheduled for ${at.toLocaleString()}`);
     } catch (e) { error.textContent = String(e.message || e); }
   };
   inner.appendChild(save); showSheet();
@@ -4177,7 +4268,7 @@ async function openScheduleSheet() {
     { ic: data.autoContinue.enabled ? '●' : '○', label: 'Business-hours auto-continue', desc: data.autoContinue.enabled ? `${data.autoContinue.start}–${data.autoContinue.end} · ${data.autoContinue.timeZone}` : 'Off', fn: () => openAutoContinueEditor(data.autoContinue) },
   ];
   for (const wake of pending) rows.push({ ic: '⏰', label: new Date(wake.at).toLocaleString(), desc: wake.message, fn: () => openSheet('Cancel this wake-up?', [
-    { ic: '×', label: 'Cancel wake-up', desc: new Date(wake.at).toLocaleString(), fn: async () => { const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/wakeups/${encodeURIComponent(wake.id)}`, { method: 'DELETE' }); toast(response.ok ? 'Wake-up canceled' : 'Could not cancel wake-up'); } },
+    { ic: '×', label: 'Cancel wake-up', desc: new Date(wake.at).toLocaleString(), fn: async () => { const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/wakeups/${encodeURIComponent(wake.id)}`, { method: 'DELETE' }); if (response.ok) await refreshSessionModes(); toast(response.ok ? 'Wake-up canceled' : 'Could not cancel wake-up'); } },
     { ic: '', label: 'Keep it', fn: () => {} },
   ]) });
   openSheet('Session schedule', rows);
@@ -4208,7 +4299,7 @@ function openAutoContinueEditor(policy) {
       const body = { enabled: enabled.value === 'on', start: start.value, end: end.value, timeZone: zone.value.trim(), days: days.value === 'daily' ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5], delayMinutes: Number(delay.value), message: message.value };
       const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/autocontinue`, { method: 'PUT', body: JSON.stringify(body) });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'Save failed'); closeSheet(); toast(body.enabled ? 'Business-hours auto-continue enabled' : 'Auto-continue disabled');
+      if (!response.ok) throw new Error(data.error || 'Save failed'); await refreshSessionModes(); closeSheet(); toast(body.enabled ? 'Business-hours auto-continue enabled' : 'Auto-continue disabled');
     } catch (e) { error.textContent = String(e.message || e); }
   };
   inner.appendChild(save); showSheet();
