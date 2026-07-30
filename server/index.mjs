@@ -571,6 +571,7 @@ function makeFileReadCache(fn) {
   FILE_READ_CACHES.push(cache);
   return (file, ...rest) => cachedFileRead(cache, file, () => fn(file, ...rest));
 }
+const cachedCodexRolloutState = makeFileReadCache(codexRolloutState);
 function sessionTitle(file) {
   try {
     const lines = readFileSync(file, 'utf8').split('\n');
@@ -1764,7 +1765,9 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     let rollout = null, liveState = null;
     if (codexProcessIds.has(s.id) || s.source === 'native') {
       rollout = s.transcriptPath || findCodexRollout(CODEX_HOME, s.id);
-      liveState = codexRolloutState(rollout);
+      // Each filter has its own short-lived list cache. Reuse the 4 MB tail parse
+      // across those rebuilds while the rollout's mtime and size are unchanged.
+      liveState = cachedCodexRolloutState(rollout);
       if (codexProcessIds.has(s.id) && liveState.busy) codexBusyIds.add(s.id);
     }
     return ({
