@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 
 const require = createRequire(import.meta.url);
 const pty = require('node-pty');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 // ── Cross-platform process helpers ───────────────────────────────────────────
 // Box runs on both Linux servers and macOS. A few of the process inspections below
@@ -29,21 +29,29 @@ const { execSync } = require('child_process');
 // portable path so behaviour is identical on both.
 //
 // `pgrep -a` (print the full command line) is GNU/procps-only — macOS pgrep prints just
-// the PID — so get the PID list with portable `pgrep -f`, then read each command line via
-// portable `ps -o command=`. Returns the same "PID<space>command\n…" text the old
-// `pgrep -af` produced, so every caller's line-parsing is unchanged.
+// the PID — so get the PID list with portable `pgrep -f`, then read command lines via
+// portable `ps`. Fetch PIDs in batches: spawning one `ps` per match made a session-list
+// refresh take 3+ seconds on a busy agent box where many command lines mention "codex".
+// Returns the same "PID<space>command\n…" shape the old `pgrep -af` produced.
 export function pgrepFull(pattern) {
-  const q = `'${String(pattern).replace(/'/g, `'\\''`)}'`;
   let pids = [];
   try {
-    pids = execSync(`pgrep -f -- ${q} 2>/dev/null || true`, { encoding: 'utf8', timeout: 4000 })
+    pids = execFileSync('pgrep', ['-f', '--', String(pattern)], { encoding: 'utf8', timeout: 4000 })
       .split('\n').map((s) => s.trim()).filter(Boolean);
   } catch {}
   const lines = [];
-  for (const pid of pids) {
-    let cmd = '';
-    try { cmd = execSync(`ps -p ${Number(pid)} -o command= 2>/dev/null`, { encoding: 'utf8', timeout: 2000 }).trim(); } catch {}
-    if (cmd) lines.push(`${pid} ${cmd}`);
+  for (let i = 0; i < pids.length; i += 200) {
+    const batch = pids.slice(i, i + 200).map(Number).filter(Number.isInteger);
+    if (!batch.length) continue;
+    let out = '';
+    try {
+      out = execFileSync('ps', ['-ww', '-p', batch.join(','), '-o', 'pid=', '-o', 'command='], { encoding: 'utf8', timeout: 4000 });
+    } catch (e) {
+      // A short-lived process may disappear between pgrep and ps. ps still writes
+      // surviving rows before its non-zero exit, so keep that partial stdout.
+      out = e && e.stdout ? String(e.stdout) : '';
+    }
+    for (const line of out.split('\n')) if (line.trim()) lines.push(line.trim());
   }
   return lines.join('\n');
 }
