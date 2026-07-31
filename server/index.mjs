@@ -42,6 +42,7 @@ import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
+import { isVobCallSession } from './vob-session-category.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -1826,14 +1827,17 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const statusOf = (id) => archived.has(id) ? 'archived' : (RUNNING.has(id) || codexBusyIds.has(id)) ? 'working' : (scan.get(id) && scan.get(id).needsInput) ? 'needs_input' : liveIds.has(id) ? 'live' : 'idle';
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
-  // counts over ALL sessions. Auto sessions are tallied only under `auto` (and
-  // `archived` if archived) so they never inflate All/Working/Needs input/Live.
+  const isVob = (id) => isVobCallSession(byId.get(id) || {});
+  // counts over ALL sessions. Auto and VOB call sessions are tallied only under
+  // their own category (and `archived` if archived) so they never inflate
+  // All/Working/Needs input/Live.
   // autoSub breaks the auto total into subcategories for the Automated sub-tabs.
-  const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, auto: 0 };
+  const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
+    if (isVobCallSession(f)) { counts.vob++; continue; }
     if (favorites.has(f.id)) counts.favorites++;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
@@ -1843,12 +1847,13 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const [fbase, fsub] = String(filter || 'all').split(':');
   let cand;
   if (filter === 'archived') cand = items.filter((f) => archived.has(f.id));
-  else if (filter === 'favorites') cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && favorites.has(f.id));
+  else if (filter === 'favorites') cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && favorites.has(f.id));
+  else if (filter === 'vob') cand = items.filter((f) => !archived.has(f.id) && isVobCallSession(f));
   else if (fbase === 'auto') cand = items.filter((f) => !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
-  else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && statusOf(f.id) === filter);
-  else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
+  else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
+  else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f));
   const chosen = [], seen = new Set();
-  if (!filter || filter === 'all') { for (const id of liveIds) if (!archived.has(id) && !isAuto(id)) { chosen.push(byId.get(id) || { id, file: null, mtime: 0 }); seen.add(id); } }
+  if (!filter || filter === 'all') { for (const id of liveIds) if (!archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(byId.get(id) || { id, file: null, mtime: 0 }); seen.add(id); } }
   for (const f of cand) { if (chosen.length >= limit) break; if (!seen.has(f.id)) { chosen.push(f); seen.add(f.id); } }
   const out = chosen.map((s) => {
     const r = rc[s.id];
@@ -1865,6 +1870,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     // ai-title). Legacy box renames in names.json still win over an ai-title so old
     // names aren't lost. rcName ("box-xxxx") is a last-resort surface label.
     const tm = s.file ? titleMeta(s.file) : { custom: '', ai: '' };
+    const vob = isVobCallSession({ ...s, cwd });
     return {
       id: s.id,
       agent: s.agent || 'claude',
@@ -1874,7 +1880,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       parentId: s.parentId || null, parentTitle: s.parentTitle || '',
       live: !!r || !!lb || cxLive, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
       favorite: favorites.has(s.id),
-      status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : 'main',
+      status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : vob ? 'vob' : 'main',
       subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
