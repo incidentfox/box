@@ -2397,6 +2397,13 @@ function fmtTs(ts) {
   if (diff < 86400000) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
+function fmtClock(ts) {
+  const d = new Date(ts);
+  if (!Number.isFinite(d.getTime())) return '';
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+}
 function historyParts(m) {
   if (!m || typeof m !== 'object') return [];
   if (Array.isArray(m.parts)) return m.parts.filter((p) => p && typeof p === 'object');
@@ -2449,7 +2456,12 @@ function buildHistElement(m) {
     const acts = document.createElement('div'); acts.className = 'msgActions';
     const cpBtn = document.createElement('button'); cpBtn.className = 'iconbtn ghost msgCopy'; cpBtn.title = 'copy'; cpBtn.innerHTML = ICONS.copy;
     cpBtn.onclick = () => writeClipboardText(rawText, 'Copied!');
-    if (m.ts) { const ts = document.createElement('span'); ts.className = 'msgTs'; ts.textContent = fmtTs(m.ts); acts.appendChild(ts); }
+    if (m.ts) {
+      const ts = document.createElement('span'); ts.className = 'msgTs';
+      ts.textContent = `${role === 'assistant' ? 'Response started' : 'Sent'} ${fmtTs(m.ts)}`;
+      ts.title = new Date(m.ts).toLocaleString();
+      acts.appendChild(ts);
+    }
     if (cur.id && m._idx != null) {
       const forkBtn = document.createElement('button'); forkBtn.className = 'iconbtn ghost msgCopy'; forkBtn.title = 'fork from here'; forkBtn.innerHTML = ICONS.branch;
       forkBtn.onclick = (e) => { e.stopPropagation(); confirmFork({ throughIndex: Number(m._idx) }); };
@@ -2752,10 +2764,17 @@ function renderQueue(items) {
   area.classList.toggle('hidden', all.length === 0);
   for (const q of all) {
     const imgs = Array.isArray(q.images) ? q.images : [];
-    const el = document.createElement('div'); el.className = 'qchip' + (q.running ? ' running' : '');
-    el.innerHTML = `${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qt"></span><span class="qx"></span>`;
+    const wakeFired = /^⏰ Scheduled wake-up\s*·/.test(q.text || '');
+    const el = document.createElement('div'); el.className = 'qchip' + (q.running ? ' running' : '') + (wakeFired ? ' wakeFired' : '');
+    el.innerHTML = `${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qcopy"><span class="qt"></span></span><span class="qx"></span>`;
     if (imgs.length) { const th = el.querySelector('.qthumbs'); imgs.forEach((p) => { const im = document.createElement('img'); im.src = imgUrl(p); th.appendChild(im); }); }
-    el.querySelector('.qt').textContent = q.text || (imgs.length ? `${imgs.length} image${imgs.length > 1 ? 's' : ''}` : '');
+    const queueText = q.text || (imgs.length ? `${imgs.length} image${imgs.length > 1 ? 's' : ''}` : '');
+    el.querySelector('.qt').textContent = wakeFired ? queueText.replace(/^⏰ Scheduled wake-up/, '⏰ Wake-up fired') : queueText;
+    if (wakeFired) {
+      const status = document.createElement('span'); status.className = 'qstatus';
+      status.textContent = 'Waiting in queue for the current turn to finish';
+      el.querySelector('.qcopy').appendChild(status);
+    }
     const x = el.querySelector('.qx'); x.innerHTML = ICONS.close;
     if (q.running) {
       x.style.opacity = '0'; x.style.pointerEvents = 'none';
@@ -2794,10 +2813,11 @@ function renderLiveProgress() {
   if (!live || !live.progress || !live.progress.isConnected) return;
   const ageMs = Math.max(0, Date.now() - (live.lastActivityAt || Date.now()));
   const stale = ageMs >= 90_000;
+  const started = fmtClock(live.startedAt);
   live.progress.classList.toggle('stale', stale);
   live.progressText.textContent = stale
-    ? `Still running · last activity ${activityAge(ageMs)}`
-    : `${live.activityLabel || 'Working'} · ${activityAge(ageMs)}`;
+    ? `Still running${started ? ` since ${started}` : ''} · last activity ${activityAge(ageMs)}`
+    : `${live.activityLabel || 'Working'} · ${activityAge(ageMs)}${started ? ` · started ${started}` : ''}`;
   live.progress.title = stale && live.activityLabel ? `Last phase: ${live.activityLabel}` : '';
   // Keep the status immediately below the newest tool/text block. Otherwise a long
   // tool-heavy turn leaves it above the fold and still looks frozen at the bottom.
@@ -2825,7 +2845,8 @@ function startAssistant() {
   body.appendChild(progress);
   const loading = document.createElement('div'); loading.className = 'loading'; loading.innerHTML = '<span></span><span></span><span></span>'; body.appendChild(loading);
   const textEl = document.createElement('div'); textEl.className = 'cursor mdBlock'; textEl._rawMdText = ''; body.appendChild(textEl);
-  live = { body, raw: '', copyText: '', textEl, loading, progress, progressText: progress.querySelector('.liveProgressText'), activityLabel: 'Starting', lastActivityAt: Date.now(), progressTimer: null };
+  const userTs = Date.parse((liveUser && liveUser.dataset && liveUser.dataset.ts) || '');
+  live = { body, raw: '', copyText: '', textEl, loading, progress, progressText: progress.querySelector('.liveProgressText'), activityLabel: 'Starting', lastActivityAt: Date.now(), startedAt: Number.isFinite(userTs) ? userTs : Date.now(), progressTimer: null };
   live.progressTimer = setInterval(renderLiveProgress, 5000);
   if (pendingLiveActivity) { const pending = pendingLiveActivity; pendingLiveActivity = null; setLiveActivity(pending.label, pending.at); }
   running = true; refreshButton(); scrollBottom();
@@ -2856,6 +2877,7 @@ function addUser(text, images) {
   lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
+  wrap.dataset.ts = new Date().toISOString();
   const body = document.createElement('div'); body.className = 'body';
   if (images && images.length) {
     body.appendChild(userAttachmentGrid(images));
