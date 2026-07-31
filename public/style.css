@@ -475,7 +475,9 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .queueArea { display: flex; flex-direction: column; gap: 6px; padding: 2px 2px 8px; }
 .qchip { display: flex; align-items: center; gap: 8px; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 13px; padding: 9px 12px; cursor: pointer; }
 .qchip.running { opacity: .6; cursor: default; }
-.qchip .qt { flex: 1; min-width: 0; font-size: 14px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qchip .qcopy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.qchip .qt { min-width: 0; font-size: 14px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qchip .qstatus { color: var(--muted); font-size: 11.5px; line-height: 1.25; }
 .qchip .qmode { font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; flex: none; }
 .qchip .qx { color: var(--muted); padding: 2px 4px; flex: none; }
 .histLoader { text-align: center; font-size: 13px; color: var(--muted); padding: 10px 0 4px; }
