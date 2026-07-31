@@ -38,6 +38,18 @@ function toolFromItem(item) {
 }
 const TOOL_ITEMS = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
 
+// `codex` is a Node launcher which starts the native Rust binary. Killing only the launcher can
+// orphan the native process (and, for an active /goal, leave it writing the same rollout forever).
+// Each Box-owned invocation gets its own process group; terminate the group as one unit whenever
+// Box really needs to stop it. The injected options keep the behavior unit-testable.
+export function terminateCodexProcess(child, signal = 'SIGTERM', { platform = process.platform, killImpl = process.kill } = {}) {
+  if (!child) return false;
+  if (platform !== 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
+    try { killImpl(-child.pid, signal); return true; } catch {}
+  }
+  try { return !!child.kill(signal); } catch { return false; }
+}
+
 // Codex emits reasoning items while it is actively thinking, but they intentionally
 // contain no user-visible chain-of-thought. Preserve that privacy while still turning
 // the envelope into a heartbeat so Box does not claim the process has been idle.
@@ -88,17 +100,23 @@ export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings =
 }
 
 export class CodexExecEngine {
+  constructor({ spawnImpl = spawn } = {}) {
+    this.spawnImpl = spawnImpl;
+  }
+
   run({ sessionId, cwd, prompt, images = [], settings = {}, onEvent }) {
     const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
 
     // Optionally source an env file before codex (set CODEX_ENV_FILE); otherwise just run codex.
     const envFile = process.env.CODEX_ENV_FILE;
     const script = (envFile ? `[ -f ${JSON.stringify(envFile)} ] && . ${JSON.stringify(envFile)}; ` : '') + 'exec codex "$@"';
-    const child = spawn('bash', ['-lc', script, 'codex-mobile', ...args], {
+    const child = this.spawnImpl('bash', ['-lc', script, 'codex-mobile', ...args], {
       cwd: cwd || process.cwd(),
       env: childEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
+    child.killTree = (signal = 'SIGTERM') => terminateCodexProcess(child, signal);
 
     const rl = createInterface({ input: child.stdout });
     const seenTools = new Set();
@@ -128,11 +146,14 @@ export class CodexExecEngine {
       // here the context meter is frozen at 0 / window for the whole Codex session (the
       // "0 / 258k" the phone showed). Synthesize the {last_token_usage} shape that
       // contextFromCodexInfo already understands so the meter just works.
-      if (o.type === 'turn.completed' && o.usage) {
-        emit({ type: 'context', info: { last_token_usage: {
+      if (o.type === 'turn.completed') {
+        if (o.usage) emit({ type: 'context', info: { last_token_usage: {
           input_tokens: Number(o.usage.input_tokens) || 0,
           output_tokens: Number(o.usage.output_tokens) || 0,
         } } });
+        // A /goal may immediately begin another task in the same CLI process, so process close is
+        // not a turn boundary. Let Box finish the phone-visible request on Codex's real boundary.
+        emit({ type: 'turn_end', status: o.status || 'completed' });
         return;
       }
 

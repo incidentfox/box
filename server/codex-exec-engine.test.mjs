@@ -2,7 +2,9 @@
 // before the positional prompt made codex's variadic `-i` swallow the prompt (and the session id
 // on resume), so an image message silently vanished. Run: node server/codex-exec-engine.test.mjs
 import assert from 'node:assert/strict';
-import { buildCodexArgs, reasoningHeartbeat } from './codex-exec-engine.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { buildCodexArgs, CodexExecEngine, reasoningHeartbeat, terminateCodexProcess } from './codex-exec-engine.mjs';
 
 // Helper: index of the LAST `-i` flag, and the positions of the positionals.
 const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
@@ -121,5 +123,35 @@ const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
 assert.deepEqual(reasoningHeartbeat({ type: 'item.started', item: { type: 'reasoning' } }), { type: 'thinking', delta: '' });
 assert.deepEqual(reasoningHeartbeat({ type: 'item.completed', item: { type: 'reasoning_summary' } }), { type: 'thinking', delta: '' });
 assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }), null);
+
+// A real Codex turn boundary is authoritative even when /goal keeps the process open. The engine
+// must emit turn_end without waiting for child close, and the child must live in its own group so a
+// genuine timeout can terminate both the Node launcher and native binary.
+{
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  let spawnOptions = null;
+  const events = [];
+  const engine = new CodexExecEngine({ spawnImpl: (_cmd, _args, options) => { spawnOptions = options; return child; } });
+  engine.run({ cwd: '/work', prompt: 'finish once', onEvent: (event) => events.push(event) });
+  child.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })}\n`);
+  child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.map((event) => event.type), ['text', 'context', 'turn_end']);
+  assert.equal(events.at(-1).status, 'completed');
+  assert.equal(spawnOptions.detached, process.platform !== 'win32');
+}
+
+{
+  const calls = [];
+  const child = { pid: 9876, kill: () => { calls.push(['fallback']); return true; } };
+  assert.equal(terminateCodexProcess(child, 'SIGKILL', { platform: 'linux', killImpl: (...args) => calls.push(args) }), true);
+  assert.deepEqual(calls, [[-9876, 'SIGKILL']], 'POSIX termination targets the whole process group');
+}
 
 console.log('✅ codex-exec-engine.test.mjs passed');
