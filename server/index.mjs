@@ -30,7 +30,9 @@ import { assistantStopsAutoContinue, DEFAULT_CONTINUE_MESSAGE, dueWakeups, norma
 import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
 } from './codex-rollout-history.mjs';
-import { prepareRecoveredCodexMessage, recoverPersistedQueue } from './queue-state.mjs';
+import {
+  cancelQueuedMessage, prepareRecoveredCodexMessage, recoverPersistedQueue, restoreCanceledMessage,
+} from './queue-state.mjs';
 import { sttEngineOrder, stripNonSpeechTags } from './stt-engine.mjs';
 import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
@@ -3638,7 +3640,7 @@ function rt(extKey) {
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
       settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
       context: p.context || null,
-      queue: recoverPersistedQueue(p), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, codexGoalProc: null, canceled: false });
+      queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, codexGoalProc: null, canceled: false });
   }
   return RT.get(key);
 }
@@ -3671,7 +3673,9 @@ function bcast(s, event) {
   }
   for (const ws of s.subs) { try { ws.send(JSON.stringify(o)); } catch {} }
 }
-const queueView = (s) => s.queue.map((q, i) => ({ qid: q.qid, text: q.displayText != null ? q.displayText : q.text, mode: q.mode, agent: q.agent || s.agent || 'claude', images: q.images || [], running: i === 0 && s.running }));
+// The active message lives in `s.inflight`; every item still in `s.queue` is pending
+// and must remain editable/cancelable, including the first item while a turn runs.
+const queueView = (s) => s.queue.map((q) => ({ qid: q.qid, text: q.displayText != null ? q.displayText : q.text, mode: q.mode, agent: q.agent || s.agent || 'claude', images: q.images || [], running: false }));
 
 // locate a session's jsonl across project dirs (sessions can live under any cwd)
 function jsonlPath(id) {
@@ -4176,8 +4180,35 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
 });
 function dequeue(extKey, qid) {
   const s = rt(extKey);
-  const idx = s.queue.findIndex((q, i) => q.qid === qid && !(i === 0 && s.running));
+  const idx = s.queue.findIndex((q) => q.qid === qid);
   if (idx >= 0) { s.queue.splice(idx, 1); persist(s); bcast(s, { type: 'queue', queue: queueView(s) }); }
+}
+function cancelQueued(extKey, qid) {
+  const s = rt(extKey);
+  const result = cancelQueuedMessage(s.queue, qid);
+  if (!result.undo) return;
+  s.queue = result.queue;
+  s.queueUndo.set(qid, result.undo);
+  persist(s);
+  bcast(s, { type: 'queue', queue: queueView(s) });
+  bcast(s, { type: 'queue_canceled', qid, expiresAt: result.undo.expiresAt });
+  const timer = setTimeout(() => {
+    const current = s.queueUndo.get(qid);
+    if (current && current.expiresAt === result.undo.expiresAt) s.queueUndo.delete(qid);
+  }, Math.max(0, result.undo.expiresAt - Date.now()) + 50);
+  timer.unref?.();
+}
+function undoQueuedCancel(extKey, qid) {
+  const s = rt(extKey);
+  const undo = s.queueUndo.get(qid);
+  const result = restoreCanceledMessage(s.queue, undo);
+  s.queueUndo.delete(qid);
+  if (!result.restored) { bcast(s, { type: 'queue_undo_expired', qid }); return; }
+  s.queue = result.queue;
+  persist(s);
+  bcast(s, { type: 'queue', queue: queueView(s) });
+  bcast(s, { type: 'queue_restored', qid });
+  runWorker(s);
 }
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
@@ -4907,6 +4938,8 @@ wss.on('connection', (ws) => {
       if (s.sessionId && s.agent === 'mac') ensureMacSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       bcast(s, { type: 'settings', settings: s.settings, cwd: s.cwd || null });
     } else if (m.type === 'dequeue') { dequeue(m.key, m.qid); }
+    else if (m.type === 'cancel_queue') { cancelQueued(m.key, m.qid); }
+    else if (m.type === 'undo_queue_cancel') { undoQueuedCancel(m.key, m.qid); }
     else if (m.type === 'cancel') { cancelCurrent(m.key); }
     else if (m.type === 'answer_waiting') { answerWaiting(m.key, m.sel || {}); }
   });

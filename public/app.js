@@ -2758,6 +2758,21 @@ function saveDraft(k, text) { try { if (text && text.trim()) LS.setItem(draftKey
 function restoreDraft() { const inp = $('input'); inp.value = loadDraft(cur.key); autoGrow(); updateSend(); }
 
 /* queued (pending) messages shown above the composer, each removable / tap-to-edit */
+const queueCancelUndo = new Map();
+function showQueueCancelUndo() {
+  const now = Date.now();
+  for (const [qid, expiresAt] of queueCancelUndo) if (expiresAt <= now) queueCancelUndo.delete(qid);
+  if (!queueCancelUndo.size) return;
+  const count = queueCancelUndo.size;
+  const duration = Math.max(500, Math.min(...queueCancelUndo.values()) - now);
+  toast(`${count} queued message${count === 1 ? '' : 's'} canceled`, duration, {
+    label: 'Undo',
+    fn: () => {
+      const qids = [...queueCancelUndo.keys()]; queueCancelUndo.clear();
+      for (const qid of qids) { try { ws.send(JSON.stringify({ type: 'undo_queue_cancel', key: cur.key, qid })); } catch {} }
+    },
+  });
+}
 function renderQueue(items) {
   const area = $('queueArea'); area.innerHTML = '';
   const all = items || [];
@@ -2766,7 +2781,7 @@ function renderQueue(items) {
     const imgs = Array.isArray(q.images) ? q.images : [];
     const wakeFired = /^⏰ Scheduled wake-up\s*·/.test(q.text || '');
     const el = document.createElement('div'); el.className = 'qchip' + (q.running ? ' running' : '') + (wakeFired ? ' wakeFired' : '');
-    el.innerHTML = `${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qcopy"><span class="qt"></span></span><span class="qx"></span>`;
+    el.innerHTML = `${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qcopy"><span class="qt"></span></span><button class="qcancel" type="button">Cancel</button>`;
     if (imgs.length) { const th = el.querySelector('.qthumbs'); imgs.forEach((p) => { const im = document.createElement('img'); im.src = imgUrl(p); th.appendChild(im); }); }
     const queueText = q.text || (imgs.length ? `${imgs.length} image${imgs.length > 1 ? 's' : ''}` : '');
     el.querySelector('.qt').textContent = wakeFired ? queueText.replace(/^⏰ Scheduled wake-up/, '⏰ Wake-up fired') : queueText;
@@ -2775,16 +2790,16 @@ function renderQueue(items) {
       status.textContent = 'Waiting in queue for the current turn to finish';
       el.querySelector('.qcopy').appendChild(status);
     }
-    const x = el.querySelector('.qx'); x.innerHTML = ICONS.close;
+    const cancel = el.querySelector('.qcancel');
     if (q.running) {
-      x.style.opacity = '0'; x.style.pointerEvents = 'none';
+      cancel.classList.add('hidden');
     } else {
-      el.title = 'Tap to edit · ✕ to remove';
-      x.onclick = (e) => { e.stopPropagation(); try { ws.send(JSON.stringify({ type: 'dequeue', key: cur.key, qid: q.qid })); } catch {} };
+      el.title = 'Tap the message to edit it';
+      cancel.onclick = (e) => { e.stopPropagation(); try { ws.send(JSON.stringify({ type: 'cancel_queue', key: cur.key, qid: q.qid })); } catch {} };
       // tap chip body → pull it back into the composer (and remove from the queue) for editing.
       // Don't clobber half-typed text: if the box already has content, append on a new line.
       el.addEventListener('click', (e) => {
-        if (e.target.closest('.qx')) return;
+        if (e.target.closest('.qcancel')) return;
         if (!q.text) { try { ws.send(JSON.stringify({ type: 'dequeue', key: cur.key, qid: q.qid })); } catch {} return; }
         const inp = $('input');
         const existing = inp.value.trim();
@@ -2908,6 +2923,9 @@ function onServer(o) {
   // force-queue + Stop), so the message doesn't render twice.
   if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', []); return; }
   if (o.type === 'queue') { renderQueue(o.queue); refreshSessionModesSoon(); return; }
+  if (o.type === 'queue_canceled') { queueCancelUndo.set(o.qid, Number(o.expiresAt) || Date.now() + 8000); showQueueCancelUndo(); return; }
+  if (o.type === 'queue_restored') { queueCancelUndo.delete(o.qid); toast('Queued message restored'); return; }
+  if (o.type === 'queue_undo_expired') { queueCancelUndo.delete(o.qid); toast('Undo window expired'); return; }
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
   if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
   if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images); }
