@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isVobCallSession, mainPageSessionRank } from './vob-session-category.mjs';
+import { isVobCallSession, mainPageSessionRank, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 
 test('classifies an explicit VOB category', () => {
   assert.equal(isVobCallSession({ category: 'vob' }), true);
@@ -33,4 +33,10 @@ test('orders the main page as Favorites, VOB calls, Live, then recent', () => {
   sessions.sort((a, b) => mainPageSessionRank(a) - mainPageSessionRank(b) || b.mtime - a.mtime);
   assert.deepEqual(sessions.map((session) => session.id), ['favorite', 'vob', 'live', 'recent']);
   assert.equal(mainPageSessionRank({ category: 'vob', favorite: true, pinned: true }), 1);
+});
+
+test('VOB sessions keep goals but cannot enable automatic continuation', () => {
+  assert.equal(sessionAllowsAutoContinue({ title: 'VOB operator • Jane Patient • Aetna' }), false);
+  assert.equal(sessionAllowsAutoContinue({ cwd: '/home/factory/.factory/rise4-vob/production/operators/request-1' }), false);
+  assert.equal(sessionAllowsAutoContinue({ title: 'Ordinary Codex session', cwd: '/home/factory/development' }), true);
 });

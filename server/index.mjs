@@ -42,7 +42,7 @@ import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
-import { isVobCallSession, mainPageSessionRank } from './vob-session-category.mjs';
+import { isVobCallSession, mainPageSessionRank, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -2439,6 +2439,14 @@ function scheduledSessionAgent(id) {
   if (findSessionFile(id)) return 'claude';
   return '';
 }
+function scheduledSessionMetadata(id, agent) {
+  if (agent === 'codex') return (loadCodex().sessions || {})[id] || {};
+  if (agent === 'gemini') return (loadGemini().sessions || {})[id] || {};
+  if (agent === 'agy') return (loadAgy().sessions || {})[id] || {};
+  if (agent === 'mac') return (loadMac().sessions || {})[id] || {};
+  const file = findSessionFile(id);
+  return { file, title: file ? sessionTitle(file) : '', cwd: file ? decodeCwd(dirname(file)) : '' };
+}
 const scheduleRoute = (fn) => [requireAuth, async (req, res) => {
   const id = String(req.params.id || '');
   const agent = scheduledSessionAgent(id);
@@ -2487,8 +2495,10 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   const state = loadSchedules();
   const record = scheduleRecord(state, id, agent);
   record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, ...raw });
+  const suppressed = record.autoContinue.enabled && !sessionAllowsAutoContinue(scheduledSessionMetadata(id, agent));
+  if (suppressed) record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, enabled: false });
   saveSchedules(state);
-  return { ok: true, autoContinue: record.autoContinue };
+  return { ok: true, autoContinue: record.autoContinue, suppressed: suppressed ? 'vob_session' : null };
 }));
 app.delete('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent) => {
   const state = loadSchedules();
@@ -4040,6 +4050,17 @@ async function runScheduleTick(now = new Date()) {
         });
         wake.firedAt = now.toISOString();
         dirty = true;
+      }
+
+      // VOB operator goals remain visible and can be resumed manually, but they
+      // must not turn into unbounded background loops. One-time wakeups above
+      // remain available when an explicit follow-up is desired.
+      if (!sessionAllowsAutoContinue(scheduledSessionMetadata(id, agent))) {
+        if (record.autoContinue.enabled) {
+          record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, enabled: false });
+          dirty = true;
+        }
+        continue;
       }
 
       const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
