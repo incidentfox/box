@@ -2373,13 +2373,41 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   const isAgy = !!(loadAgy().sessions || {})[id];
   const isMac = !!(loadMac().sessions || {})[id];
   let wrote = false;
-  if (isGemini) { ensureGeminiSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
-  else if (isAgy) { ensureAgySession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
-  else if (isMac) { ensureMacSession(id, { title: name, lastUsed: Date.now() }); wrote = true; }
-  else wrote = isCodex ? false : writeCustomTitle(id, name);
+  // Local-agent ensure* helpers deliberately preserve an established title so a
+  // resumed turn cannot rename a chat to its latest prompt. A manual rename is the
+  // exception: update the authoritative record directly as well as names.json.
+  // Otherwise the list shows the override while /history, exports, and a live RT
+  // session keep the old title.
+  const stored = isCodex ? { state: loadCodex(), save: saveCodex }
+    : isGemini ? { state: loadGemini(), save: saveGemini }
+      : isAgy ? { state: loadAgy(), save: saveAgy }
+        : isMac ? { state: loadMac(), save: saveMac }
+          : null;
+  if (stored && stored.state.sessions && stored.state.sessions[id]) {
+    stored.state.sessions[id].title = name;
+    stored.save(stored.state);
+  } else {
+    wrote = writeCustomTitle(id, name);
+  }
   const names = loadNames();
-  if (wrote) { if (names[id] != null) { delete names[id]; saveNames(names); } } // drop legacy shadow
-  else { names[id] = name; saveNames(names); }                                 // claude / no-jsonl-yet fallback
+  if (stored) { names[id] = name; saveNames(names); }                          // manual-title marker + local fallback
+  else if (wrote) { if (names[id] != null) { delete names[id]; saveNames(names); } } // drop legacy Claude shadow
+  else { names[id] = name; saveNames(names); }                                 // Claude / no-jsonl-yet fallback
+
+  // Keep the live/persisted queue state in lockstep too. Its title is sent in
+  // WebSocket `session` events; leaving it stale made the chat header revert as
+  // soon as an active Codex session emitted another event after a rename.
+  const runtime = RT.get(resolveKey(id))
+    || [...RT.values()].find((s) => s.sessionId === id)
+    || (existsSync(qpath(id)) ? rt(id) : null);
+  if (runtime) {
+    runtime.title = name;
+    persist(runtime);
+    bcast(runtime, {
+      type: 'session', id: runtime.sessionId || id, agent: runtime.agent || undefined,
+      parentId: runtime.parentId || null, parentTitle: runtime.parentTitle || '', title: name,
+    });
+  }
   res.json({ ok: true, synced: wrote });
 });
 app.get('/api/commands', requireAuth, (req, res) => res.json({
@@ -3658,8 +3686,9 @@ function rt(extKey) {
     let p = {};
     try { p = JSON.parse(readFileSync(qpath(key), 'utf8')); } catch {}
     const codex = isUuid(key) ? (loadCodex().sessions || {})[key] : null;
+    const manualTitle = isUuid(key) ? loadNames()[key] : '';
     RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (codex && codex.cwd) || null, agent: p.agent || (codex ? 'codex' : null),
-      parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
+      parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (codex && codex.title) || '',
       settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
       context: p.context || null,
       queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, codexGoalProc: null, canceled: false });
