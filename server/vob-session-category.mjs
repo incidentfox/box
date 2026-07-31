@@ -16,3 +16,7 @@ export function mainPageSessionRank(session = {}) {
   if (session.pinned) return 2;
   return 3;
 }
+
+export function sessionAllowsAutoContinue(session = {}) {
+  return !isVobCallSession(session);
+}
