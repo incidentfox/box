@@ -23,6 +23,7 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
+import { terminateCodexThreadProcesses } from './codex-processes.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import { assistantStopsAutoContinue, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue, shouldAutoContinue, validTimeZone } from './session-scheduler.mjs';
@@ -1700,6 +1701,13 @@ function runningCodexThreadIds() {
   }
   CODEX_LIVE_CACHE = { ts: now, ids: new Set(ids) };
   return ids;
+}
+
+function terminateUnmanagedCodexThread(id, signal = 'SIGTERM') {
+  if (!id) return [];
+  const killed = terminateCodexThreadProcesses(id, signal, { procText: pgrepFull(id) });
+  if (killed.length) CODEX_LIVE_CACHE = { ts: 0, ids: new Set() };
+  return killed;
 }
 
 function adoptLiveCodexSessions(liveThreadIds) {
@@ -4176,8 +4184,19 @@ function cancelCurrent(extKey) {
   if (s.bashProc) { try { s.bashProc.kill('SIGTERM'); } catch {} }
   if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
   if (s.codexGoalProc) killAgentProcess(s.codexGoalProc, 'SIGTERM');
+  // A server restart loses ChildProcess handles while a pre-existing Codex resume may
+  // remain alive. Stop must still work: find only resume processes naming this exact
+  // thread and terminate them. Owned processes may appear here too; SIGTERM is idempotent.
+  const stoppedCodex = s.sessionId && (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId])
+    ? terminateUnmanagedCodexThread(s.sessionId, 'SIGTERM')
+    : [];
   if (s.sessionId) rcEngine.interrupt(s.sessionId); // ESC into the RC TUI
   if (s.onTurnEnd) { const f = s.onTurnEnd; s.onTurnEnd = null; f(); } // unblock the worker
+  else if (stoppedCodex.length && !s.running) {
+    // No in-memory worker exists to emit its normal close events after a restart.
+    bcast(s, { type: 'done', sessionId: s.sessionId, canceled: true });
+    bcast(s, { type: 'idle' });
+  }
 }
 
 // Merge everything queued right now into ONE turn — so Claude sees all the user's
@@ -4229,7 +4248,17 @@ async function runWorker(s) {
   // the latter while the TUI is mid-turn can race/fork the same thread. Keep the Box message
   // durably queued and launch it against the same id immediately after the terminal emits its
   // final answer (or exits).
-  if (nativeCodexTurnActive(s)) { waitForNativeCodexTurn(s); return; }
+  if (nativeCodexTurnActive(s)) {
+    const rec = (loadCodex().sessions || {})[s.sessionId];
+    // A Box-created resume that survived a server restart is ours to reclaim. A fresh
+    // phone message is an explicit steer, so stop that orphan and resume the same thread.
+    // Native terminal sessions remain wait-only so Box never steals a desktop turn.
+    if (rec && rec.source !== 'native' && terminateUnmanagedCodexThread(s.sessionId).length) {
+      bcast(s, { type: 'native_wait', sessionId: s.sessionId, msg: 'Applying your message after stopping the interrupted Box turn.' });
+    }
+    waitForNativeCodexTurn(s);
+    return;
+  }
   s.running = true;
   while (s.queue.length) {
     const batch = s.queue.splice(0, s.queue.length);   // drain ALL currently queued
