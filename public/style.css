@@ -479,7 +479,8 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .qchip .qt { min-width: 0; font-size: 14px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qchip .qstatus { color: var(--muted); font-size: 11.5px; line-height: 1.25; }
 .qchip .qmode { font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; flex: none; }
-.qchip .qx { color: var(--muted); padding: 2px 4px; flex: none; }
+.qchip .qcancel { flex: none; border: 0; background: transparent; color: #c7472b; padding: 7px 2px 7px 8px; font: 700 12.5px/1 -apple-system, "Inter", system-ui, sans-serif; cursor: pointer; }
+.qchip .qcancel:active { opacity: .55; }
 .histLoader { text-align: center; font-size: 13px; color: var(--muted); padding: 10px 0 4px; }
 .histEnd { text-align: center; font-size: 12px; color: var(--muted); padding: 8px 0; opacity: .6; }
 .attachRow { display: flex; gap: 8px; padding: 4px 2px 8px; overflow-x: auto; }

@@ -13,6 +13,26 @@ export function recoverPersistedQueue(state = {}) {
   return queue;
 }
 
+export function cancelQueuedMessage(queue, qid, { now = Date.now(), undoMs = 10000 } = {}) {
+  const next = Array.isArray(queue) ? [...queue] : [];
+  const index = next.findIndex((message) => message && message.qid === qid);
+  if (index < 0) return { queue: next, undo: null };
+  const [message] = next.splice(index, 1);
+  return {
+    queue: next,
+    undo: { qid, message, index, expiresAt: Number(now) + Math.max(1000, Number(undoMs) || 10000) },
+  };
+}
+
+export function restoreCanceledMessage(queue, undo, { now = Date.now() } = {}) {
+  const next = Array.isArray(queue) ? [...queue] : [];
+  if (!undo || !undo.message || Number(now) > Number(undo.expiresAt || 0)) return { queue: next, restored: false };
+  if (next.some((message) => message && message.qid === undo.qid)) return { queue: next, restored: true };
+  const index = Math.max(0, Math.min(next.length, Number(undo.index) || 0));
+  next.splice(index, 0, undo.message);
+  return { queue: next, restored: true };
+}
+
 export const CODEX_RECOVERY_PROMPT = 'Continue the interrupted task from the immediately preceding user request. Inspect the conversation and current workspace state, preserve completed work, and finish only what remains. Do not repeat completed external writes.';
 export const CODEX_RECOVERY_DISPLAY = '↻ Continuing the interrupted turn after Box restarted';
 

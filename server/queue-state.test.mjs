@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { CODEX_RECOVERY_DISPLAY, CODEX_RECOVERY_PROMPT, prepareRecoveredCodexMessage, recoverPersistedQueue } from './queue-state.mjs';
+import {
+  CODEX_RECOVERY_DISPLAY, CODEX_RECOVERY_PROMPT, cancelQueuedMessage,
+  prepareRecoveredCodexMessage, recoverPersistedQueue, restoreCanceledMessage,
+} from './queue-state.mjs';
 
 const inflight = { qid: 'active-1', text: 'Now?', agent: 'codex' };
 const queued = { qid: 'next-1', text: 'Then do this', agent: 'codex' };
@@ -19,4 +22,17 @@ assert.deepEqual(prepareRecoveredCodexMessage(recovered, { originalLanded: true 
 });
 assert.equal(prepareRecoveredCodexMessage({ ...recovered, agent: 'claude' }, { originalLanded: true }).text, 'Now?');
 
-console.log('queue-state recovery ok');
+const cancelSource = [
+  { qid: 'first', text: 'first' },
+  { qid: 'middle', text: 'middle', displayText: 'Scheduled middle' },
+  { qid: 'last', text: 'last' },
+];
+const canceled = cancelQueuedMessage(cancelSource, 'middle', { now: 1000, undoMs: 8000 });
+assert.deepEqual(canceled.queue.map((message) => message.qid), ['first', 'last']);
+assert.deepEqual(canceled.undo, { qid: 'middle', message: cancelSource[1], index: 1, expiresAt: 9000 });
+assert.deepEqual(restoreCanceledMessage(canceled.queue, canceled.undo, { now: 8999 }).queue, cancelSource);
+assert.equal(restoreCanceledMessage(canceled.queue, canceled.undo, { now: 9001 }).restored, false);
+assert.equal(cancelQueuedMessage(cancelSource, 'first').undo.message.qid, 'first');
+assert.equal(cancelQueuedMessage(cancelSource, 'missing').undo, null);
+
+console.log('queue-state recovery and cancel undo ok');
