@@ -3630,7 +3630,7 @@ function rt(extKey) {
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: p.title || '',
       settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
       context: p.context || null,
-      queue: recoverPersistedQueue(p), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, canceled: false });
+      queue: recoverPersistedQueue(p), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, codexGoalProc: null, canceled: false });
   }
   return RT.get(key);
 }
@@ -3957,6 +3957,14 @@ async function answerWaiting(extKey, sel) {
   } catch (e) { bcast(s, { type: 'error', msg: String((e && e.message) || e).slice(-300) }); }
 }
 
+function killAgentProcess(proc, signal = 'SIGTERM') {
+  if (!proc) return false;
+  try {
+    if (typeof proc.killTree === 'function') return !!proc.killTree(signal);
+    return !!proc.kill(signal);
+  } catch { return false; }
+}
+
 function enqueue(extKey, msg) {
   const s = rt(extKey);
   msg.qid = randomBytes(4).toString('hex');
@@ -4010,10 +4018,11 @@ async function runScheduleTick(now = new Date()) {
         dirty = true;
       }
 
+      const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
       let decision = shouldAutoContinue({
         policy: record.autoContinue,
         now,
-        busy: session.running || !!session.inflight || session.queue.length > 0,
+        busy: session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || processBusy,
         needsInput: scheduledNeedsInput(id, agent, session),
       });
       if (!decision.due) continue;
@@ -4031,7 +4040,7 @@ async function runScheduleTick(now = new Date()) {
           policy: record.autoContinue,
           now,
           goalStatus,
-          busy: session.running || !!session.inflight || session.queue.length > 0,
+          busy: session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || codexThreadProcessBusy(id),
           needsInput: scheduledNeedsInput(id, agent, session),
         });
         if (!decision.due) continue;
@@ -4074,11 +4083,18 @@ function refreshCodexActivity(s) {
   } catch {}
 }
 
+function codexThreadProcessBusy(id) {
+  if (!id) return false;
+  const rec = (loadCodex().sessions || {})[id];
+  // Box-created sessions can later acquire an active /goal. Their registry source stays empty,
+  // but they are just as unsafe to resume concurrently as a terminal-created (`native`) thread.
+  if (!rec || !runningCodexThreadIds().has(id)) return false;
+  return codexRolloutState(rec.transcriptPath || findCodexRollout(CODEX_HOME, id)).busy;
+}
+
 function nativeCodexTurnActive(s) {
   if (!s || !s.sessionId || (s.agent && s.agent !== 'codex')) return false;
-  const rec = (loadCodex().sessions || {})[s.sessionId];
-  if (!rec || rec.source !== 'native' || !runningCodexThreadIds().has(s.sessionId)) return false;
-  return codexRolloutState(rec.transcriptPath || findCodexRollout(CODEX_HOME, s.sessionId)).busy;
+  return codexThreadProcessBusy(s.sessionId);
 }
 
 function waitForNativeCodexTurn(s) {
@@ -4158,7 +4174,8 @@ function dequeue(extKey, qid) {
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
   if (s.bashProc) { try { s.bashProc.kill('SIGTERM'); } catch {} }
-  if (s.proc) { try { s.proc.kill('SIGTERM'); } catch {} }
+  if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
+  if (s.codexGoalProc) killAgentProcess(s.codexGoalProc, 'SIGTERM');
   if (s.sessionId) rcEngine.interrupt(s.sessionId); // ESC into the RC TUI
   if (s.onTurnEnd) { const f = s.onTurnEnd; s.onTurnEnd = null; f(); } // unblock the worker
 }
@@ -4200,6 +4217,14 @@ function prepareRecoveredMessage(s, message) {
 
 async function runWorker(s) {
   if (s.running) return;
+  // A completed Box turn may leave the SAME Codex process alive because /goal immediately
+  // started its next task. A new phone message is an explicit steer: stop that owned continuation
+  // first, then resume once its process group has closed. Never fork the same rollout concurrently.
+  if (s.codexGoalProc) {
+    killAgentProcess(s.codexGoalProc, 'SIGTERM');
+    bcast(s, { type: 'native_wait', sessionId: s.sessionId, msg: 'Applying your message after stopping the current goal continuation.' });
+    return;
+  }
   // A directly-launched Codex TUI and `codex exec resume` are separate clients. Starting
   // the latter while the TUI is mid-turn can race/fork the same thread. Keep the Box message
   // durably queued and launch it against the same id immediately after the terminal emits its
@@ -4358,9 +4383,19 @@ function runCodexTurn(s, msg, resolve) {
     addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
-  const finish = () => {
+  const finish = ({ completed = false, keepAlive = false, timedOut = false } = {}) => {
     if (done) return; done = true;
+    const ownedProc = s.proc;
     clearTimeout(s.turnTimer); s.proc = null;
+    // `/goal` can begin its next task immediately after this turn completes. Keep that process
+    // supervised, but release the phone turn now and let the rollout tail render further work.
+    if (keepAlive && ownedProc && ownedProc.exitCode == null && ownedProc.signalCode == null) {
+      s.codexGoalProc = ownedProc;
+      ownedProc.once('close', () => {
+        if (s.codexGoalProc === ownedProc) s.codexGoalProc = null;
+        if (s.queue.length) setTimeout(() => runWorker(s), 0);
+      });
+    }
     // Finalize the streamed assistant row (same ordered {text|tool} shape Claude history
     // uses, so a reload renders like the live view). The row was already being written
     // incrementally below; this just clears the `live` flag — or writes it once for a
@@ -4372,7 +4407,9 @@ function runCodexTurn(s, msg, resolve) {
       // live view — reopening the chat later showed silence. Persist a short note so the failure is
       // visible in history too.
       if (lastError && !s.canceled) appendCodexMessage(s.sessionId, 'assistant', `⚠️ Codex error: ${lastError}`);
-      else if (!s.canceled && !assistantParts.length) appendCodexMessage(s.sessionId, 'assistant', "⚠️ Codex exited without a response. Send again to retry.");
+      else if (!s.canceled && !assistantParts.length && !completed) appendCodexMessage(s.sessionId, 'assistant', timedOut
+        ? "⚠️ Codex timed out after 45 minutes without producing a response. Send again to retry."
+        : "⚠️ Codex exited without a response. Send again to retry.");
     } else if (s.provKey) {
       // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
       // entry already holds the user's message, so the chat stays in the list and is retryable in
@@ -4386,8 +4423,8 @@ function runCodexTurn(s, msg, resolve) {
     resolve();
   };
   s.turnTimer = setTimeout(() => {
-    if (s.proc) { try { s.proc.kill('SIGTERM'); } catch {} }
-    finish();
+    if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
+    finish({ timedOut: true });
   }, CODEX_TURN_TIMEOUT_MS);
   s.proc = codexEngine.run({
     sessionId: s.sessionId,
@@ -4455,13 +4492,17 @@ function runCodexTurn(s, msg, resolve) {
         const t = s.curTools.find((x) => x.id === ev.id); if (t) t.result = ev.content;
         const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
         bcast(s, ev);
+      } else if (ev.type === 'turn_end') {
+        // Codex's turn is complete even if an active /goal keeps the CLI process alive and starts
+        // another task. Waiting for process close is what caused the exact 45-minute false failure.
+        finish({ completed: true, keepAlive: true });
       } else if (ev.type === 'notice' || ev.type === 'error') {
       if (ev.type === 'error') { lastError = cleanCodexError(ev.msg); s.lastTurnError = lastError; }
         bcast(s, ev);
       }
     },
   });
-s.proc.on('close', finish);
+s.proc.on('close', () => finish());
   s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
 // Gemini now runs as a REAL agent via the `gemini` CLI (see gemini-exec-engine.mjs), so a
@@ -4857,7 +4898,8 @@ function killAllProcs() {
     if (s.bashProc) { try { s.bashProc.kill('SIGKILL'); } catch {} }
     // Codex/Gemini/Mac turns live in `proc`, not `bashProc`. Leaving these alive across
     // a Box restart creates an orphan worker while the new server recovers the turn.
-    if (s.proc) { try { s.proc.kill('SIGKILL'); } catch {} }
+    if (s.proc) killAgentProcess(s.proc, 'SIGKILL');
+    if (s.codexGoalProc) killAgentProcess(s.codexGoalProc, 'SIGKILL');
   }
   try { rcEngine.closeAll(); } catch {}
 }

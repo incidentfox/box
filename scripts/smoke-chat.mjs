@@ -13,17 +13,20 @@ const { values: v } = parseArgs({
     port: { type: 'string' },
     token: { type: 'string' },
     timeout: { type: 'string' },
+    turns: { type: 'string' },
     agent: { type: 'string' },
     model: { type: 'string' },
     prompt: { type: 'string' },
     expect: { type: 'string' },
     'fake-codex': { type: 'boolean' },
+    'fake-codex-stay-open': { type: 'boolean' },
     keep: { type: 'boolean' },
   },
 });
 
 const ROOT = resolve(v.root || process.cwd());
 const TIMEOUT_MS = Number(v.timeout || process.env.BOX_SMOKE_TIMEOUT_MS || 120000);
+const TURNS = Math.max(1, Number(v.turns || 1) || 1);
 const TOKEN = v.token || `smoke-${process.pid}-${Date.now()}`;
 const AGENT = v.agent || process.env.BOX_SMOKE_AGENT || 'codex';
 const MODEL = v.model || process.env.BOX_SMOKE_MODEL || 'gpt-4.1-mini';
@@ -69,12 +72,16 @@ function writeFakeCodex(dir) {
 const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log('codex-smoke-stub 1.0.0'); process.exit(0); }
 if (args[0] !== 'exec') { console.error('codex smoke stub only supports exec'); process.exit(2); }
-const thread = '00000000-0000-4000-8000-' + String(process.pid).padStart(12, '0').slice(-12);
+const resumeAt = args.indexOf('resume');
+const thread = resumeAt >= 0
+  ? args.slice(resumeAt + 1).find((arg) => /^[0-9a-f-]{36}$/i.test(arg))
+  : '00000000-0000-4000-8000-' + String(process.pid).padStart(12, '0').slice(-12);
 console.log(JSON.stringify({ type: 'thread.started', thread_id: thread }));
 console.log(JSON.stringify({ type: 'item.started', item: { id: 'reasoning-1', type: 'reasoning' } }));
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'reasoning-1', type: 'reasoning' } }));
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: process.env.BOX_FAKE_CODEX_RESPONSE || 'BOX_SMOKE_OK' } }));
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));
+if (process.env.BOX_FAKE_CODEX_STAY_OPEN === '1') setInterval(() => {}, 1000);
 `, 'utf8');
   chmodSync(bin, 0o755);
   return dir;
@@ -96,6 +103,7 @@ function startServer({ port, home, fakeBin }) {
     BOX_IGNORE_LOCAL_ENV: '1',
     BOX_SKIP_META_PROBE: '1',
     BOX_OVERLAY: join(home, '.config', 'box', 'box.local.mjs'),
+    BOX_FAKE_CODEX_STAY_OPEN: v['fake-codex-stay-open'] ? '1' : '',
     CODEX_HOME: REAL_CODEX_HOME,
     PATH: fakeBin ? `${fakeBin}:${process.env.PATH || ''}` : process.env.PATH || '',
   };
@@ -184,22 +192,30 @@ try {
   const deadline = Date.now() + TIMEOUT_MS;
   const config = await waitForConfig(base, TOKEN, deadline);
   if (AGENT === 'codex' && !config.features?.codex) throw new Error('server reports Codex unavailable');
-  const result = await smokeTurn(base, TOKEN, {
-    key: `new-smoke-${process.pid}-${Date.now()}`,
-    cwd: join(home, 'workspace'),
-    agent: AGENT,
-    model: MODEL,
-    deadline,
-  });
-  if (!result.ok) throw new Error(result.error || 'smoke failed');
-  if (v['fake-codex'] && !result.activity.some((event) => event.label === 'Thinking')) {
-    throw new Error(`fake Codex reasoning did not refresh activity: ${JSON.stringify(result.activity)}`);
+  const key = `new-smoke-${process.pid}-${Date.now()}`;
+  const results = [];
+  for (let turn = 0; turn < TURNS; turn++) {
+    const result = await smokeTurn(base, TOKEN, {
+      key,
+      cwd: join(home, 'workspace'),
+      agent: AGENT,
+      model: MODEL,
+      deadline,
+    });
+    if (!result.ok) throw new Error(`turn ${turn + 1}: ${result.error || 'smoke failed'}`);
+    if (v['fake-codex'] && !result.activity.some((event) => event.label === 'Thinking')) {
+      throw new Error(`turn ${turn + 1}: fake Codex reasoning did not refresh activity: ${JSON.stringify(result.activity)}`);
+    }
+    results.push(result);
   }
+  const result = results.at(-1);
   console.log(JSON.stringify({
     ok: true,
     agent: AGENT,
     model: AGENT === 'codex' ? MODEL : '',
     fakeCodex: !!v['fake-codex'],
+    fakeCodexStayOpen: !!v['fake-codex-stay-open'],
+    turns: TURNS,
     sessionId: result.sessionId,
     activity: result.activity.slice(0, 8),
     response: result.text.trim().slice(0, 500),
