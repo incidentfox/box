@@ -42,7 +42,7 @@ import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
-import { isVobCallSession } from './vob-session-category.mjs';
+import { isVobCallSession, mainPageSessionRank } from './vob-session-category.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -1828,16 +1828,16 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
   const isVob = (id) => isVobCallSession(byId.get(id) || {});
-  // counts over ALL sessions. Auto and VOB call sessions are tallied only under
-  // their own category (and `archived` if archived) so they never inflate
-  // All/Working/Needs input/Live.
+  // Counts over all sessions. VOB calls appear in `all` and their dedicated
+  // category, but remain excluded from Working/Needs input/Live to avoid double
+  // counting those status tabs. Automated sessions remain separate.
   // autoSub breaks the auto total into subcategories for the Automated sub-tabs.
   const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
-    if (isVobCallSession(f)) { counts.vob++; continue; }
+    if (isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
     if (favorites.has(f.id)) counts.favorites++;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
@@ -1851,9 +1851,14 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   else if (filter === 'vob') cand = items.filter((f) => !archived.has(f.id) && isVobCallSession(f));
   else if (fbase === 'auto') cand = items.filter((f) => !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
   else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
-  else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f));
+  else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
   const chosen = [], seen = new Set();
-  if (!filter || filter === 'all') { for (const id of liveIds) if (!archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(byId.get(id) || { id, file: null, mtime: 0 }); seen.add(id); } }
+  if (!filter || filter === 'all') {
+    // Reserve every VOB session before the general recency limit, just as live
+    // sessions are reserved. This keeps the complete VOB group on the main page.
+    for (const f of items) if (!archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
+    for (const id of liveIds) if (!archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(byId.get(id) || { id, file: null, mtime: 0 }); seen.add(id); }
+  }
   for (const f of cand) { if (chosen.length >= limit) break; if (!seen.has(f.id)) { chosen.push(f); seen.add(f.id); } }
   const out = chosen.map((s) => {
     const r = rc[s.id];
@@ -1891,6 +1896,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // right at the top), falling back to last-activity for legacy archives with no
   // recorded archive time. Every other view keeps live-pinned-then-recent order.
   if (filter === 'archived') out.sort((a, b) => (b.archivedAt - a.archivedAt) || (b.mtime - a.mtime));
+  else if (!filter || filter === 'all') out.sort((a, b) => mainPageSessionRank(a) - mainPageSessionRank(b) || (b.mtime - a.mtime));
   else out.sort((a, b) => (b.favorite - a.favorite) || (b.pinned - a.pinned) || (b.mtime - a.mtime));
   counts.autoSub = autoSub;
   return { sessions: out, counts };

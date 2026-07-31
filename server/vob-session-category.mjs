@@ -7,3 +7,12 @@ export function isVobCallSession(session = {}) {
   if (VOB_PRODUCTION_DIR_RE.test(String(session.cwd || ''))) return true;
   return VOB_TITLE_RE.test(String(session.title || ''));
 }
+
+// Main-page groups are rendered in this order: Favorites, VOB calls, Live, recent.
+// A favorited VOB session stays in the VOB group so the section remains complete.
+export function mainPageSessionRank(session = {}) {
+  if (session.favorite && session.category !== 'vob') return 0;
+  if (session.category === 'vob') return 1;
+  if (session.pinned) return 2;
+  return 3;
+}
