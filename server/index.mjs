@@ -23,7 +23,7 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
-import { terminateCodexThreadProcesses } from './codex-processes.mjs';
+import { codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-processes.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import { assistantStopsAutoContinue, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue, shouldAutoContinue, validTimeZone } from './session-scheduler.mjs';
@@ -1074,7 +1074,7 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
+  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'medium', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
@@ -4159,11 +4159,12 @@ function refreshCodexActivity(s) {
 
 function codexThreadProcessBusy(id) {
   if (!id) return false;
-  const rec = (loadCodex().sessions || {})[id];
-  // Box-created sessions can later acquire an active /goal. Their registry source stays empty,
-  // but they are just as unsafe to resume concurrently as a terminal-created (`native`) thread.
-  if (!rec || !runningCodexThreadIds().has(id)) return false;
-  return codexRolloutState(rec.transcriptPath || findCodexRollout(CODEX_HOME, id)).busy;
+  // Resume invocations write a new rollout file, while the registry can keep pointing at the
+  // original one. Its tail may therefore look idle even though another process is actively
+  // resuming the same thread. The process argv is the authoritative concurrency signal.
+  // Bypass the short list-view cache here so two independently launched workers cannot both
+  // observe a stale negative result and fork an expensive long-context turn.
+  return codexResumeThreadActive(pgrepFull(id), id);
 }
 
 function nativeCodexTurnActive(s) {

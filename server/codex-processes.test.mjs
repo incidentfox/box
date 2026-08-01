@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { codexResumeProcessPids, terminateCodexThreadProcesses } from './codex-processes.mjs';
+import { codexResumeProcessPids, codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-processes.mjs';
 
 const id = '019fb186-84df-7391-85b1-ec9623692b07';
 const other = '019fb72e-2c17-7bd3-a765-c75b8c57aa86';
@@ -13,6 +13,9 @@ const processes = [
 
 assert.deepEqual(codexResumeProcessPids(processes, id), [102, 101]);
 assert.deepEqual(codexResumeProcessPids(processes, 'not-a-thread'), []);
+assert.equal(codexResumeThreadActive(processes, id), true);
+assert.equal(codexResumeThreadActive(processes, other), true);
+assert.equal(codexResumeThreadActive(processes, 'not-a-thread'), false);
 
 const calls = [];
 assert.deepEqual(terminateCodexThreadProcesses(id, 'SIGTERM', {

@@ -24,6 +24,10 @@ export function codexResumeProcessPids(procText, threadId) {
   return [...pids].sort((a, b) => b - a);
 }
 
+export function codexResumeThreadActive(procText, threadId) {
+  return codexResumeProcessPids(procText, threadId).length > 0;
+}
+
 export function terminateCodexThreadProcesses(threadId, signal = 'SIGTERM', {
   procText = '',
   killImpl = process.kill,
