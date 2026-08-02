@@ -34,7 +34,7 @@ import {
   cancelQueuedMessage, prepareRecoveredCodexMessage, recoverPersistedQueue, restoreCanceledMessage,
 } from './queue-state.mjs';
 import { sttEngineOrder, stripNonSpeechTags } from './stt-engine.mjs';
-import { findCodexRollout, readCodexTokenInfo } from './codex-context.mjs';
+import { findCodexRollout, readCodexCompactionInfo, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
 import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
@@ -2053,7 +2053,7 @@ async function sessionHistory(id, { before = null } = {}) {
     const rolloutFile = codex.transcriptPath || findCodexRollout(CODEX_HOME, id);
     const rollout = await codexRolloutHistory(rolloutFile, { before });
     const messages = rolloutFile ? rollout.messages : loadCodexMessages(id, codex);
-    return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: rollout.hasMore, cursor: rollout.cursor, liveCursor: rollout.liveCursor, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }) };
+    return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: rollout.hasMore, cursor: rollout.cursor, liveCursor: rollout.liveCursor, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }), historyCompaction: before == null ? readCodexCompactionInfo(rolloutFile) : null };
   }
   const gemini = (loadGemini().sessions || {})[id];
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };

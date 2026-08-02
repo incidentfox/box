@@ -1286,7 +1286,13 @@ function currentContext() {
     windowTokens: win,
     percent: win ? Math.min(999, Math.round((used / win) * 100)) : 0,
     source: cx.source || 'estimated',
+    historyCompaction: cur.historyCompaction || null,
   };
+}
+function formatHistoryCompaction(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'History compacted';
+  return `History compacted ${date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
 }
 function renderContextMeter() {
   const el = $('contextMeter'); if (!el) return;
@@ -1294,8 +1300,10 @@ function renderContextMeter() {
   el.classList.toggle('warn', cx.percent >= 70 && cx.percent < 90);
   el.classList.toggle('hi', cx.percent >= 90);
   const estimated = cx.source !== 'reported';
-  el.title = `${cx.usedTokens.toLocaleString()} / ${cx.windowTokens.toLocaleString()} tokens${estimated ? ' (estimated)' : ''}`;
-  el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
+  const compactedAt = cx.historyCompaction && cx.historyCompaction.lastCompactedAt;
+  const compacted = compactedAt ? formatHistoryCompaction(compactedAt) : '';
+  el.title = `${cx.usedTokens.toLocaleString()} / ${cx.windowTokens.toLocaleString()} tokens${estimated ? ' (estimated)' : ''}${compacted ? ` · ${compacted}` : ''}`;
+  el.innerHTML = `<div class="contextFill" style="width:${Math.min(100, cx.percent)}%"></div><div class="contextText"><span>${compacted ? `${compacted} · ` : ''}Context ${cx.percent}% before compact</span><span>${fmtTokens(cx.usedTokens)} / ${fmtTokens(cx.windowTokens)}${estimated ? ' <span class="contextEst">est</span>' : ''}</span></div>`;
 }
 function openSessionMenu() {
   const voiceAvailable = $('voiceBtn') && !$('voiceBtn').classList.contains('hidden');
@@ -2304,7 +2312,7 @@ async function openChat(s) {
       if (typeof h.archived === 'boolean') { cur.archived = h.archived; updateArchiveButton(); }
       if (typeof h.favorite === 'boolean') { cur.favorite = h.favorite; updateFavoriteButton(); }
       cur.parentId = h.parentId || cur.parentId || null; cur.parentTitle = h.parentTitle || cur.parentTitle || '';
-      cur.context = h.context || cur.context; renderContextMeter();
+      cur.context = h.context || cur.context; cur.historyCompaction = h.historyCompaction || null; renderContextMeter();
       cur.histCursor = h.cursor || 0; cur.remoteHasMoreHistory = !!h.hasMore;
       cur.liveCursor = h.liveCursor != null ? h.liveCursor : null; cur.liveCursorSent = false;
       const messages = annotateHistoryMessages(h.messages || []);

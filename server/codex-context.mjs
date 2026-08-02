@@ -83,6 +83,39 @@ export function readCodexTokenInfo(file) {
   return null;
 }
 
+// Return the most recent confirmed context compaction recorded in a rollout. This is
+// deliberately derived from Codex's `context_compacted` event rather than from the
+// UI action which requests compaction: a request can fail or still be in progress.
+// One MiB is enough to retain the latest lifecycle events for large, long-running
+// threads without reading an entire multi-gigabyte rollout.
+export function readCodexCompactionInfo(file) {
+  if (!file) return null;
+  try {
+    const st = statSync(file);
+    const len = Math.min(st.size, 1024 * 1024);
+    const fd = openSync(file, 'r');
+    const buf = Buffer.alloc(len);
+    try { readSync(fd, buf, 0, len, st.size - len); } finally { closeSync(fd); }
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line || !line.includes('context_compacted')) continue;
+      let o;
+      try { o = JSON.parse(line); } catch { continue; } // truncated first line
+      const payload = o && o.type === 'event_msg' ? o.payload : o;
+      if (!payload || payload.type !== 'context_compacted') continue;
+      const timestamp = o.timestamp || payload.timestamp;
+      if (!timestamp) return { lastCompactedAt: null, source: 'rollout' };
+      const parsed = Date.parse(timestamp);
+      return {
+        lastCompactedAt: Number.isFinite(parsed) ? new Date(parsed).toISOString() : timestamp,
+        source: 'rollout',
+      };
+    }
+  } catch {}
+  return null;
+}
+
 const DEFAULT_HISTORY_LIMIT = 120;
 const DEFAULT_PROMPT_CHARS = 1800;
 

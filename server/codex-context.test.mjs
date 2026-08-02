@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   codexUserPromptsFromMessages,
   findCodexRollout,
+  readCodexCompactionInfo,
   readCodexSessionHistory,
   readCodexTokenInfo,
 } from './codex-context.mjs';
@@ -60,7 +61,18 @@ try {
   assert.equal(readCodexTokenInfo(null), null);
   assert.equal(readCodexTokenInfo(join(day, 'nope.jsonl')), null);
 
-  // 5. full-history helper reads ordered user prompts from the rollout first. It logs
+  // 5. A compaction badge must be backed by Codex's recorded event, not a UI
+  // request. The newest event wins when a long-running session compacts again.
+  writeFileSync(file, lines.concat([
+    JSON.stringify({ timestamp: '2026-06-28T22:30:00.000Z', type: 'event_msg', payload: { type: 'context_compacted' } }),
+    JSON.stringify({ timestamp: '2026-06-28T22:31:00.000Z', type: 'event_msg', payload: { type: 'context_compacted' } }),
+  ]).join('\n') + '\n');
+  assert.deepEqual(readCodexCompactionInfo(file), {
+    lastCompactedAt: '2026-06-28T22:31:00.000Z', source: 'rollout',
+  });
+  assert.equal(readCodexCompactionInfo(join(day, 'nope.jsonl')), null);
+
+  // 6. full-history helper reads ordered user prompts from the rollout first. It logs
   //    exactly which root/path was queried and declares read-only permissions.
   const historyId = '019f1059-6b3c-7922-959d-a4c5d4e86abc';
   const historyFile = join(day, `rollout-2026-06-28T23-00-00-${historyId}.jsonl`);
