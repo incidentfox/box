@@ -2435,7 +2435,7 @@ app.put('/api/codex/threads/:id/goal', ...codexControlRoute((id, _session, req) 
   return codexRpc('thread/goal/set', { threadId: id, ...(objective !== undefined ? { objective } : {}), ...(status !== undefined ? { status } : {}) });
 }));
 app.delete('/api/codex/threads/:id/goal', ...codexControlRoute((id) => codexRpc('thread/goal/clear', { threadId: id })));
-app.post('/api/codex/threads/:id/compact', ...codexControlRoute((id) => codexRpc('thread/compact/start', { threadId: id }, { lingerMs: 60_000 })));
+app.post('/api/codex/threads/:id/compact', ...codexControlRoute((id) => codexRpc('thread/compact/start', { threadId: id }, { lingerMs: 60_000, resumeThreadId: id })));
 app.get('/api/codex/threads/:id/background-terminals', ...codexControlRoute((id) => codexRpc('thread/backgroundTerminals/list', { threadId: id })));
 app.delete('/api/codex/threads/:id/background-terminals', ...codexControlRoute((id) => codexRpc('thread/backgroundTerminals/clean', { threadId: id })));
 
