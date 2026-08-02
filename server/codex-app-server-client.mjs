@@ -14,6 +14,7 @@ export function createCodexRpc({ spawnImpl = spawn, timeoutMs = 10000 } = {}) {
       let stdout = '';
       let stderr = '';
       let settled = false;
+      let targetRequestId = 1;
       const finish = (err, value) => {
         if (settled) return;
         settled = true;
@@ -42,8 +43,16 @@ export function createCodexRpc({ spawnImpl = spawn, timeoutMs = 10000 } = {}) {
           if (message.id === 0) {
             if (message.error) return finish(new Error(message.error.message || 'Codex app-server initialization failed'));
             send({ method: 'initialized', params: {} });
-            send({ method, id: 1, params });
-          } else if (message.id === 1) {
+            if (options.resumeThreadId) {
+              targetRequestId = 2;
+              send({ method: 'thread/resume', id: 1, params: { threadId: options.resumeThreadId } });
+            } else {
+              send({ method, id: targetRequestId, params });
+            }
+          } else if (message.id === 1 && options.resumeThreadId) {
+            if (message.error) return finish(new Error(message.error.message || `Unable to resume Codex thread ${options.resumeThreadId}`));
+            send({ method, id: targetRequestId, params });
+          } else if (message.id === targetRequestId) {
             if (message.error) finish(new Error(message.error.message || `${method} failed`));
             else finish(null, message.result);
           }
