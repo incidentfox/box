@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { buildChildEnv } from './child-env.mjs';
 
 function messageText(msg) {
   return (msg?.parts || [])
@@ -34,14 +35,17 @@ function buildPrompt(prompt, images, history) {
 }
 
 export class AgyExecEngine {
-  run({ sessionId, cwd, prompt, images = [], settings = {}, history = [], command = 'agy', onEvent }) {
+  run({ sessionId, cwd, prompt, images = [], settings = {}, history = [], command = 'agy', guest = false, onEvent }) {
     const sid = sessionId || randomUUID();
     const args = [];
     if (settings.model) args.push('--model', settings.model);
     args.push('--print', buildPrompt(prompt, images, history));
     const child = spawn(command, args, {
       cwd: cwd || process.cwd(),
-      env: { ...process.env, PATH: `${process.env.HOME || ''}/.local/bin:${process.env.PATH || ''}` },
+      env: buildChildEnv(process.env, {
+        guest,
+        extra: { PATH: `${process.env.HOME || ''}/.local/bin:${process.env.PATH || ''}` },
+      }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';

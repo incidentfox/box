@@ -37,6 +37,10 @@ const isGuestHere = () => !!(CFG && CFG.guest);
 // never rendered in their own chat sheet — the host couldn't share a chat, which is the
 // entire point. Same chicken-and-egg as the Team button; don't gate on member count.
 const hasTeam = () => !!(teamEp() || isGuestHere() || (CFG && CFG.team && CFG.team.enabled));
+// Stricter: is anyone actually here besides me? Used for the always-on Shared/Private chip.
+// hasTeam() is true on a stock solo box (team is enabled by default), and stamping
+// "Private" on every chat of a box with no teammates is noise about a non-question.
+const teamHasPeople = () => !!(teamEp() || isGuestHere() || (CFG && CFG.team && CFG.team.members > 0));
 const chatEp = () => (cur && cur.ep) || LOCAL_EP;
 const epUrl = (ep, path) => ((ep && ep.base) || '') + path;
 function epWsUrl(ep, path, params) {
@@ -420,6 +424,7 @@ const ICONS = {
   back: SVG('<path d="M15 5l-7 7 7 7"/>', { w: 2.3 }),
   power: SVG('<path d="M12 4v8M7.5 7a8 8 0 1 0 9 0"/>'),
   folder: SVG('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  key: SVG('<circle cx="8" cy="12" r="4"/><path d="M12 12h9M18 12v3M15.5 12v2.5"/>', { w: 1.9 }),
   pencil: SVG('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
   paperclip: SVG('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'),
   mic: SVG('<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/>'),
@@ -797,7 +802,7 @@ let sessionRefreshTimer = null;
 let lastSessionFetchAt = 0;
 let bulkMode = false;
 const bulkSelected = new Set();
-const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['shared', 'Shared'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
@@ -1013,7 +1018,7 @@ function sessionCard(s) {
          <label class="sSelect" title="Select chat"><input type="checkbox" ${bulkSelected.has(s.id) ? 'checked' : ''}><span></span></label>
          <div class="savatar ${s.status}">${s.status === 'idle' ? '' : '<span class="sdot"></span>'}</div>
          <div class="hd">
-	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${s.category === 'vob' ? '<span class="agentTag vob">VOB</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time" data-rel-time="${when}">${relTime(when)}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
+	         <div class="nmrow"><span class="nm"></span>${s.parentId ? '<span class="agentTag fork">Fork</span>' : ''}${s.category === 'vob' ? '<span class="agentTag vob">VOB</span>' : ''}${s.shared ? '<span class="agentTag shared" title="Shared with your team — teammates can read it and send messages">Team</span>' : ''}${agent !== 'claude' ? `<span class="agentTag ${agent}">${agentLabel(agent)}</span>` : ''}${s.hasAttention ? '<span class="attnDot" title="Needs your input"></span>' : ''}<span class="time" data-rel-time="${when}">${relTime(when)}</span><button class="sFav ${s.favorite ? 'on' : ''}" type="button" title="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" aria-label="${s.favorite ? 'Unpin conversation' : 'Pin conversation'}" data-icon="${s.favorite ? 'star-filled' : 'star'}"></button><button class="sMore" type="button" title="More actions (rename / pin / archive)" aria-label="More actions">⋯</button></div>
            <div class="sl"></div>
          </div>
        </div>
@@ -1093,7 +1098,7 @@ function confirmArchive(s) {
   openArchiveConfirm(s);
 }
 function openArchiveSheet(s) {
-  openSheet(s.title, [
+  const rows = [
     s.favorite
       ? { ic: '★', label: 'Unpin', desc: 'Remove from Favorites', fn: () => doFavorite(s, false) }
       : { ic: '☆', label: 'Pin', desc: 'Keep at the top of the chat list', fn: () => doFavorite(s, true) },
@@ -1101,7 +1106,33 @@ function openArchiveSheet(s) {
     s.archived
       ? { ic: '📤', label: 'Unarchive', fn: () => doArchive(s, false) }
       : { ic: '🗄', label: 'Archive', desc: 'Hide from your list', fn: () => doArchive(s, true) },
-  ]);
+  ];
+  // Sharing from the list, not just from inside the chat: the question "who else can see
+  // this?" is one you ask while scanning the list, and it should be answerable there too.
+  if (hasTeam() && typeof setSessionShared === 'function') {
+    rows.splice(1, 0, s.shared
+      ? { ic: ICONS.share, label: 'Stop sharing', desc: 'Teammates lose access immediately', fn: () => doShare(s, false) }
+      : { ic: ICONS.share, label: 'Share with team', desc: shareDesc(s), fn: () => doShare(s, true) });
+  }
+  openSheet(s.title, rows);
+}
+// Sharing admits this chat's FOLDER to the team, so say which folder before the tap
+// rather than explaining it in a toast afterwards.
+function shareDesc(s) {
+  const dir = shortCwd(s.cwd || '');
+  return dir ? `Teammates can read this chat and work in ${dir}` : 'Teammates can read this chat and send messages';
+}
+async function doShare(s, on) {
+  const d = await setSessionShared(s.id, on);
+  if (!d) return;
+  s.shared = !!d.shared;
+  if (cur && cur.id === s.id) { cur.shared = s.shared; renderPresence(); }
+  // A directory the server refused (home, /etc, …) still shares the CHAT — the teammate
+  // just can't open that folder. Saying so is the difference between a confusing
+  // permission error later and an informed choice now.
+  if (d.rootError) toast(`Shared, but ${d.rootError}`, 6000);
+  else toast(on ? 'Shared with your team' : 'No longer shared');
+  fetchSessions(curFilter);
 }
 async function doArchive(s, on) {
   let j = null;
@@ -3121,7 +3152,10 @@ function onServer(o) {
   else if (o.type === 'waiting_clear') clearWaitingCard();
   else if (o.type === 'done') finishTurn(o);
   else if (o.type === 'presence') { cur.viewers = o.viewers || []; cur.typing = o.typing || []; renderPresence(); }
-  else if (o.type === 'share') { cur.shared = !!o.shared; renderPresence(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); }
+  // The broadcast is what tells OTHER viewers (and other tabs) that sharing changed, so it
+  // repaints the list too — otherwise the Team badge and the Shared tab count stay stale
+  // until the next poll. The person who tapped gets their own toast from doShare().
+  else if (o.type === 'share') { cur.shared = !!o.shared; renderPresence(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
   else if (o.type === 'revoked') { onTeamAccessLost(); }
 }
 function onSync(o) {
@@ -3527,7 +3561,12 @@ $('input').addEventListener('input', () => { autoGrow(); onType(); updateSend();
 function setMode(m) { cur.mode = m; $('modeLabel').textContent = m; $('modeChip').title = m; $('modeChip').classList.toggle('bash', m === 'bash'); $('input').placeholder = m === 'bash' ? 'Run a command on the box…' : 'Message…'; }
 $('modeChip').onclick = () => openSheet('Mode', [
   { ic: '⌗', label: 'normal', sel: cur.mode === 'normal', desc: `Chat with ${agentLabel(cur.agent)}`, fn: () => setMode('normal') },
-  { ic: '⌘', label: 'bash', sel: cur.mode === 'bash', desc: 'Run commands on the box', fn: () => setMode('bash') },
+  // The server refuses bash from a guest. Offering the mode and then rejecting the command
+  // is a worse experience than saying so here — and the reason is worth stating, because
+  // "ask the agent instead" genuinely is the way to get the same work done.
+  isGuestHere()
+    ? { ic: '⌘', label: 'bash', sel: false, desc: 'Not available to team guests — ask the agent to run it', fn: () => toast('Bash runs on the host’s box. Ask the agent to run the command for you.', 4000) }
+    : { ic: '⌘', label: 'bash', sel: cur.mode === 'bash', desc: 'Run commands on the box', fn: () => setMode('bash') },
 ]);
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
@@ -3706,6 +3745,11 @@ async function onType() {
    a viewer disappears the instant their socket closes. On a solo box `viewers` is just
    you and `shared` is false, so the bar never appears. */
 let lastTypingSentAt = 0, lastTypingState = false;
+// The chip is a live control only where the toggle would actually work: this box's own
+// chat, already saved. Elsewhere it stays a plain label rather than a button that toasts.
+function canToggleShare() {
+  return !!(hasTeam() && cur && cur.id && !isGuestHere() && !chatIsForeign() && typeof toggleShareCurrentChat === 'function');
+}
 function sendTyping(on) {
   if (!cur.shared || !ws || ws.readyState !== 1) return;
   // The server expires a typing flag after 4s, so a steady typist needs a refresh every
@@ -3720,11 +3764,20 @@ function renderPresence() {
   const me = myMemberId();
   const viewers = (cur.viewers || []).filter((v) => v.id !== me);
   const typing = (cur.typing || []).filter((t) => t.id !== me);
-  if (!cur.shared && !viewers.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  // Once you actually have teammates the chip is ALWAYS shown, even for a private solo
+  // chat. "Is anyone else reading this?" is exactly the question you can't answer from an
+  // absent indicator — silence looked identical to private and to shared-but-nobody-here.
+  if (!cur.shared && !viewers.length && !teamHasPeople()) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
   bar.classList.remove('hidden');
   bar.innerHTML = '';
-  const chip = document.createElement('span'); chip.className = 'presShared';
+  const chip = document.createElement(canToggleShare() ? 'button' : 'span');
+  chip.className = 'presShared' + (cur.shared ? ' on' : '');
   chip.textContent = cur.shared ? 'Shared' : 'Private';
+  if (canToggleShare()) {
+    chip.type = 'button';
+    chip.title = cur.shared ? 'Tap to stop sharing with your team' : 'Tap to share this chat with your team';
+    chip.onclick = () => toggleShareCurrentChat(!cur.shared);
+  }
   bar.appendChild(chip);
   for (const v of viewers) {
     const p = document.createElement('span'); p.className = 'presPerson';
@@ -4610,7 +4663,7 @@ function openChatTitleSheet() {
   if (hasTeam() && typeof toggleShareCurrentChat === 'function') {
     rows.splice(1, 0, cur.shared
       ? { ic: ICONS.share, label: 'Stop sharing', desc: 'Teammates lose access immediately', fn: () => toggleShareCurrentChat(false) }
-      : { ic: ICONS.share, label: 'Share with team', desc: 'Your team can read and send messages here', fn: () => toggleShareCurrentChat(true) });
+      : { ic: ICONS.share, label: 'Share with team', desc: shareDesc({ cwd: cur.cwd }), fn: () => toggleShareCurrentChat(true) });
   }
   openSheet(title, rows);
 }

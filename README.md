@@ -61,6 +61,12 @@ filesystem there, and put a good phone UI on top.
   can pick it up with the right context. **No Linear account needed** — by default Box runs a
   built-in, local clone of Linear backed by a SQLite file; connect a real Linear later (and
   `node bin/linear-lite.mjs import` your history up) if you ever want to.
+- **A second seat, honestly scoped.** Hand a teammate an invite code and they get the chats
+  you share, the folders those chats live in, and the API keys you publish to the team —
+  nothing else on the box. Sharing a chat is one tap and admits its folder, so you both work
+  in the same place. It is a *trust* boundary, not a sandbox: their agents run as your unix
+  user, so invite people you'd give a shell to. Details and the exact limits:
+  [`docs/TEAM.md`](docs/TEAM.md).
 - **Context can arrive while agents work.** The harness can surface "needs you" decisions,
   per-session status docs, recent meetings/emails from a brain folder, pipeline events, and
   other activity into the place you actually check: the Box app.

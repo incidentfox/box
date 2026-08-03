@@ -1,9 +1,8 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { buildChildEnv } from './child-env.mjs';
 
-function childEnv() {
-  return { ...process.env };
-}
+const childEnv = (opts = {}) => buildChildEnv(process.env, opts);
 
 function summarizeCommand(command) {
   return String(command || '').replace(/\s+/g, ' ').slice(0, 120);
@@ -104,7 +103,7 @@ export class CodexExecEngine {
     this.spawnImpl = spawnImpl;
   }
 
-  run({ sessionId, cwd, prompt, images = [], settings = {}, onEvent }) {
+  run({ sessionId, cwd, prompt, images = [], settings = {}, guest = false, onEvent }) {
     const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
 
     // Optionally source an env file before codex (set CODEX_ENV_FILE); otherwise just run codex.

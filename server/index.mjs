@@ -19,6 +19,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import multer from 'multer';
 import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd } from './rc-engine.mjs';
+import { buildChildEnv } from './child-env.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
@@ -370,15 +371,40 @@ if (!AUTH_TOKEN) {
   writeFileSync(envPath, prev + `CC_AUTH_TOKEN=${AUTH_TOKEN}\n`);
 }
 
-// claude must use full Max creds, not the injected inference-only token.
-// Also strip session-inheritance vars so spawned claude processes are
-// top-level sessions, not children of the box server's parent session.
-function childEnv() {
-  const env = { ...process.env };
-  delete env.CLAUDE_CODE_OAUTH_TOKEN; delete env.CLAUDE_OAUTH_TOKEN; delete env.ANTHROPIC_API_KEY;
-  delete env.CLAUDE_CODE_SESSION_ID; delete env.CLAUDE_CODE_CHILD_SESSION; delete env.CODEX_COMPANION_SESSION_ID;
-  if (ELEVEN_KEY) env.ELEVENLABS_API_KEY = ELEVEN_KEY;
-  return env;
+// The filter itself lives in server/child-env.mjs so every engine shares one copy.
+// `guest: true` swaps the denylist for an allowlist — see that file for why.
+function childEnv(opts = {}) {
+  const guest = !!opts.guest;
+  const extra = {};
+  // Team secrets are the keys someone deliberately published to the team. For a guest the
+  // allowlist has already stripped everything, so these are simply added back — they're
+  // the whole reason a guest process has any credentials at all. For the owner they act as
+  // DEFAULTS and never shadow a var the box already sets, so publishing a key to the team
+  // can't quietly redirect the owner's own sessions.
+  for (const [k, v] of Object.entries(team.secretsEnv())) {
+    if (guest || process.env[k] == null) extra[k] = v;
+  }
+  if (ELEVEN_KEY && !guest) extra.ELEVENLABS_API_KEY = ELEVEN_KEY;
+  return buildChildEnv(process.env, { guest, extra });
+}
+
+// A session STARTED BY a guest runs with the restricted env for its whole life — an
+// agent process's env is fixed when it spawns, so this is a property of the session, not
+// of the individual turn. A session the OWNER started keeps the owner's env even after
+// it's shared, and a guest typing into it inherits that: sharing a chat shares its
+// process. That's the documented edge of the trust model, not an accident.
+const sessionIsGuest = (s) => !!(s && (s.createdBy || (s.sessionId && team.sessionOwner(s.sessionId))));
+
+// The working directory of a session that may have no live runtime entry — sharing an old
+// chat from the list, rather than the one currently open. Falls back to the session list,
+// which already resolves cwd from the running process / bridge / transcript in that order.
+function sessionCwd(id) {
+  const live = RT.get(resolveKey(id));
+  if (live && live.cwd) return live.cwd;
+  try {
+    const hit = listSessions({ filter: 'all', limit: 10000 }).sessions.find((x) => x.id === id);
+    return (hit && hit.cwd) || '';
+  } catch { return ''; }
 }
 
 // ---- helpers: names store -------------------------------------------------
@@ -527,7 +553,7 @@ function restoreSessionBridge(id) {
     s.agent = s.agent || 'claude';
     s.cwd = s.cwd || decodeCwd(dirname(file)) || DEFAULT_CWD;
     persist(s);
-    const rec = rcEngine.open(id, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    const rec = rcEngine.open(id, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) return { started: false, reason: rec.reason || 'blocked' };
     ensureTail(s);
     LIVE_BRIDGES.set(id, { rcName: rcName(s), cwd: s.cwd, pid: rec && rec.pid ? rec.pid : null });
@@ -1755,6 +1781,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const archived = loadArchived();
   const archivedAt = loadArchivedAt();
   const favorites = loadFavorites();
+  const sharedNow = new Set(team.sharedIds());
   const files = [];
   const seenIds = new Set();
   for (const dir of eachProjectDir()) {
@@ -1841,6 +1868,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
     if (isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
     if (favorites.has(f.id)) counts.favorites++;
+    if (sharedNow.has(f.id)) counts.shared = (counts.shared || 0) + 1;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
   saveAutoCat();
@@ -1850,6 +1878,7 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   let cand;
   if (filter === 'archived') cand = items.filter((f) => archived.has(f.id));
   else if (filter === 'favorites') cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && favorites.has(f.id));
+  else if (filter === 'shared') cand = items.filter((f) => !archived.has(f.id) && sharedNow.has(f.id));
   else if (filter === 'vob') cand = items.filter((f) => !archived.has(f.id) && isVobCallSession(f));
   else if (fbase === 'auto') cand = items.filter((f) => !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
   else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
@@ -1892,6 +1921,10 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
       hasAttention,
+      // Which chats the team can see. Without this the owner's list gives no hint that a
+      // conversation is being read by someone else, which is the thing you most want to
+      // know before typing into it.
+      shared: sharedNow.has(s.id),
     };
   });
   // Archived view sorts most-recently-archived first (so a chat you JUST archived is
@@ -2186,8 +2219,13 @@ const authOk = (req) => !!principalOf(bearerOf(req));
 // Entries with a `check` run a second, per-resource authorization pass.
 const GUEST_ROUTES = [
   { m: 'GET',  re: /^\/api\/config$/ },                       // returns a stripped payload for guests
-  { m: 'GET',  re: /^\/api\/team\/(me|sessions)$/ },
+  { m: 'GET',  re: /^\/api\/team\/(me|sessions|roots)$/ },
   { m: 'POST', re: /^\/api\/team\/leave$/ },
+  // A guest can SEE which team secrets exist and CONTRIBUTE one (so they can hand the
+  // team their own key without it going through chat), but never read a value back and
+  // never delete someone else's. Listing returns keys and hints only.
+  { m: 'GET',  re: /^\/api\/team\/secrets$/ },
+  { m: 'POST', re: /^\/api\/team\/secrets$/ },
   { m: 'GET',  re: /^\/api\/team\/fs$/ },                     // scoped to the workspace root inside the handler
   { m: 'POST', re: /^\/api\/upload$/ },
   { m: 'GET',  re: /^\/api\/img$/ },                          // already hard-scoped to UPLOAD_DIR
@@ -2291,6 +2329,8 @@ app.get('/api/team', requireOwner, (req, res) => res.json({
   members: team.listMembers(),
   invites: team.listInvites().sort((a, b) => b.createdAt - a.createdAt).slice(0, 25),
   shared: team.sharedIds(),
+  roots: team.listRoots(),
+  secrets: team.listSecrets(),
   online: onlineMemberIds(),
 }));
 app.post('/api/team/invites', requireOwner, (req, res) => {
@@ -2318,13 +2358,53 @@ app.post('/api/team/workspace', requireOwner, (req, res) => {
 app.post('/api/sessions/:id/share', requireOwner, (req, res) => {
   const id = req.params.id;
   const on = !((req.body || {}).shared === false);
-  team.setShared(id, on, 'owner');
-  if (!on) evictGuestsFromSession(id);
   const s = RT.get(resolveKey(id));
+  // The chat's directory rides along, so a teammate ends up in the same folder instead of
+  // being clamped to the scratch root mid-conversation. Some directories can't be admitted
+  // (home, /etc, …) — when that happens the chat is still shared, and we say why rather
+  // than silently sharing a conversation nobody else can actually work in.
+  const cwd = on ? (s && s.cwd) || sessionCwd(id) : '';
+  team.setShared(id, on, 'owner', cwd);
+  let rootError = '';
+  if (on && cwd && !team.withinWorkspace(cwd)) rootError = team.rootRejection(cwd) || 'that directory could not be added';
+  if (!on) evictGuestsFromSession(id);
   if (s) bcast(s, { type: 'share', shared: on });
+  if (on && cwd && !rootError) console.log(`[team] shared ${id} (${cwd})`);
   invalidateSessionLists();
-  res.json({ ok: true, shared: on });
+  res.json({ ok: true, shared: on, cwd: cwd || null, rootError: rootError || undefined });
 });
+
+// Directories the team may reach, beyond the scratch workspace. Most get here implicitly
+// by sharing a chat; this is the manual door for "let them into this repo" on its own.
+app.get('/api/team/roots', requireAuth, (req, res) =>
+  res.json({ workspaceRoot: team.workspaceRoot(), roots: team.listRoots() }));
+app.post('/api/team/roots', requireOwner, (req, res) => {
+  const dir = expandUserPath((req.body || {}).path);
+  if (!dir) return res.status(400).json({ error: 'bad path' });
+  const out = team.addRoot(dir, 'owner', false);
+  if (!out.ok) return res.status(400).json({ error: out.error });
+  res.json({ ok: true, root: out.root, roots: team.listRoots() });
+});
+app.delete('/api/team/roots', requireOwner, (req, res) => {
+  const dir = expandUserPath(req.query.path || (req.body || {}).path);
+  // No live eviction needed: containment is re-checked on every frame and every fs
+  // request, so a guest sitting in a withdrawn root is clamped on their next action.
+  res.json({ ok: team.removeRoot(dir), roots: team.listRoots() });
+});
+
+// Team secrets. Keys and hints go out; values never do, in any response, for anyone —
+// including the owner. Write-only by design: this is a way to hand a key to the agents,
+// not a password manager to read back from a phone.
+app.get('/api/team/secrets', requireAuth, (req, res) => res.json({ secrets: team.listSecrets() }));
+app.post('/api/team/secrets', requireAuth, (req, res) => {
+  const b = req.body || {};
+  const out = team.setSecret(b.key, b.value, req.principal.name || req.principal.kind, b.note);
+  if (!out.ok) return res.status(400).json({ error: out.error });
+  console.log(`[team] secret ${out.key} set by ${req.principal.kind}:${req.principal.id}`);   // key only, never the value
+  res.json({ ok: true, secrets: team.listSecrets() });
+});
+app.delete('/api/team/secrets/:key', requireOwner, (req, res) =>
+  res.json({ ok: team.deleteSecret(req.params.key), secrets: team.listSecrets() }));
 
 // Guest + owner: who am I, and what can I see.
 app.get('/api/team/me', requireAuth, (req, res) => {
@@ -2333,6 +2413,10 @@ app.get('/api/team/me', requireAuth, (req, res) => {
     member: { id: p.id, name: p.name, role: p.role, color: p.color },
     ownerName: OWNER_NAME,
     workspaceRoot: team.workspaceRoot(),
+    roots: team.listRoots(),
+    // Metadata only (listSecrets never returns values) — a guest needs to know which keys
+    // their agents already have before pasting a duplicate of one.
+    secrets: team.listSecrets(),
     members: team.listMembers().filter((m) => !m.revoked),
     online: onlineMemberIds(),
   });
@@ -2360,11 +2444,21 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
   res.json({ sessions, workspaceRoot: team.workspaceRoot(), me: { id: p.id, name: p.name, color: p.color } });
 });
 
-// Workspace file browser. Every path is clamped to the workspace root — a request for
-// anything outside it is answered with the root, not an error, so probing tells you nothing.
+// Workspace file browser. Every path is clamped to the team's roots — a request for
+// anything outside them is answered with the scratch root, not an error, so probing tells
+// you nothing.
 app.get('/api/team/fs', requireAuth, (req, res) => {
   const root = team.ensureWorkspace();
   const isGuest = req.principal.kind === 'guest';
+  const roots = team.teamRoots();
+  // With more than one root there is no single directory that contains them all, so the
+  // top level is a synthetic listing of the roots themselves rather than a real folder.
+  if (req.query.path === '@roots' || (!req.query.path && roots.length > 1)) {
+    return res.json({
+      type: 'roots', path: '@roots', root, atRoot: true, parent: null,
+      entries: roots.map((r) => ({ name: r.startsWith(HOME) ? '~' + r.slice(HOME.length) : r, path: r, dir: true, root: true })),
+    });
+  }
   const want = expandUserPath(req.query.path) || root;
   const p = isGuest ? team.guestCwd(want) : resolve(want);
   try {
@@ -2375,8 +2469,13 @@ app.get('/api/team/fs', requireAuth, (req, res) => {
         .map((e) => ({ name: e.name, dir: e.isDirectory() }))
         .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
       const parent = dirname(p);
-      return res.json({ type: 'dir', path: p, root, atRoot: p === resolve(root),
-        parent: (!isGuest || team.withinWorkspace(parent)) ? parent : null, entries });
+      // "At a root" means going up would leave team space. With several roots that's the
+      // signal to hand the browser back to the roots list rather than to a real parent.
+      const atRoot = roots.some((r) => resolve(r) === p);
+      return res.json({ type: 'dir', path: p, root, atRoot,
+        parent: atRoot ? (roots.length > 1 ? '@roots' : null)
+          : (!isGuest || team.withinWorkspace(parent)) ? parent : null,
+        entries });
     }
     if (st.size > 1_000_000) return res.json({ type: 'file', path: p, root, tooBig: true, size: st.size });
     res.json({ type: 'file', path: p, root, content: readFileSync(p, 'utf8') });
@@ -4305,7 +4404,7 @@ async function checkWaiting(s) {
   try {
     // Attach a local pty so we can read the TUI (collision-safe: reattaches a box-local bridge,
     // refuses to spawn a competing one for a session owned elsewhere). Then scrape the screen.
-    const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && !rec.blocked) { attached = true; const buf = await rcEngine.captureScreen(s.sessionId); if (buf) prompt = promptFromBuffer(buf); }
   } catch {}
   s.waitingActive = true;
@@ -4319,7 +4418,7 @@ async function answerWaiting(extKey, sel) {
   const s = rt(extKey);
   if (!s.sessionId) return;
   try {
-    const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+    const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
     const ok = await rcEngine.answerWaiting(s.sessionId, sel);
     // Optimistically clear the card; the JSONL tail will render the answered tool_use/result and
@@ -4713,7 +4812,16 @@ function runTurn(s, msg) {
   return new Promise((resolve) => {
 	    if (msg.mode === 'bash') {
       const emit = (o) => bcast(s, o);
-      const p = spawn('bash', ['-lc', msg.text || ''], { cwd: msg.cwd || s.cwd || DEFAULT_CWD, env: childEnv() });
+      // Bash mode is owner-only. It runs the raw string with no agent in the loop, so the
+      // workspace clamp on `cwd` buys nothing — `cat ~/.ssh/id_ed25519` ignores cwd
+      // entirely. A guest who needs a command can ask the agent to run it, which at least
+      // goes through the agent's own tooling.
+      if (msg.byGuest) {
+        bcast(s, { type: 'bash_out', text: 'Bash mode is not available to team guests. Ask the agent to run the command instead.\n' });
+        bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
+        return resolve();
+      }
+      const p = spawn('bash', ['-lc', msg.text || ''], { cwd: msg.cwd || s.cwd || DEFAULT_CWD, env: childEnv({ guest: sessionIsGuest(s) }) });
       s.bashProc = p;
       p.stdout.on('data', (d) => emit({ type: 'bash_out', text: d.toString() }));
       p.stderr.on('data', (d) => emit({ type: 'bash_out', text: d.toString() }));
@@ -4742,7 +4850,7 @@ function runTurn(s, msg) {
     (async () => {
       try {
         // Open (or reuse) the RC process for this session.
-        const rec = s.sessionId ? rcEngine.open(s.sessionId, rcName(s), { force: !!msg.force, cwd: s.cwd, settings: (s.settings || {}).claude }) : rcEngine.open(null, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude });
+        const rec = s.sessionId ? rcEngine.open(s.sessionId, rcName(s), { force: !!msg.force, cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) }) : rcEngine.open(null, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
         if (rec && rec.blocked) {
           // Only reached for reason 'external-owner': the session is live on a REAL
           // foreign owner (your laptop / the official app) — there's no box-local
@@ -4872,6 +4980,7 @@ function runCodexTurn(s, msg, resolve) {
     prompt: msg.text || '',
     images: msg.images || [],
     settings: (s.settings || {}).codex || DEFAULT_SETTINGS.codex,
+    guest: sessionIsGuest(s),
     onEvent: (ev) => {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;
@@ -5003,6 +5112,7 @@ function runGeminiTurn(s, msg, resolve) {
     prompt: msg.text || '',
     images: msg.images || [],
     settings: (s.settings || {}).gemini || DEFAULT_SETTINGS.gemini,
+    guest: sessionIsGuest(s),
     apiKey: GEMINI_KEY,
     onEvent: (ev) => {
       if (ev.type === 'session') {
@@ -5074,6 +5184,7 @@ function runAgyTurn(s, msg, resolve) {
     images: msg.images || [],
     history,
     settings: (s.settings || {}).agy || DEFAULT_SETTINGS.agy,
+    guest: sessionIsGuest(s),
     command: AGY_CMD,
     onEvent: (ev) => {
       if (ev.type === 'text') {
@@ -5346,8 +5457,13 @@ wss.on('connection', (ws) => {
         text: shared ? team.attributePrompt(rawText, ws.principal) : rawText,
         displayText: m.displayText != null ? m.displayText : (shared ? rawText : undefined),
         author, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude',
-        // A guest's chat is pinned inside the shared workspace no matter what cwd the
-        // client asks for; the clamp is here on the server, never in the UI.
+        // Who sent THIS turn, as opposed to who owns the session — bash mode is refused
+        // per-turn, so a guest can't shell out through a chat the owner started.
+        byGuest: isGuest,
+        // A guest's turn runs inside a folder the team has been admitted to, no matter what
+        // cwd the client asks for; the clamp is here on the server, never in the UI. Since
+        // sharing a chat admits its folder, this normally leaves a shared chat exactly where
+        // the owner left it — the clamp only bites on a directory nobody shared.
         cwd: isGuest ? team.guestCwd(m.cwd) : m.cwd,
         force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
       });
@@ -5363,7 +5479,7 @@ wss.on('connection', (ws) => {
     } else if (m.type === 'settings') {
       const s = rt(m.key);
       s.settings = normalizeSettings(m.settings || s.settings || {});
-      // A guest must not be able to relocate a session out of the shared workspace by
+      // A guest must not be able to relocate a session out of the team's folders by
       // pushing a settings frame — clamp before the directory check, not after.
       const nextCwd = isGuest ? team.guestCwd(expandUserPath(m.cwd)) : expandUserPath(m.cwd);
       if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;

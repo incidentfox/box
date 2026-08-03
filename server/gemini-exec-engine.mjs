@@ -20,6 +20,7 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { buildChildEnv } from './child-env.mjs';
 
 const basename = (p) => String(p || '').split('/').filter(Boolean).pop() || String(p || '');
 
@@ -54,7 +55,7 @@ export class GeminiExecEngine {
   // sessionId: the box-minted UUID for this chat. isNew=true on the first turn (start the
   // session with that id); else resume it. Returns a ChildProcess — caller wires
   // .on('close', finish) / .on('error', …) and .kill(), same as the Codex engine.
-  run({ sessionId, cwd, prompt, images = [], settings = {}, isNew = false, apiKey = '', onEvent }) {
+  run({ sessionId, cwd, prompt, images = [], settings = {}, isNew = false, apiKey = '', guest = false, onEvent }) {
     const model = settings.model || 'gemini-3.5-flash';
     const emit = (ev) => { try { onEvent?.(ev); } catch {} };
 
@@ -79,8 +80,10 @@ export class GeminiExecEngine {
     // process.env — so the spawned CLI wouldn't inherit it. Inject it explicitly. (An AI Studio
     // key works as GEMINI_API_KEY.) GEMINI_CLI_TRUST_WORKSPACE pairs with --skip-trust so YOLO
     // actually auto-approves headless.
-    const env = { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: 'true' };
-    if (apiKey) env.GEMINI_API_KEY = String(apiKey);
+    const env = buildChildEnv(process.env, {
+      guest,
+      extra: { GEMINI_CLI_TRUST_WORKSPACE: 'true', ...(apiKey ? { GEMINI_API_KEY: String(apiKey) } : null) },
+    });
     const child = spawn('gemini', args, {
       cwd: cwd || process.cwd(),
       env,

@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   _setTeamForTest, attributePrompt, authorTag, canAccessSession, claimSession, createInvite,
   formatInviteCode, guestCwd, isShared, listInvites, listMembers, normalizeInviteCode,
   OWNER, redeemInvite, renameMember, resolveGuest, revokeInvite, revokeMember, setOwnerName,
   setShared, setWorkspaceRoot, splitAuthorTag, withinWorkspace,
+  addRoot, removeRoot, listRoots, teamRoots, rootRejection,
+  listSecrets, setSecret, deleteSecret, secretsEnv, secretKeyRejection,
 } from './team.mjs';
 
 // _setTeamForTest also detaches the module from disk — nothing below touches a real team.json.
@@ -180,5 +182,97 @@ assert.equal(renameMember('nope', 'x'), false);
 // An empty rename keeps the previous name rather than blanking the badge.
 renameMember(sneaky.member.id, '');
 assert.equal(listMembers()[0].name, 'Eve');
+
+// ---- team roots ------------------------------------------------------------
+// Sharing a chat admits its DIRECTORY, so the owner and a guest work in the same folder
+// instead of the guest being silently clamped to the scratch root.
+const rootBase = mkdtempSync(join(tmpdir(), 'box-roots-'));
+const scratch = join(rootBase, 'scratch');
+const repo = join(rootBase, 'repo');
+const elsewhere = join(rootBase, 'elsewhere');
+for (const d of [scratch, repo, elsewhere]) mkdirSync(d, { recursive: true });
+_setTeamForTest({ workspaceRoot: scratch });
+
+assert.equal(withinWorkspace(join(repo, 'src')), false);      // not admitted yet
+setShared('sess-repo', true, 'owner', repo);
+assert.equal(withinWorkspace(join(repo, 'src')), true);       // admitted by sharing
+assert.equal(withinWorkspace(join(elsewhere, 'x')), false);   // and nothing else came with it
+assert.equal(guestCwd(join(repo, 'src')), join(repo, 'src')); // guest is no longer clamped away
+assert.equal(guestCwd(join(elsewhere, 'x')), scratch);        // still clamped outside team space
+
+// A second chat in the same directory must keep the root alive when the first unshares.
+setShared('sess-repo-2', true, 'owner', repo);
+setShared('sess-repo', false, 'owner');
+assert.equal(withinWorkspace(join(repo, 'src')), true, 'root withdrawn while another chat still uses it');
+setShared('sess-repo-2', false, 'owner');
+assert.equal(withinWorkspace(join(repo, 'src')), false, 'root outlived the last chat sharing it');
+
+// A root the owner added by hand is NOT withdrawn by unsharing a chat that happened to live there.
+addRoot(repo, 'owner', false);
+setShared('sess-repo-3', true, 'owner', repo);
+setShared('sess-repo-3', false, 'owner');
+assert.equal(withinWorkspace(join(repo, 'src')), true, 'manual root removed by an unrelated unshare');
+assert.equal(removeRoot(repo), true);
+assert.equal(listRoots().length, 0);
+
+// The scratch workspace is always reachable and is never recorded as a separate root.
+assert.equal(withinWorkspace(join(scratch, 'notes.md')), true);
+assert.equal(addRoot(join(scratch, 'sub'), 'owner').root, null);
+assert.equal(listRoots().length, 0);
+assert.ok(teamRoots().includes(scratch));
+
+// Directories that would hand back everything the guest env filter just removed.
+const HOME = homedir();
+assert.ok(rootRejection(HOME));                               // home holds every credential
+assert.ok(rootRejection('/'));
+assert.ok(rootRejection('/etc'));
+assert.ok(rootRejection(join(HOME, '.ssh')));                 // forbidden if it exists, missing if it doesn't
+assert.equal(addRoot('/etc', 'owner').ok, false);
+assert.equal(addRoot(HOME, 'owner').ok, false);
+// An ancestor of a forbidden path is refused too: admitting ~/development's parent would
+// admit ~/.ssh by walking up, which is the whole point of the forbidden list.
+assert.ok(rootRejection('/home'));
+assert.equal(rootRejection(join(rootBase, 'does-not-exist')), 'that directory does not exist');
+assert.equal(rootRejection(repo), '');
+
+// Containment resolves symlinks against EVERY root, not just the one you came in through:
+// a link out of team space is still refused, but a link into another admitted root is fine.
+writeFileSync(join(elsewhere, 'secret.txt'), 'x');
+symlinkSync(elsewhere, join(scratch, 'escape'));
+symlinkSync(repo, join(scratch, 'to-repo'));
+assert.equal(withinWorkspace(join(scratch, 'escape', 'secret.txt')), false, 'symlink escaped team space');
+addRoot(repo, 'owner', false);
+assert.equal(withinWorkspace(join(scratch, 'to-repo', 'src')), true, 'symlink into a sibling root was refused');
+removeRoot(repo);
+
+// ---- team secrets ----------------------------------------------------------
+_setTeamForTest({ workspaceRoot: scratch });
+assert.deepEqual(listSecrets(), []);
+assert.equal(setSecret('OPENAI_API_KEY', 'sk-abcdef123456', 'Rose', 'shared team key').ok, true);
+const listed = listSecrets();
+assert.equal(listed.length, 1);
+assert.equal(listed[0].key, 'OPENAI_API_KEY');
+assert.equal(listed[0].addedBy, 'Rose');
+// The listing is what gets rendered in the UI — it must not carry the value anywhere.
+assert.equal('value' in listed[0], false);
+assert.equal(JSON.stringify(listed).includes('sk-abcdef123456'), false);
+assert.equal(listed[0].hint.includes('abcdef'), false);
+// Values leave the module in exactly one direction.
+assert.equal(secretsEnv().OPENAI_API_KEY, 'sk-abcdef123456');
+
+// Keys that decide how a program runs are refused: team secrets are injected into the
+// OWNER's sessions too, so a guest setting PATH would run their code as the owner.
+for (const bad of ['PATH', 'LD_PRELOAD', 'NODE_OPTIONS', 'CC_AUTH_TOKEN', 'BASH_ENV', 'GIT_SSH_COMMAND']) {
+  assert.ok(secretKeyRejection(bad), `${bad} must be refused as a team secret`);
+  assert.equal(setSecret(bad, 'x', 'Eve').ok, false, `${bad} was accepted as a team secret`);
+}
+assert.ok(secretKeyRejection('lowercase'));
+assert.ok(secretKeyRejection('HAS-DASH'));
+assert.ok(secretKeyRejection(''));
+assert.equal(setSecret('GOOD_KEY', '', 'Rose').ok, false);    // empty value is a no-op, not a blank secret
+assert.equal(secretKeyRejection('GOOD_KEY'), '');
+assert.equal(deleteSecret('OPENAI_API_KEY'), true);
+assert.equal(deleteSecret('OPENAI_API_KEY'), false);
+assert.deepEqual(secretsEnv(), {});
 
 console.log('team.test.mjs ok');
