@@ -1,6 +1,11 @@
 import { createReadStream, openSync, readSync, closeSync, statSync, watch } from 'node:fs';
 
-const HISTORY_WINDOW_BYTES = 160 * 1024 * 1024;
+// Most history opens only need the recent conversation.  Keep the first disk read small:
+// long-lived Codex sessions contain huge world-state rows that otherwise make opening a
+// chat block on a 160MB scan.  If the tail happens to contain only one of those rows, the
+// reader expands below until it finds renderable conversation data.
+const HISTORY_WINDOW_BYTES = 8 * 1024 * 1024;
+const MAX_HISTORY_WINDOW_BYTES = 160 * 1024 * 1024;
 const STREAM_CHUNK_BYTES = 1024 * 1024;
 const MAX_JSONL_RECORD_BYTES = 2 * 1024 * 1024;
 
@@ -180,19 +185,31 @@ async function relevantLinesInRange(file, start, end) {
   return { lines, cursor: firstBoundary };
 }
 
-export async function codexRolloutHistory(file, { before = null, maxBytes = HISTORY_WINDOW_BYTES } = {}) {
+export async function codexRolloutHistory(file, { before = null, maxBytes } = {}) {
   if (!file) return { messages: [], hasMore: false, cursor: 0, liveCursor: 0 };
   try {
     const size = statSync(file).size;
     const end = before == null ? size : Math.max(0, Math.min(Number(before) || 0, size));
-    const start = Math.max(0, end - Math.max(1024 * 1024, Number(maxBytes) || HISTORY_WINDOW_BYTES));
-    const { lines, cursor } = await relevantLinesInRange(file, start, end);
-    return {
-      messages: parseCodexRollout(lines.join('\n')),
-      hasMore: start > 0,
-      cursor: start > 0 ? cursor : 0,
-      liveCursor: end,
-    };
+    const explicitWindow = Number.isFinite(Number(maxBytes)) && Number(maxBytes) > 0;
+    let windowBytes = Math.max(1024 * 1024, explicitWindow ? Number(maxBytes) : HISTORY_WINDOW_BYTES);
+    const maxWindowBytes = explicitWindow ? windowBytes : MAX_HISTORY_WINDOW_BYTES;
+
+    // The normal path returns after one small tail scan.  Expand only for a trailing
+    // oversized/non-conversation row so the user sees history instead of a blank chat.
+    while (true) {
+      const start = Math.max(0, end - windowBytes);
+      const { lines, cursor } = await relevantLinesInRange(file, start, end);
+      const messages = parseCodexRollout(lines.join('\n'));
+      if (messages.length || start === 0 || windowBytes >= maxWindowBytes) {
+        return {
+          messages,
+          hasMore: start > 0,
+          cursor: start > 0 ? cursor : 0,
+          liveCursor: end,
+        };
+      }
+      windowBytes = Math.min(maxWindowBytes, windowBytes * 2);
+    }
   } catch {
     return { messages: [], hasMore: false, cursor: 0, liveCursor: 0 };
   }

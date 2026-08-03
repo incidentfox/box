@@ -33,11 +33,18 @@ try {
     { timestamp: '2026-07-17T16:59:59Z', type: 'session_meta', payload: { id: 'thread-1', cwd: '/tmp/work', timestamp: '2026-07-17T16:59:59Z' } },
     ...rows.split('\n').map((line) => JSON.parse(line)),
     // Simulate the giant persisted context rows that made the old readFileSync path freeze.
-    { type: 'world_state', payload: 'private-context-should-be-skipped-' + 'x'.repeat(3 * 1024 * 1024) },
+    { type: 'world_state', payload: 'private-context-should-be-skipped-' + 'x'.repeat(10 * 1024 * 1024) },
     { timestamp: '2026-07-17T17:01:00Z', type: 'event_msg', payload: { type: 'user_message', message: 'Latest turn' } },
     { timestamp: '2026-07-17T17:01:01Z', type: 'event_msg', payload: { type: 'agent_message', message: 'Still working.', phase: 'commentary' } },
   ];
   writeFileSync(file, diskRows.map(JSON.stringify).join('\n') + '\n');
+  // The default path should inspect only a recent window, not scan the full giant
+  // context row before it can show the latest turn.
+  const fastPage = await codexRolloutHistory(file);
+  assert.equal(fastPage.hasMore, true);
+  assert.ok(fastPage.cursor > 0);
+  assert.deepEqual(fastPage.messages.map((m) => m.role), ['user', 'assistant']);
+  assert.equal(fastPage.messages[0].parts[0].text, 'Latest turn');
   const page = await codexRolloutHistory(file, { maxBytes: 1024 * 1024 });
   assert.equal(page.hasMore, true);
   assert.ok(page.cursor > 0);
