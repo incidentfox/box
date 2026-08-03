@@ -1119,22 +1119,17 @@ function openArchiveSheet(s) {
   }
   openSheet(s.title, rows);
 }
-// Sharing admits this chat's FOLDER to the team, so say which folder before the tap
-// rather than explaining it in a toast afterwards.
-function shareDesc(s) {
-  const dir = shortCwd(s.cwd || '');
-  return dir ? `Teammates can read this chat and work in ${dir}` : 'Teammates can read this chat and send messages';
+// Sharing creates an isolated copy; a private chat never grants the team its original cwd.
+function shareDesc() {
+  return 'Copies this chat and its attached files into an isolated team folder';
 }
 async function doShare(s, on) {
   const d = await setSessionShared(s.id, on);
   if (!d) return;
   s.shared = !!d.shared;
   if (cur && cur.id === s.id) { cur.shared = s.shared; renderPresence(); }
-  // A directory the server refused (home, /etc, …) still shares the CHAT — the teammate
-  // just can't open that folder. Saying so is the difference between a confusing
-  // permission error later and an informed choice now.
-  if (d.rootError) toast(`Shared, but ${d.rootError}`, 6000);
-  else toast(on ? 'Shared with your team' : 'No longer shared');
+  const copied = Number(d.artifacts && d.artifacts.copied) || 0;
+  toast(on ? (copied ? `Shared — copied ${copied} attached ${copied === 1 ? 'file' : 'files'} to team space` : 'Shared with your team') : 'No longer shared');
   fetchSessions(curFilter);
 }
 async function doArchive(s, on) {
