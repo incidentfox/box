@@ -9,6 +9,7 @@ import {
   setShared, setWorkspaceRoot, splitAuthorTag, withinWorkspace, listSessionChat, appendSessionChat,
   addRoot, removeRoot, listRoots, teamRoots, rootRejection,
   listSecrets, setSecret, deleteSecret, secretsEnv, secretKeyRejection,
+  systemUserForMember,
 } from './team.mjs';
 
 // _setTeamForTest also detaches the module from disk — nothing below touches a real team.json.
@@ -37,6 +38,7 @@ assert.equal(formatInviteCode('BOX-0000-1111'), '');
 assert.deepEqual(redeemInvite('BOX-ZZZZ-ZZZZ'), { error: 'bad code' });
 
 const { member, token } = redeemInvite(inv.code, { name: 'Long Yi' });
+assert.equal(systemUserForMember(member.id), '');
 assert.equal(member.name, 'Long Yi');
 assert.equal(member.role, 'guest');
 assert.match(token, /^boxg_[0-9a-f]{48}$/);

@@ -5162,6 +5162,7 @@ function runCodexTurn(s, msg, resolve) {
     team: teamSession,
     teamWorkspace: teamSession ? team.ensureWorkspace() : '',
     teamEnv: teamSession ? team.secretsEnv({ provider: 'codex' }) : {},
+    teamUser: teamSession ? team.systemUserForMember(s.createdBy) : '',
     onEvent: (ev) => {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;

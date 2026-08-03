@@ -47,3 +47,20 @@ export function buildTeamSandbox({ workspaceRoot, cwd, args = [], env = {} } = {
     env: {},
   };
 }
+
+// A non-owner guest can optionally have a real Unix identity.  The root-owned helper
+// constructs the same fixed Bubblewrap envelope after dropping to that account; Box
+// never gets a general sudo command or a caller-controlled mount list.
+export function buildUnixTeamSandbox({ workspaceRoot, cwd, args = [], env = {}, user = '' } = {}) {
+  if (!/^box-[a-z][a-z0-9-]{0,30}$/.test(user)) return buildTeamSandbox({ workspaceRoot, cwd, args, env });
+  const root = realpathSync(workspaceRoot);
+  const requested = resolve(cwd || root);
+  const workdir = inside(requested, root) ? requested : root;
+  const envArgs = Object.entries(env).flatMap(([key, value]) => ['--env', String(key), String(value)]);
+  return {
+    command: 'sudo',
+    args: ['-n', '/usr/local/sbin/box-team-codex', '--user', user, '--workspace', root, '--cwd', workdir, ...envArgs, '--', ...args],
+    cwd: root,
+    env: {},
+  };
+}
