@@ -853,7 +853,9 @@ function renderTabs() {
     if (k !== 'all' && k !== 'team' && !c[k] && base !== k) continue;
     const t = document.createElement('button'); t.className = 'tab' + (base === k ? ' on' : '');
     t.innerHTML = `${label}<span class="tcount">${c[k] || 0}</span>`;
-    t.onclick = () => fetchSessions(k);
+    // A filter is a destination, not merely a refresh. Keep it in history so a
+    // chat's swipe-back returns to the same tab (not silently to All).
+    t.onclick = () => openSessions(k);
     wrap.appendChild(t);
   }
   // when Automated is active, show a second row breaking it into subcategories
@@ -865,7 +867,7 @@ function renderTabs() {
       const want = key ? 'auto:' + key : 'auto';
       const b = document.createElement('button'); b.className = 'tab' + (curFilter === want ? ' on' : '');
       b.innerHTML = `${label}<span class="tcount">${count}</span>`;
-      b.onclick = () => fetchSessions(want);
+      b.onclick = () => openSessions(want);
       srow.appendChild(b);
     };
     mk('', 'All', c.auto || 0);
