@@ -3044,14 +3044,17 @@ const codexControlRoute = (fn) => [requireAuth, async (req, res) => {
 // Native Codex thread controls used by Box slash commands. These operate on the
 // same persisted state as the TUI rather than sending slash text as a model prompt.
 app.get('/api/codex/threads/:id/goal', ...codexControlRoute((id) => codexRpc('thread/goal/get', { threadId: id })));
+// Resume before mutating a goal so the app-server has the runtime for a live
+// `codex exec resume` turn. Without this, active sessions can reject /goal
+// updates even though paused sessions work.
 app.put('/api/codex/threads/:id/goal', ...codexControlRoute((id, _session, req) => {
   const objective = req.body && req.body.objective != null ? String(req.body.objective).trim() : undefined;
   const status = req.body && req.body.status != null ? String(req.body.status) : undefined;
   if (objective !== undefined && (!objective || objective.length > 4000)) throw new Error('Goal must be 1-4000 characters');
   if (status !== undefined && !['active', 'paused'].includes(status)) throw new Error('Goal status must be active or paused');
-  return codexRpc('thread/goal/set', { threadId: id, ...(objective !== undefined ? { objective } : {}), ...(status !== undefined ? { status } : {}) });
+  return codexRpc('thread/goal/set', { threadId: id, ...(objective !== undefined ? { objective } : {}), ...(status !== undefined ? { status } : {}) }, { resumeThreadId: id });
 }));
-app.delete('/api/codex/threads/:id/goal', ...codexControlRoute((id) => codexRpc('thread/goal/clear', { threadId: id })));
+app.delete('/api/codex/threads/:id/goal', ...codexControlRoute((id) => codexRpc('thread/goal/clear', { threadId: id }, { resumeThreadId: id })));
 app.post('/api/codex/threads/:id/compact', ...codexControlRoute((id) => codexRpc('thread/compact/start', { threadId: id }, { lingerMs: 60_000, resumeThreadId: id })));
 app.get('/api/codex/threads/:id/background-terminals', ...codexControlRoute((id) => codexRpc('thread/backgroundTerminals/list', { threadId: id })));
 app.delete('/api/codex/threads/:id/background-terminals', ...codexControlRoute((id) => codexRpc('thread/backgroundTerminals/clean', { threadId: id })));
