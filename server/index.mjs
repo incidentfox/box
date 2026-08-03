@@ -81,6 +81,36 @@ function eachProjectDir() {
   }
   return dirs;
 }
+// The active feed only needs metadata for sessions it can display.  The archive can
+// contain hundreds of old JSONL files; stat'ing every one on each feed refresh made
+// an otherwise small `/api/sessions?filter=all` response block the server for a few
+// hundred milliseconds on the box.  Archived cards need their timestamps only when
+// the Archived tab is open, so defer that filesystem work to that view.
+function sessionFiles(archived, { includeArchivedMetadata = false } = {}) {
+  const files = [];
+  const seenIds = new Set();
+  for (const dir of eachProjectDir()) {
+    let entries = [];
+    try { entries = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch {}
+    for (const f of entries) {
+      const id = f.replace(/\.jsonl$/, '');
+      if (seenIds.has(id)) continue; // a session id is unique across accounts; keep the first seen
+      seenIds.add(id);
+      const file = join(dir, f);
+      // All archived cards are excluded from active filters before their mtime is
+      // consumed. Avoid a blocking stat for them until the user opens Archived.
+      if (archived.has(id) && !includeArchivedMetadata) {
+        files.push({ id, file, mtime: 0 });
+        continue;
+      }
+      let mtime = 0, size = 0;
+      try { const st = statSync(file); mtime = st.mtimeMs; size = st.size; } catch { continue; }
+      if (size < 200) continue; // skip empty/stub sessions
+      files.push({ id, file, mtime });
+    }
+  }
+  return files;
+}
 function findSessionFile(id) {
   for (const dir of eachProjectDir()) { const c = join(dir, id + '.jsonl'); if (existsSync(c)) return c; }
   return null;
@@ -1989,22 +2019,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   const archivedAt = teamWorkspace ? loadTeamArchivedAt() : loadArchivedAt();
   const favorites = teamWorkspace ? teamFavoritesFor(principal) : loadFavorites();
   const sharedNow = new Set(team.sharedIds());
-  const files = [];
-  const seenIds = new Set();
-  for (const dir of eachProjectDir()) {
-    let entries = [];
-    try { entries = readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch {}
-    for (const f of entries) {
-      const full = join(dir, f);
-      let mtime = 0, size = 0;
-      try { const st = statSync(full); mtime = st.mtimeMs; size = st.size; } catch { continue; }
-      if (size < 200) continue; // skip empty/stub sessions
-      const id = f.replace(/\.jsonl$/, '');
-      if (seenIds.has(id)) continue; // a session id is unique across accounts; keep the first seen
-      seenIds.add(id);
-      files.push({ id, file: full, mtime });
-    }
-  }
+  const files = sessionFiles(archived, { includeArchivedMetadata: filter === 'archived' });
   const codexProcessIds = runningCodexThreadIds();
   adoptLiveCodexSessions(codexProcessIds);
   const codexBusyIds = new Set();
