@@ -148,13 +148,57 @@ function hostCard({ ep, remote, me, list, host }) {
   if (!sessions.length) card.appendChild(tNote(`Nothing shared yet — ${ownerName} shares a chat from its ⋯ menu.`));
   for (const s of sessions) card.appendChild(teamSessionRow(s, remote ? ep : null, { remote }));
 
+  rootsSection(card, (me && me.roots) || [], ep, { canEdit: false });
+  secretsSection(card, (me && me.secrets) || [], { canDelete: false });
+
   const members = (me && me.members) || [];
   const online = new Set((me && me.online) || []);
   if (members.length) {
     tSub(card, 'Members');
     card.appendChild(peopleStrip(members, online, me && me.member && me.member.id, ownerName));
   }
+  card.appendChild(whereYourWorkLives(ownerName, remote, host));
   return card;
+}
+
+/* ---------- what a guest is actually agreeing to ----------
+   This box's team feature is a soft boundary, not a sandbox: chats a guest starts run on
+   the host's machine, under the host's user, and the host can read them. That is a
+   perfectly reasonable arrangement between people who work together — but it has to be
+   stated, because every other chat app they've used implies the opposite. Saying it here
+   is cheaper than having them discover it. */
+function whereYourWorkLives(ownerName, remote, host) {
+  const where = remote ? hostLabel(host) : 'this box';
+  const foot = tEl('div', 'tFoot');
+  foot.appendChild(tEl('div', 'tSubHead', 'Where your work lives'));
+  foot.appendChild(tNote(
+    `Chats you start here run on ${where} — ${ownerName}'s machine, not yours. `
+    + `${ownerName} can read them, and anything you create lands in the folders above. `
+    + `For work you'd rather keep to yourself, run your own Box and keep those chats there.`));
+  foot.appendChild(tBtn('Run my own Box', 'ghost', openOwnBoxSheet));
+  return foot;
+}
+
+// The other half of the honest answer: here's how you actually get a private one.
+function openOwnBoxSheet() {
+  const inner = $('sheetInner');
+  inner.innerHTML = '';
+  inner.appendChild(tEl('h3', null, 'Run your own Box'));
+  inner.appendChild(tNote(
+    'Box is open source. Installed on your own machine, your chats and files stay on your machine — '
+    + 'nobody else can open them, including the team you just joined.'));
+  inner.appendChild(tEl('div', 'tSubHead', 'On your own machine'));
+  const cmd = 'git clone https://github.com/incidentfox/box.git && cd box && ./install.sh';
+  const pre = tEl('pre', 'tCodeBlock', cmd);
+  inner.appendChild(pre);
+  inner.appendChild(tNote(
+    'Then, from your Box: Team → Join someone else’s team, and paste the same invite code. '
+    + 'You get both — private chats at home, shared chats on the host’s box — and the screen tells you which is which.'));
+  const row = tEl('div', 'tRow');
+  row.appendChild(tBtn('Copy commands', 'primary', () => writeClipboardText(cmd, 'Copied')));
+  row.appendChild(tBtn('Open the repo', 'ghost', () => window.open('https://github.com/incidentfox/box', '_blank', 'noopener')));
+  inner.appendChild(row);
+  showSheet();
 }
 
 // The team you run: invites, members, workspace root, what you've shared out.
@@ -177,6 +221,9 @@ function ownerCard(admin, list) {
 
   card.appendChild(tBtn('Invite a teammate', 'primary', openInviteSheet));
 
+  rootsSection(card, admin.roots, LOCAL_EP, { canEdit: true });
+  secretsSection(card, admin.secrets, { canDelete: true });
+
   const invites = (admin.invites || []).filter((i) => i.live);
   if (invites.length) {
     tSub(card, 'Unused invite codes');
@@ -192,7 +239,7 @@ function ownerCard(admin, list) {
 
   const shared = ((list && list.sessions) || []).filter((s) => s.shared);
   tSub(card, `Chats you've shared (${shared.length})`);
-  if (!shared.length) card.appendChild(tNote('Open a chat → tap its title → Share with team.'));
+  if (!shared.length) card.appendChild(tNote('Share one from your chat list: ⋯ → Share with team. Or tap the Private chip at the top of an open chat.'));
   for (const s of shared) card.appendChild(teamSessionRow(s, null, { owner: true }));
 
   const join = tEl('div', 'tFoot');
@@ -209,6 +256,111 @@ function workspaceRow(root, ep, onChange) {
   row.appendChild(tBtn('Browse', 'ghost', () => openTeamFiles(ep)));
   if (onChange) row.appendChild(tBtn('Change', 'ghost', onChange));
   return row;
+}
+
+/* ---------- folders the team can reach ----------
+   Sharing a chat admits its folder, so this list mostly fills itself — which is exactly
+   why it needs to be visible. "Who can read this repo" should be answerable by looking,
+   not by remembering which chats you shared six weeks ago. */
+function rootsSection(card, roots, ep, { canEdit = false } = {}) {
+  const list = roots || [];
+  tSub(card, canEdit ? `Folders your team can reach (${list.length})` : `Folders you can reach (${list.length})`);
+  if (!list.length) {
+    card.appendChild(tNote(canEdit
+      ? 'Only the shared workspace above. Sharing a chat adds its folder here automatically.'
+      : 'Just the shared workspace above.'));
+  }
+  for (const r of list) card.appendChild(rootRow(r, ep, canEdit));
+  if (canEdit) card.appendChild(tBtn('Add a folder', 'ghost', () => openAddRootSheet()));
+}
+
+function rootRow(r, ep, canEdit) {
+  const row = tEl('div', 'tRow');
+  const ic = tEl('span', 'tRowIc'); ic.innerHTML = ICONS.folder; row.appendChild(ic);
+  const hd = tEl('div', 'tRowHd');
+  hd.appendChild(tEl('div', 'tRowName tMono', r.path));
+  // For the owner, "added by sharing a chat" vs "added by hand" is the difference between a
+  // root that disappears when they unshare and one that doesn't — worth saying. A guest
+  // can't act on either, so they get the fact (read + write) instead of the bookkeeping.
+  hd.appendChild(tEl('div', 'tRowMeta', canEdit
+    ? (r.auto ? 'added by sharing a chat — goes away when you unshare it' : 'added by hand — stays until you remove it')
+    : 'you can read and write anything under here'));
+  row.appendChild(hd);
+  row.appendChild(tEl('div', 'spacer'));
+  row.appendChild(tBtn('Browse', 'ghost', () => openTeamFiles(ep, r.path)));
+  if (canEdit) {
+    row.appendChild(tBtn('Remove', 'ghost danger', () => confirmSheet(
+      'Remove this folder?',
+      `Your team loses access to ${r.path} and everything under it. Chats you shared from there stay shared — teammates just can't open the files any more.`,
+      'Remove', async () => {
+        await api('/api/team/roots?path=' + encodeURIComponent(r.path), { method: 'DELETE' });
+        toast('Folder removed'); renderTeam();
+      })));
+  }
+  return row;
+}
+
+function openAddRootSheet() {
+  sheetForm('Add a folder', [
+    { name: 'path', label: 'Folder on this box', placeholder: '~/development/repos/mindbill', autocap: false },
+  ], 'Add', async (v) => {
+    if (!v.path) return 'Enter a path.';
+    const r = await api('/api/team/roots', { method: 'POST', body: JSON.stringify({ path: v.path }) });
+    const d = await r.json();
+    if (d.error) return d.error;
+    closeSheet(); toast('Folder added'); renderTeam();
+  }, tNote('Your team can read and write anything under it. Folders holding credentials — your home directory itself, ~/.ssh, ~/.aws, /etc — are refused.'));
+}
+
+/* ---------- team secrets ----------
+   Keys everyone's agents get in their environment. Write-only on purpose: the value goes
+   in and never comes back out of the server, for anyone, including you. That's not a
+   security boundary — an agent running here can obviously read what it was given — it
+   just means the phone screen and the API are never where a key leaks from. */
+function secretsSection(card, secrets, { canDelete = false } = {}) {
+  const list = secrets || [];
+  tSub(card, `Shared keys (${list.length})`);
+  card.appendChild(tNote(list.length
+    ? 'Every agent on this box gets these in its environment — yours and your teammates’.'
+    : 'Add an API key here and every agent on this box can use it, yours and your teammates’. Values are never shown again after you save them.'));
+  for (const s of list) card.appendChild(secretRow(s, canDelete));
+  card.appendChild(tBtn('Add a key', 'ghost', () => openSecretSheet()));
+}
+
+function secretRow(s, canDelete) {
+  const row = tEl('div', 'tRow');
+  const ic = tEl('span', 'tRowIc'); ic.innerHTML = ICONS.key; row.appendChild(ic);
+  const hd = tEl('div', 'tRowHd');
+  hd.appendChild(tEl('div', 'tRowName tMono', s.key));
+  const meta = [s.hint, s.note, s.addedBy ? `added by ${s.addedBy}` : ''].filter(Boolean).join(' · ');
+  hd.appendChild(tEl('div', 'tRowMeta', meta));
+  row.appendChild(hd);
+  row.appendChild(tEl('div', 'spacer'));
+  if (canDelete) {
+    row.appendChild(tBtn('Remove', 'ghost danger', () => confirmSheet(
+      `Remove ${s.key}?`,
+      'Agents started after this stop seeing it. Sessions already running keep it until they restart — a process’s environment is fixed when it starts.',
+      'Remove', async () => {
+        await api('/api/team/secrets/' + encodeURIComponent(s.key), { method: 'DELETE' });
+        toast(`${s.key} removed`); renderTeam();
+      })));
+  }
+  return row;
+}
+
+function openSecretSheet() {
+  sheetForm('Add a shared key', [
+    { name: 'key', label: 'Name', placeholder: 'OPENAI_API_KEY', autocap: false, hint: 'An environment-variable name: A-Z, 0-9 and _.' },
+    { name: 'value', label: 'Value', placeholder: 'sk-…', autocap: false },
+    { name: 'note', label: 'Note (optional)', placeholder: 'my personal key — fine to use for anything' },
+  ], 'Save', async (v) => {
+    if (!v.key) return 'Give it a name.';
+    if (!v.value) return 'Paste the value.';
+    const r = await api('/api/team/secrets', { method: 'POST', body: JSON.stringify({ key: v.key, value: v.value, note: v.note }) });
+    const d = await r.json().catch(() => ({ error: 'bad response' }));
+    if (d.error) return d.error;
+    closeSheet(); toast(`${v.key} shared with the team`); renderTeam();
+  }, tNote('This goes to everyone’s agents on this box, including the owner’s. Only add keys you’re happy for the whole team to spend.'));
 }
 
 function peopleStrip(members, online, meId, ownerName) {
@@ -414,9 +566,14 @@ async function toggleShareCurrentChat(on) {
   if (!d) return;
   cur.shared = !!d.shared;
   renderPresence();
+  // Sharing admits this chat's folder to the team. When the server refuses that folder
+  // (home, /etc, …) the chat is still shared — but the teammate lands in the scratch
+  // workspace instead of here, and finding that out by surprise is the bad version.
+  if (d.rootError) return toast(`Shared, but ${d.rootError}`, 6000);
   // The server broadcasts `share` to every subscriber (us included) and app.js toasts
   // on that. Only toast here if we're not actually listening.
   if (!ws || ws.readyState !== 1) toast(d.shared ? 'Shared with your team' : 'No longer shared');
+  if (typeof refreshSessionsSoon === 'function') refreshSessionsSoon(150);
 }
 
 /* ---------- joining ---------- */
@@ -498,7 +655,9 @@ let tfEp = LOCAL_EP;
 let tfPathCur = '';
 let tfRoot = '';
 
-function openTeamFiles(ep) {
+// `at` opens straight into one folder — the team can reach several roots now, and landing
+// in the scratch workspace after tapping Browse on a specific repo is just a detour.
+function openTeamFiles(ep, at = '') {
   const next = ep || teamApiEp();
   // Two boxes can be in play. A path from one is meaningless (and misleading) on the
   // other, so switching endpoints re-enters at that host's own workspace root.
@@ -508,7 +667,7 @@ function openTeamFiles(ep) {
   if (!pane) return;
   pane.classList.remove('hidden');
   paintIcons(pane);
-  browseTeamFiles(tfPathCur);
+  browseTeamFiles(at || tfPathCur);
 }
 
 async function browseTeamFiles(path) {

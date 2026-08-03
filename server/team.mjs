@@ -41,8 +41,9 @@ const EMPTY_TEAM = () => ({
   workspaceRoot: '',
   members: [],
   invites: [],
-  shared: {},     // sessionId -> { sharedAt, sharedBy }
+  shared: {},     // sessionId -> { sharedAt, sharedBy, cwd }
   owned: {},      // sessionId -> memberId (guest-created sessions)
+  roots: {},      // absPath -> { addedAt, addedBy, auto } — directories the team may reach
 });
 
 // No hyphen in the default name, deliberately. Claude records a session's cwd only as
@@ -86,6 +87,7 @@ export function saveTeam(t) {
 export function _setTeamForTest(t) {
   cache = { ...EMPTY_TEAM(), workspaceRoot: defaultWorkspaceRoot(), ...(t || {}) };
   diskEnabled = false;
+  secretsCache = { version: 1, secrets: {} };   // never read a real team-secrets.json in tests
   return cache;
 }
 
@@ -267,13 +269,32 @@ export function touchMember(id) {
 
 // ---- session sharing -------------------------------------------------------
 
-export function setShared(sessionId, on, by = 'owner') {
+// Sharing a chat also decides whether the team can reach the DIRECTORY that chat works in.
+// Without that, the owner and a guest sit in the same conversation running turns in two
+// different folders (the guest gets clamped to the scratch root), which looks like the
+// agent going mad rather than a permissions boundary.
+//
+// The session's cwd is recorded on the share record so unsharing can withdraw the root
+// again without index.mjs having to hand us a session list.
+export function setShared(sessionId, on, by = 'owner', cwd = '') {
   const t = loadTeam();
   const id = String(sessionId || '');
   if (!id) return false;
-  if (on) t.shared[id] = { sharedAt: Date.now(), sharedBy: by };
-  else delete t.shared[id];
-  saveTeam(t);
+  if (on) {
+    t.shared[id] = { sharedAt: Date.now(), sharedBy: by, cwd: String(cwd || '') };
+    saveTeam(t);
+    if (cwd) addRoot(cwd, by, true);
+  } else {
+    const was = t.shared[id];
+    delete t.shared[id];
+    saveTeam(t);
+    // Withdraw the directory only if no OTHER shared chat still works there. A root the
+    // owner added by hand (auto === false) is left alone — they asked for it explicitly.
+    if (was && was.cwd) {
+      const stillUsed = Object.values(loadTeam().shared).some((r) => r && r.cwd === was.cwd);
+      if (!stillUsed) removeRoot(was.cwd, { autoOnly: true });
+    }
+  }
   return true;
 }
 
@@ -337,11 +358,11 @@ export function setWorkspaceRoot(dir) {
   return t.workspaceRoot;
 }
 
-// Containment check for guest path access. Resolves symlinks on both sides so a
-// symlink planted inside the workspace can't be used to walk out to ~/.aws or a repo.
+// Containment check against ONE root. Resolves symlinks on both sides so a symlink
+// planted inside the workspace can't be used to walk out to ~/.aws or a repo.
 // Non-existent paths fall back to lexical containment of the nearest existing parent,
 // so "create a new file here" still works without opening an escape hatch.
-export function withinWorkspace(p, root = workspaceRoot()) {
+function containedBy(p, root) {
   const target = resolve(String(p || ''));
   let realRoot = root;
   try { realRoot = realpathSync(root); } catch {}
@@ -358,14 +379,184 @@ export function withinWorkspace(p, root = workspaceRoot()) {
   return false;
 }
 
-// A guest's effective cwd: whatever they asked for if it's inside the workspace,
-// otherwise the workspace root itself. Never throws, never leaks the reason.
+// ---- team roots ------------------------------------------------------------
+//
+// The team can reach the scratch workspace plus any directory a shared chat works in.
+// This replaces "move your files into the shared folder to collaborate": nothing is
+// relocated, the directory is simply admitted. Repos stay where every worktree, script
+// and other session already expects them.
+
+// Directories that must never become a team root, because admitting them would hand over
+// the credentials the guest env filter just took away. HOME is rejected too: a root at
+// $HOME contains .ssh, .aws, .claude and the box's own state, so it's the whole machine
+// wearing a workspace costume.
+const FORBIDDEN_ROOTS = () => [
+  '/', '/etc', '/root', '/run', '/proc', '/sys', '/var', '/boot', '/dev',
+  HOME,
+  join(HOME, '.ssh'), join(HOME, '.aws'), join(HOME, '.gnupg'), join(HOME, '.config'),
+  join(HOME, '.claude'), join(HOME, '.cc-mobile'), join(HOME, '.local'),
+];
+
+// Returns '' if the directory is acceptable, else a human-readable reason.
+export function rootRejection(dir) {
+  const abs = resolve(String(dir || '').trim());
+  if (!abs || abs === '.') return 'not a directory';
+  if (!existsSync(abs)) return 'that directory does not exist';
+  let real = abs;
+  try { real = realpathSync(abs); } catch {}
+  for (const bad of FORBIDDEN_ROOTS()) {
+    let realBad = bad;
+    try { realBad = realpathSync(bad); } catch {}
+    if (real === realBad) return real === HOME ? 'your home directory holds every credential on this box' : `${bad} is off limits`;
+    // An ancestor of a forbidden path is worse than the path itself.
+    if (realBad.startsWith(real.endsWith(sep) ? real : real + sep)) return `that would also expose ${bad}`;
+  }
+  return '';
+}
+
+export const teamRoots = () => {
+  const t = loadTeam();
+  const out = [workspaceRoot(), ...Object.keys(t.roots || {})];
+  return [...new Set(out.filter(Boolean))];
+};
+
+export function listRoots() {
+  const t = loadTeam();
+  return Object.entries(t.roots || {}).map(([path, meta]) => ({ path, ...meta }));
+}
+
+export function addRoot(dir, by = 'owner', auto = false) {
+  const abs = resolve(String(dir || '').trim());
+  if (!abs) return { ok: false, error: 'not a directory' };
+  // The scratch workspace is always reachable; recording it again would be noise.
+  if (containedBy(abs, workspaceRoot())) return { ok: true, root: null };
+  const why = rootRejection(abs);
+  if (why) return { ok: false, error: why };
+  const t = loadTeam();
+  t.roots = t.roots || {};
+  if (!t.roots[abs]) t.roots[abs] = { addedAt: Date.now(), addedBy: by, auto: !!auto };
+  else if (!auto) t.roots[abs].auto = false;   // a manual add pins a previously automatic root
+  saveTeam(t);
+  return { ok: true, root: abs };
+}
+
+export function removeRoot(dir, { autoOnly = false } = {}) {
+  const abs = resolve(String(dir || '').trim());
+  const t = loadTeam();
+  if (!t.roots || !t.roots[abs]) return false;
+  if (autoOnly && !t.roots[abs].auto) return false;
+  delete t.roots[abs];
+  saveTeam(t);
+  return true;
+}
+
+// Containment against the whole team space. Pass an explicit root to check just that one.
+export function withinWorkspace(p, root = null) {
+  const roots = root ? [root] : teamRoots();
+  return roots.some((r) => containedBy(p, r));
+}
+
+// A guest's effective cwd: whatever they asked for if it's inside the team space,
+// otherwise the scratch workspace root. Never throws, never leaks the reason.
 export function guestCwd(requested) {
   const root = ensureWorkspace();
   const want = String(requested || '').trim();
   if (!want) return root;
   const abs = resolve(want.startsWith('~') ? want.replace(/^~/, HOME) : want);
-  return withinWorkspace(abs, root) ? abs : root;
+  return withinWorkspace(abs) ? abs : root;
+}
+
+// ---- team secrets ----------------------------------------------------------
+//
+// Keys someone has deliberately published to the team, kept out of team.json so the file
+// holding credentials can be 0600 and is never the file we hand to a client. Values leave
+// this module in exactly one direction: into a spawned agent's environment. Nothing
+// returns them over HTTP, and nothing logs them.
+const SECRETS_PATH = join(STATE_DIR, 'team-secrets.json');
+const VALID_KEY = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+// Refusing these is not paranoia about the value — it's that team secrets are injected
+// into the OWNER's sessions too, so a guest who could set PATH or NODE_OPTIONS could run
+// their own code inside the owner's agent.
+const RESERVED_KEYS = new Set([
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'PWD', 'TMPDIR', 'IFS',
+  'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'NODE_OPTIONS',
+  'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONSTARTUP', 'PERL5LIB', 'GIT_SSH_COMMAND',
+  'CC_AUTH_TOKEN', 'BOX_TEAM', 'BOX_TEAM_WORKSPACE', 'EXTRA_ENV_FILE',
+]);
+
+let secretsCache = null;
+function loadSecrets() {
+  if (secretsCache) return secretsCache;
+  let s = { version: 1, secrets: {} };
+  try { s = { version: 1, secrets: {}, ...JSON.parse(readFileSync(SECRETS_PATH, 'utf8')) }; } catch {}
+  secretsCache = s;
+  return s;
+}
+
+function saveSecrets(s) {
+  secretsCache = s;
+  if (!diskEnabled) return s;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    const tmp = SECRETS_PATH + '.tmp';
+    // 0600 at create time, not chmod-after-write: a world-readable window, however short,
+    // defeats the point on a box that other agents run on.
+    writeFileSync(tmp, JSON.stringify(s, null, 2), { mode: 0o600 });
+    renameSync(tmp, SECRETS_PATH);
+  } catch {}
+  return s;
+}
+
+export function secretKeyRejection(key) {
+  const k = String(key || '').trim();
+  if (!VALID_KEY.test(k)) return 'use an environment-variable name: A-Z, 0-9 and _';
+  if (RESERVED_KEYS.has(k)) return `${k} controls how programs run and can't be a team secret`;
+  return '';
+}
+
+// Metadata only — never the value. This is what the Team screen renders.
+export function listSecrets() {
+  const { secrets } = loadSecrets();
+  return Object.entries(secrets).map(([key, m]) => ({
+    key, addedAt: m.addedAt || 0, addedBy: m.addedBy || '', note: m.note || '', hint: m.hint || '',
+  })).sort((a, b) => a.key.localeCompare(b.key));
+}
+
+export function setSecret(key, value, by = 'owner', note = '') {
+  const k = String(key || '').trim();
+  const why = secretKeyRejection(k);
+  if (why) return { ok: false, error: why };
+  const v = String(value == null ? '' : value);
+  if (!v) return { ok: false, error: 'value is empty' };
+  const s = loadSecrets();
+  s.secrets[k] = {
+    value: v,
+    addedAt: Date.now(),
+    addedBy: String(by || ''),
+    note: String(note || '').slice(0, 200),
+    // Enough to recognise a key you already pasted, too little to reconstruct it.
+    hint: v.length <= 8 ? '•'.repeat(v.length) : v.slice(0, 3) + '…' + v.slice(-2),
+  };
+  saveSecrets(s);
+  return { ok: true, key: k };
+}
+
+export function deleteSecret(key) {
+  const s = loadSecrets();
+  const k = String(key || '').trim();
+  if (!s.secrets[k]) return false;
+  delete s.secrets[k];
+  saveSecrets(s);
+  return true;
+}
+
+// The only path values take out of this module.
+export function secretsEnv() {
+  const { secrets } = loadSecrets();
+  const out = {};
+  for (const [k, m] of Object.entries(secrets)) if (m && m.value) out[k] = m.value;
+  return out;
 }
 
 // ---- attribution -----------------------------------------------------------

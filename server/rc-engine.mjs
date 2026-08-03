@@ -18,6 +18,7 @@ import path from 'path';
 import { homedir } from 'node:os';
 import { EventEmitter } from 'events';
 import { randomUUID } from 'node:crypto';
+import { buildChildEnv } from './child-env.mjs';
 
 const require = createRequire(import.meta.url);
 const pty = require('node-pty');
@@ -147,20 +148,10 @@ function findJsonl(sessionId) {
   return best ? best.cand : path.join(PROJ_DIR, sessionId + '.jsonl'); // fallback (primary)
 }
 
-function childEnv() {
-  // Force the Max subscription (OAuth credentials file), never the metered API.
-  // Also strip session-inheritance vars: the box server may run inside a claude
-  // session and those env vars would make spawned claude processes behave as
-  // child sessions (no independent JSONL, wrong session context).
-  const e = { ...process.env };
-  delete e.CLAUDE_CODE_OAUTH_TOKEN;
-  delete e.CLAUDE_OAUTH_TOKEN;
-  delete e.ANTHROPIC_API_KEY;
-  delete e.CLAUDE_CODE_SESSION_ID;
-  delete e.CLAUDE_CODE_CHILD_SESSION;
-  delete e.CODEX_COMPANION_SESSION_ID;
-  return e;
-}
+// Force the Max subscription (OAuth credentials file) rather than the metered API, strip
+// session-inheritance vars so a spawned claude is a top-level session, and keep the box's
+// own login token away from the agent. All of that now lives in one shared filter.
+const childEnv = (opts = {}) => buildChildEnv(process.env, opts);
 
 // Claude Code shows a one-time "Do you trust this folder?" dialog the first time it
 // runs in a directory. It's a pre-TUI screen our boot detector can't distinguish from a
@@ -398,7 +389,9 @@ export class RCEngine extends EventEmitter {
     else claudeArgs.push('--session-id', newId);   // deterministic id for a fresh chat
     trustCwd(cwd); // pre-accept the folder-trust dialog so the first prompt isn't eaten
     const term = pty.spawn('dtach', ['-A', sock, '-r', 'winch', '-z', 'claude', ...claudeArgs], {
-      name: 'xterm-256color', cols: 100, rows: 40, cwd, env: childEnv(),
+      // A guest-started session's process is restricted for its whole life — the env is
+      // fixed at spawn, so this is decided once here rather than per turn.
+      name: 'xterm-256color', cols: 100, rows: 40, cwd, env: childEnv({ guest: !!opts.guest }),
     });
     const s = {
       pty: term, name, sock,
