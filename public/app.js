@@ -802,7 +802,7 @@ let sessionRefreshTimer = null;
 let lastSessionFetchAt = 0;
 let bulkMode = false;
 const bulkSelected = new Set();
-const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['shared', 'Shared'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
@@ -811,10 +811,13 @@ async function openSessions(filter = 'all') {
   // A guest can't enumerate this box's chats (the server refuses), and shouldn't want to —
   // the Team screen is their home screen.
   if (isGuestHere()) return openTeam();
+  // Preserve old bookmarked URLs without reintroducing a parallel team feed.
+  if (filter === 'shared') filter = 'all';
   navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter);
 }
 let lastSessionRenderSig = '';
 async function fetchSessions(filter) {
+  if (filter === 'shared') filter = 'all';
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + curFilter)).json();
   lastSessionFetchAt = Date.now();
