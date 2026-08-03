@@ -139,7 +139,7 @@ function hostCard({ ep, remote, me, list, host }) {
   const startBtn = tBtn('New chat in shared workspace', 'primary', () => openChat({
     id: null, title: 'New chat', cwd: root,
     agent: configuredDefaultAgent(),
-    ep: remote ? ep : null, shared: true,
+    ep: remote ? ep : null, shared: true, team: true,
   }));
   card.appendChild(startBtn);
 
@@ -759,7 +759,6 @@ document.addEventListener('visibilitychange', () => {
 });
 
 if ($('joinTeamLink')) $('joinTeamLink').onclick = openJoinHere;
-if ($('teamBtn')) $('teamBtn').onclick = openTeam;
 if ($('teamBack')) $('teamBack').onclick = () => (isGuestHere() ? null : openSessions(curFilter || 'all'));
 if ($('teamRefresh')) $('teamRefresh').onclick = () => renderTeam();
 if ($('teamFilesBtn')) $('teamFilesBtn').onclick = () => openTeamFiles();

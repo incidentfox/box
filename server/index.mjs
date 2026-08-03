@@ -5175,6 +5175,9 @@ function runCodexTurn(s, msg, resolve) {
           deleteRunning(provKey); migrateCodexSession(provKey, s.sessionId);
           if (wasShared) { team.setShared(s.sessionId, true, 'owner', s.cwd); team.setShared(provKey, false); }
         }
+        // A chat created from the Team tab is shared from its first durable turn.
+        // Its transcript, sandboxed workspace, and companion team chat stay one unit.
+        if (teamSession) team.setShared(s.sessionId, true, 'owner', s.cwd);
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
@@ -5635,8 +5638,8 @@ wss.on('connection', (ws) => {
         try { ws.send(JSON.stringify({ type: 'error', msg: 'This legacy chat must be imported into the shared workspace before it can run.' })); } catch {}
         return;
       }
-      if (isGuest && !s0.createdBy && !s0.sessionId) {
-        s0.createdBy = ws.principal.id;
+      if (!s0.sessionId && (isGuest || m.team === true)) {
+        if (isGuest) s0.createdBy = ws.principal.id;
         s0.teamSandbox = true;
         s0.agent = 'codex';
         s0.cwd = team.guestCwd(m.cwd || s0.cwd);
