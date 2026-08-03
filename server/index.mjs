@@ -1885,6 +1885,8 @@ function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds()) {
 }
 
 function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) {
+  // Old shared links are now the dedicated Team list.
+  if (filter === 'shared') filter = 'team';
   const rc = readRcRegistry();
   const names = loadNames();
   const archived = loadArchived();
@@ -1970,15 +1972,21 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
   // the personal feed via a status, favorite, archive, or live-session filter.
   // The Team API opts in so it can resolve the records it is explicitly authorized
   // to expose.
-  const isTeamSpace = (f) => !includeTeam && !!(f && (sharedNow.has(f.id) || f.teamSandbox));
+  const isTeamSession = (f) => !!(f && (sharedNow.has(f.id) || f.teamSandbox));
+  const isTeamSpace = (f) => !includeTeam && isTeamSession(f);
   // Counts over all sessions. VOB calls appear in `all` and their dedicated
   // category, but remain excluded from Working/Needs input/Live to avoid double
   // counting those status tabs. Automated sessions remain separate.
   // autoSub breaks the auto total into subcategories for the Automated sub-tabs.
-  const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
+  const counts = { all: 0, favorites: 0, team: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
-    if (isTeamSpace(f)) continue;
+    // Team work is deliberately excluded from every personal count, including
+    // favorites and live sessions, and has its own first-class tab instead.
+    if (isTeamSession(f)) {
+      if (!archived.has(f.id)) counts.team++;
+      continue;
+    }
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
     if (isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
@@ -1992,7 +2000,7 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
   let cand;
   if (filter === 'archived') cand = items.filter((f) => !isTeamSpace(f) && archived.has(f.id));
   else if (filter === 'favorites') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && favorites.has(f.id));
-  else if (filter === 'shared') cand = [];
+  else if (filter === 'team') cand = items.filter((f) => isTeamSession(f) && !archived.has(f.id));
   else if (filter === 'vob') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && isVobCallSession(f));
   else if (fbase === 'auto') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
   else if (filter && filter !== 'all') cand = items.filter((f) => !isTeamSpace(f) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
