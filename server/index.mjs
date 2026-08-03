@@ -1778,7 +1778,7 @@ function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds()) {
   return ids;
 }
 
-function listSessions({ limit = 40, filter = 'all' } = {}) {
+function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) {
   const rc = readRcRegistry();
   const names = loadNames();
   const archived = loadArchived();
@@ -1860,6 +1860,11 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
   const isVob = (id) => isVobCallSession(byId.get(id) || {});
+  // Team work has a separate destination.  Never let a shared session leak back into
+  // the personal feed via a status, favorite, archive, or live-session filter.
+  // The Team API opts in so it can resolve the records it is explicitly authorized
+  // to expose.
+  const isTeamSpace = (f) => !includeTeam && !!(f && (sharedNow.has(f.id) || f.teamSandbox));
   // Counts over all sessions. VOB calls appear in `all` and their dedicated
   // category, but remain excluded from Working/Needs input/Live to avoid double
   // counting those status tabs. Automated sessions remain separate.
@@ -1867,11 +1872,11 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   const counts = { all: 0, favorites: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
+    if (isTeamSpace(f)) continue;
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
     if (isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
     if (favorites.has(f.id)) counts.favorites++;
-    if (sharedNow.has(f.id)) counts.shared = (counts.shared || 0) + 1;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
   saveAutoCat();
@@ -1879,19 +1884,22 @@ function listSessions({ limit = 40, filter = 'all' } = {}) {
   // `auto:<subkey>` narrows to one subcategory.
   const [fbase, fsub] = String(filter || 'all').split(':');
   let cand;
-  if (filter === 'archived') cand = items.filter((f) => archived.has(f.id));
-  else if (filter === 'favorites') cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && favorites.has(f.id));
-  else if (filter === 'shared') cand = items.filter((f) => !archived.has(f.id) && sharedNow.has(f.id));
-  else if (filter === 'vob') cand = items.filter((f) => !archived.has(f.id) && isVobCallSession(f));
-  else if (fbase === 'auto') cand = items.filter((f) => !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
-  else if (filter && filter !== 'all') cand = items.filter((f) => !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
-  else cand = items.filter((f) => !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
+  if (filter === 'archived') cand = items.filter((f) => !isTeamSpace(f) && archived.has(f.id));
+  else if (filter === 'favorites') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && favorites.has(f.id));
+  else if (filter === 'shared') cand = [];
+  else if (filter === 'vob') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && isVobCallSession(f));
+  else if (fbase === 'auto') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
+  else if (filter && filter !== 'all') cand = items.filter((f) => !isTeamSpace(f) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
+  else cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
   const chosen = [], seen = new Set();
   if (!filter || filter === 'all') {
     // Reserve every VOB session before the general recency limit, just as live
     // sessions are reserved. This keeps the complete VOB group on the main page.
-    for (const f of items) if (!archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
-    for (const id of liveIds) if (!archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(byId.get(id) || { id, file: null, mtime: 0 }); seen.add(id); }
+    for (const f of items) if (!isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
+    for (const id of liveIds) {
+      const f = byId.get(id);
+      if ((!f || !isTeamSpace(f)) && !archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(f || { id, file: null, mtime: 0 }); seen.add(id); }
+    }
   }
   for (const f of cand) { if (chosen.length >= limit) break; if (!seen.has(f.id)) { chosen.push(f); seen.add(f.id); } }
   const out = chosen.map((s) => {
@@ -2397,6 +2405,22 @@ app.post('/api/team/secrets', requireOwner, (req, res) => {
   console.log(`[team] secret ${out.key} set by ${req.principal.kind}:${req.principal.id}`);   // key only, never the value
   res.json({ ok: true, secrets: team.listSecrets() });
 });
+// This is intentionally a fixed allow-list rather than a generic environment import.
+// It lets the owner explicitly publish the two provider credentials to Team without
+// ever returning or logging their values. Existing team-managed keys are left intact.
+app.post('/api/team/secrets/import-host', requireOwner, (req, res) => {
+  const existing = new Set(team.listSecrets().map((s) => s.key));
+  const imported = [], skipped = [], unavailable = [];
+  for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']) {
+    const value = String(process.env[key] || '').trim();
+    if (!value) { unavailable.push(key); continue; }
+    if (existing.has(key)) { skipped.push(key); continue; }
+    const out = team.setSecret(key, value, req.principal.name || req.principal.kind, 'Imported from owner host credentials');
+    if (out.ok) imported.push(key);
+  }
+  console.log(`[team] host provider credentials imported by ${req.principal.kind}:${req.principal.id}: ${imported.join(',') || 'none'}`);
+  res.json({ ok: true, imported, skipped, unavailable, secrets: team.listSecrets() });
+});
 app.delete('/api/team/secrets/:key', requireOwner, (req, res) =>
   res.json({ ok: team.deleteSecret(req.params.key), secrets: team.listSecrets() }));
 
@@ -2424,7 +2448,7 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
   if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) {
     if (mid === p.id && sessionIsTeam(rt(sid))) ids.add(sid);
   }
-  const all = listSessions({ filter: 'all', limit: 10000 }).sessions;
+  const all = listSessions({ filter: 'all', limit: 10000, includeTeam: true }).sessions;
   const byId = new Map(all.map((s) => [s.id, s]));
   const sessions = [...ids].map((id) => {
     const s = byId.get(id);
@@ -4979,7 +5003,7 @@ function runCodexTurn(s, msg, resolve) {
     guest: sessionIsGuest(s),
     team: teamSession,
     teamWorkspace: teamSession ? team.ensureWorkspace() : '',
-    teamEnv: teamSession ? team.secretsEnv() : {},
+    teamEnv: teamSession ? team.secretsEnv({ provider: 'codex' }) : {},
     onEvent: (ev) => {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;

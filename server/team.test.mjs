@@ -226,6 +226,11 @@ assert.equal(JSON.stringify(listed).includes('sk-abcdef123456'), false);
 assert.equal(listed[0].hint.includes('abcdef'), false);
 // Values leave the module in exactly one direction.
 assert.equal(secretsEnv().OPENAI_API_KEY, 'sk-abcdef123456');
+assert.equal(setSecret('ANTHROPIC_API_KEY', 'sk-ant-secret', 'Rose', 'Claude team key').ok, true);
+assert.equal(secretsEnv({ provider: 'codex' }).OPENAI_API_KEY, 'sk-abcdef123456');
+assert.equal('ANTHROPIC_API_KEY' in secretsEnv({ provider: 'codex' }), false);
+assert.equal(secretsEnv({ provider: 'claude' }).ANTHROPIC_API_KEY, 'sk-ant-secret');
+assert.equal('OPENAI_API_KEY' in secretsEnv({ provider: 'claude' }), false);
 
 // Keys that decide how a program runs are refused: team secrets are injected into the
 // OWNER's sessions too, so a guest setting PATH would run their code as the owner.
@@ -239,6 +244,7 @@ assert.ok(secretKeyRejection(''));
 assert.equal(setSecret('GOOD_KEY', '', 'Rose').ok, false);    // empty value is a no-op, not a blank secret
 assert.equal(secretKeyRejection('GOOD_KEY'), '');
 assert.equal(deleteSecret('OPENAI_API_KEY'), true);
+assert.equal(deleteSecret('ANTHROPIC_API_KEY'), true);
 assert.equal(deleteSecret('OPENAI_API_KEY'), false);
 assert.deepEqual(secretsEnv(), {});
 

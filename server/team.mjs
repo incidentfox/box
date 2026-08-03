@@ -512,11 +512,19 @@ export function deleteSecret(key) {
   return true;
 }
 
-// The only path values take out of this module.
-export function secretsEnv() {
+// The only path values take out of this module. Provider credentials are deliberately
+// scoped: storing both API keys must not hand an Anthropic key to a Codex process (or
+// vice versa). Other explicitly-added team variables remain available to either
+// sandboxed runner.
+export function secretsEnv({ provider = '' } = {}) {
   const { secrets } = loadSecrets();
   const out = {};
-  for (const [k, m] of Object.entries(secrets)) if (m && m.value) out[k] = m.value;
+  for (const [k, m] of Object.entries(secrets)) {
+    if (!m || !m.value) continue;
+    if (k === 'OPENAI_API_KEY' && provider && provider !== 'codex') continue;
+    if (k === 'ANTHROPIC_API_KEY' && provider && provider !== 'claude') continue;
+    out[k] = m.value;
+  }
   return out;
 }
 

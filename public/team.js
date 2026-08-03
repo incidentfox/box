@@ -313,12 +313,27 @@ function secretsSection(card, secrets, { canDelete = false, canAdd = false } = {
   const list = secrets || [];
   tSub(card, `Shared keys (${list.length})`);
   card.appendChild(tNote(list.length
-    ? 'Every team session receives these environment variables. Treat them as shared with the team.'
+    ? 'Provider keys are available only to their matching isolated runner. Treat any key an agent receives as shared with the team.'
     : (canAdd
-      ? 'Add a team-scoped API key to let isolated team sessions run. Values are never shown again after you save them.'
+      ? 'Import this Box’s provider keys, or add a team-scoped API key. Values are never shown again after you save them.'
       : 'The team owner can add a team-scoped API key when the shared workspace needs one.')));
   for (const s of list) card.appendChild(secretRow(s, canDelete));
-  if (canAdd) card.appendChild(tBtn('Add a key', 'ghost', () => openSecretSheet()));
+  if (canAdd) {
+    card.appendChild(tBtn('Import owner API keys', 'ghost', importHostProviderKeys));
+    card.appendChild(tBtn('Add a key', 'ghost', () => openSecretSheet()));
+  }
+}
+
+async function importHostProviderKeys() {
+  const r = await api('/api/team/secrets/import-host', { method: 'POST', body: JSON.stringify({}) });
+  const d = await r.json().catch(() => ({ error: 'Bad response from Box.' }));
+  if (!r.ok || d.error) return toast(d.error || 'Could not import provider keys.');
+  const details = [];
+  if (d.imported && d.imported.length) details.push(`Imported ${d.imported.join(', ')}`);
+  if (d.skipped && d.skipped.length) details.push(`Already configured: ${d.skipped.join(', ')}`);
+  if (d.unavailable && d.unavailable.length) details.push(`Not present on this Box: ${d.unavailable.join(', ')}`);
+  toast(details.join(' · ') || 'No provider keys imported.');
+  renderTeam();
 }
 
 function secretRow(s, canDelete) {
