@@ -43,6 +43,7 @@ import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 import { isVobCallSession, mainPageSessionRank, sessionAllowsAutoContinue } from './vob-session-category.mjs';
+import * as team from './team.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -307,6 +308,7 @@ const sttAvailable = () => ({ eleven: !!ELEVEN_KEY, deepgram: !!DEEPGRAM_KEY });
 // ---- personalization + optional integrations ------------------------------
 // Your name, used in the morning-brief status doc the app keeps per session.
 const OWNER_NAME = cfg('OWNER_NAME', 'you');
+team.setOwnerName(OWNER_NAME);   // so the owner's own messages badge by name in shared chats
 // Linear: the in-app Board + "needs you" inbox. Two modes:
 //   • REAL Linear  — set LINEAR_API_KEY (+ LINEAR_TEAM_ID / LINEAR_TEAM_KEY) to drive a real
 //     Linear workspace.
@@ -2014,7 +2016,16 @@ function parseJsonlMessages(raw) {
       if (parts.length && !isToolResultOnly) {
         const firstText = parts.find((p) => p.t === 'text');
         if (role === 'user' && firstText && (firstText.text.startsWith('<') || firstText.text.startsWith('Caveat:'))) continue;
-        messages.push({ role, parts, ts: o.timestamp || null });
+        // Attribution survives in the transcript itself as a leading "[Name] " tag, so
+        // reopening a shared chat months later still shows who said what. Lift it back
+        // out into a field and hand the UI clean text. Only names of real members
+        // resolve, so an unrelated "[TODO] ..." line is left exactly as written.
+        let author = null;
+        if (role === 'user' && firstText) {
+          const split = team.splitAuthorTag(firstText.text);
+          if (split.author) { author = split.author; firstText.text = split.text; }
+        }
+        messages.push({ role, parts, ts: o.timestamp || null, ...(author ? { author } : {}) });
       }
     }
   }
@@ -2155,17 +2166,232 @@ app.use('/api', (req, res, next) => {
   };
   next();
 });
-const authOk = (req) => {
+const bearerOf = (req) => {
   const h = req.headers.authorization || '';
-  const bearer = h.startsWith('Bearer ') ? h.slice(7) : null;
-  return (bearer || req.query.token) === AUTH_TOKEN;
+  return (h.startsWith('Bearer ') ? h.slice(7) : null) || req.query.token || '';
 };
-const requireAuth = (req, res, next) => (authOk(req) ? next() : res.status(401).json({ error: 'unauthorized' }));
+// A token resolves to a PRINCIPAL or to nothing. `null` means unauthenticated — never
+// "some guest". The owner token keeps working exactly as before.
+const principalOf = (token) => {
+  const t = String(token || '');
+  if (t && t === AUTH_TOKEN) return team.OWNER;
+  return team.resolveGuest(t);
+};
+const authOk = (req) => !!principalOf(bearerOf(req));
 
-app.post('/api/login', (req, res) =>
-  (req.body && req.body.token) === AUTH_TOKEN ? res.json({ ok: true }) : res.status(401).json({ error: 'bad token' }));
+// ---- guest route allowlist (DEFAULT DENY) ----------------------------------
+// A guest may reach ONLY what is listed here. Every other endpoint on this server —
+// settings, provider logins, account pooling, session search, arbitrary paths, the
+// Linear board — stays owner-only, including every endpoint added in the future.
+// Entries with a `check` run a second, per-resource authorization pass.
+const GUEST_ROUTES = [
+  { m: 'GET',  re: /^\/api\/config$/ },                       // returns a stripped payload for guests
+  { m: 'GET',  re: /^\/api\/team\/(me|sessions)$/ },
+  { m: 'POST', re: /^\/api\/team\/leave$/ },
+  { m: 'GET',  re: /^\/api\/team\/fs$/ },                     // scoped to the workspace root inside the handler
+  { m: 'POST', re: /^\/api\/upload$/ },
+  { m: 'GET',  re: /^\/api\/img$/ },                          // already hard-scoped to UPLOAD_DIR
+  { m: 'GET',  re: /^\/api\/raw$/, check: (req) => team.withinWorkspace(resolve(req.query.path || '')) },
+  { m: 'GET',  re: /^\/api\/sessions\/([^/]+)\/history$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
+  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/rename$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
+];
+function guestRouteFor(req) {
+  for (const r of GUEST_ROUTES) {
+    if (r.m !== req.method) continue;
+    const m = r.re.exec(req.path);
+    if (m) return { rule: r, params: m.slice(1) };
+  }
+  return null;
+}
 
-app.get('/api/sessions', requireAuth, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD, defaultAgent: appDefaultAgent() }); });
+const requireAuth = (req, res, next) => {
+  const p = principalOf(bearerOf(req));
+  if (!p) return res.status(401).json({ error: 'unauthorized' });
+  req.principal = p;
+  if (p.kind === 'owner') return next();
+  const hit = guestRouteFor(req);
+  if (!hit) return res.status(403).json({ error: 'not available to team guests' });
+  if (hit.rule.check && !hit.rule.check(req, p, hit.params)) return res.status(403).json({ error: 'forbidden' });
+  team.touchMember(p.id);
+  return next();
+};
+// For endpoints that must never be reachable by a guest even by accident.
+const requireOwner = (req, res, next) => {
+  const p = principalOf(bearerOf(req));
+  if (!p) return res.status(401).json({ error: 'unauthorized' });
+  if (p.kind !== 'owner') return res.status(403).json({ error: 'owner only' });
+  req.principal = p;
+  return next();
+};
+
+// Cross-origin support for teammates whose own Box runs on a different host: the Team
+// tab talks to THIS server directly. A wildcard origin is safe here because auth is a
+// bearer token with no ambient credentials (no cookies, no session) — a hostile page can
+// issue a request but cannot obtain the token, so there is no CSRF authority to steal.
+// Scoped to guest-reachable routes only, so the owner-only surface gains no new exposure.
+// Matched on PATH only, never method: a CORS preflight arrives as OPTIONS and must be
+// answered for the same set of routes the real request will use.
+const GUEST_PATH_RES = GUEST_ROUTES.map((r) => r.re);
+const corsEligible = (req) => req.path === '/api/login' || req.path === '/api/team'
+  || req.path.startsWith('/api/team/') || GUEST_PATH_RES.some((re) => re.test(req.path));
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') || !corsEligible(req)) return next();
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
+// Unauthenticated endpoints that accept a secret in the body are brute-force targets.
+// Both of them (owner login, invite redemption) share one small per-IP budget.
+const GUESS_LIMIT = 12, GUESS_WINDOW_MS = 10 * 60 * 1000;
+const guessLog = new Map();   // ip -> { n, resetAt }
+function tooManyGuesses(req) {
+  const ip = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  const now = Date.now();
+  const rec = guessLog.get(ip);
+  if (!rec || rec.resetAt < now) { guessLog.set(ip, { n: 1, resetAt: now + GUESS_WINDOW_MS }); return false; }
+  rec.n++;
+  if (guessLog.size > 5000) guessLog.clear();   // unbounded-growth backstop
+  return rec.n > GUESS_LIMIT;
+}
+
+app.post('/api/login', (req, res) => {
+  if (tooManyGuesses(req)) return res.status(429).json({ error: 'too many attempts' });
+  const tok = req.body && req.body.token;
+  if (tok === AUTH_TOKEN) return res.json({ ok: true, role: 'owner' });
+  // The same box URL also accepts a guest token, so a teammate can open this host
+  // directly (no local Box needed) and land in a guest-scoped app.
+  const guest = team.resolveGuest(tok);
+  if (guest) return res.json({ ok: true, role: 'guest', member: { id: guest.id, name: guest.name, color: guest.color } });
+  return res.status(401).json({ error: 'bad token' });
+});
+
+// ---- team / shared workspace ----------------------------------------------
+// Redeem an invite code for a durable guest token. UNAUTHENTICATED by necessity — the
+// code IS the credential — so it shares the login brute-force budget. It stays inert on
+// a normal single-user box: with no invite minted, there is nothing to redeem.
+app.post('/api/team/join', (req, res) => {
+  if (team.teamDisabled()) return res.status(404).json({ error: 'team disabled' });
+  if (tooManyGuesses(req)) return res.status(429).json({ error: 'too many attempts' });
+  const out = team.redeemInvite((req.body || {}).code, { name: (req.body || {}).name });
+  if (out.error) return res.status(400).json({ error: out.error });
+  team.ensureWorkspace();
+  console.log(`[team] ${out.member.name} joined (${out.member.id})`);
+  res.json({ ok: true, token: out.token, member: out.member, ownerName: OWNER_NAME, workspaceRoot: team.workspaceRoot() });
+});
+
+// Owner console: members, invites, workspace root, what's currently shared.
+app.get('/api/team', requireOwner, (req, res) => res.json({
+  enabled: !team.teamDisabled(),
+  workspaceRoot: team.workspaceRoot(),
+  members: team.listMembers(),
+  invites: team.listInvites().sort((a, b) => b.createdAt - a.createdAt).slice(0, 25),
+  shared: team.sharedIds(),
+  online: onlineMemberIds(),
+}));
+app.post('/api/team/invites', requireOwner, (req, res) => {
+  const b = req.body || {};
+  const ttlMs = Math.min(30 * 24, Math.max(1, Number(b.ttlHours) || 168)) * 3600 * 1000;
+  team.ensureWorkspace();
+  res.json({ ok: true, invite: team.createInvite({ name: b.name, note: b.note, ttlMs }) });
+});
+app.post('/api/team/invites/:code/revoke', requireOwner, (req, res) =>
+  res.json({ ok: team.revokeInvite(req.params.code) }));
+app.post('/api/team/members/:id/revoke', requireOwner, (req, res) => {
+  const ok = team.revokeMember(req.params.id);
+  if (ok) dropMemberSockets(req.params.id);   // kick their live sockets immediately
+  res.json({ ok });
+});
+app.post('/api/team/members/:id/rename', requireOwner, (req, res) =>
+  res.json({ ok: team.renameMember(req.params.id, (req.body || {}).name) }));
+app.post('/api/team/workspace', requireOwner, (req, res) => {
+  const dir = expandUserPath((req.body || {}).path);
+  if (!dir) return res.status(400).json({ error: 'bad path' });
+  res.json({ ok: true, workspaceRoot: team.setWorkspaceRoot(dir) });
+});
+// Share / unshare a session with the team. Unsharing takes effect immediately: any
+// guest currently subscribed to it is dropped, not left with a stale live stream.
+app.post('/api/sessions/:id/share', requireOwner, (req, res) => {
+  const id = req.params.id;
+  const on = !((req.body || {}).shared === false);
+  team.setShared(id, on, 'owner');
+  if (!on) evictGuestsFromSession(id);
+  const s = RT.get(resolveKey(id));
+  if (s) bcast(s, { type: 'share', shared: on });
+  invalidateSessionLists();
+  res.json({ ok: true, shared: on });
+});
+
+// Guest + owner: who am I, and what can I see.
+app.get('/api/team/me', requireAuth, (req, res) => {
+  const p = req.principal;
+  res.json({
+    member: { id: p.id, name: p.name, role: p.role, color: p.color },
+    ownerName: OWNER_NAME,
+    workspaceRoot: team.workspaceRoot(),
+    members: team.listMembers().filter((m) => !m.revoked),
+    online: onlineMemberIds(),
+  });
+});
+
+// The shared session list. For a guest this is the ONLY way to enumerate sessions —
+// it returns exactly what they're allowed to open and nothing else.
+app.get('/api/team/sessions', requireAuth, (req, res) => {
+  const p = req.principal;
+  const ids = new Set(team.sharedIds());
+  if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) if (mid === p.id) ids.add(sid);
+  const all = listSessions({ filter: 'all', limit: 10000 }).sessions;
+  const byId = new Map(all.map((s) => [s.id, s]));
+  const sessions = [...ids].map((id) => {
+    const s = byId.get(id);
+    if (!s) return null;
+    return {
+      id: s.id, title: s.title, agent: s.agent, mtime: s.mtime, status: s.status, live: s.live,
+      cwd: p.kind === 'guest' ? (team.withinWorkspace(s.cwd || '') ? s.cwd : null) : s.cwd,
+      shared: team.isShared(id),
+      mine: team.sessionOwner(id) === p.id,
+      viewers: viewersOf(id),
+    };
+  }).filter(Boolean).sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+  res.json({ sessions, workspaceRoot: team.workspaceRoot(), me: { id: p.id, name: p.name, color: p.color } });
+});
+
+// Workspace file browser. Every path is clamped to the workspace root — a request for
+// anything outside it is answered with the root, not an error, so probing tells you nothing.
+app.get('/api/team/fs', requireAuth, (req, res) => {
+  const root = team.ensureWorkspace();
+  const isGuest = req.principal.kind === 'guest';
+  const want = expandUserPath(req.query.path) || root;
+  const p = isGuest ? team.guestCwd(want) : resolve(want);
+  try {
+    const st = statSync(p);
+    if (st.isDirectory()) {
+      const entries = readdirSync(p, { withFileTypes: true })
+        .filter((e) => !e.name.startsWith('.') || req.query.hidden === '1')
+        .map((e) => ({ name: e.name, dir: e.isDirectory() }))
+        .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+      const parent = dirname(p);
+      return res.json({ type: 'dir', path: p, root, atRoot: p === resolve(root),
+        parent: (!isGuest || team.withinWorkspace(parent)) ? parent : null, entries });
+    }
+    if (st.size > 1_000_000) return res.json({ type: 'file', path: p, root, tooBig: true, size: st.size });
+    res.json({ type: 'file', path: p, root, content: readFileSync(p, 'utf8') });
+  } catch (e) { res.status(404).json({ error: String(e.message || e) }); }
+});
+
+// A guest disowning their own access (e.g. shared laptop). Owner-side revoke is separate.
+app.post('/api/team/leave', requireAuth, (req, res) => {
+  if (req.principal.kind !== 'guest') return res.status(400).json({ error: 'owner cannot leave' });
+  team.revokeMember(req.principal.id);
+  dropMemberSockets(req.principal.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/sessions', requireOwner, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD, defaultAgent: appDefaultAgent() }); });
 app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
   const body = req.body || {};
   const on = !(body.archived === false);
@@ -2845,10 +3071,28 @@ function agyAvailable() {
 // the owner name, and which optional integrations are wired so it can hide the Board /
 // brain UI when they aren't configured. Safe to expose (no secrets).
 const LINEAR_ENABLED = !!((LINEAR_KEY_RAW || linearLite) && LINEAR_TEAM_ID);
-app.get('/api/config', requireAuth, (req, res) => res.json({
+app.get('/api/config', requireAuth, (req, res) => {
+  // A guest gets a deliberately small config: the shared workspace instead of the box's
+  // real home/cwd, no feature flags that would render owner-only UI, no overlay labels.
+  if (req.principal && req.principal.kind === 'guest') {
+    const root = team.ensureWorkspace();
+    return res.json({
+      home: root,
+      ownerName: OWNER_NAME,
+      defaultCwd: root,
+      guest: { id: req.principal.id, name: req.principal.name, color: req.principal.color },
+      workspaceRoot: root,
+      appSettings: { defaultCwd: root, defaultAgent: appDefaultAgent() },
+      features: { linear: false, brain: false, voice: false, voiceAssistant: false, slack: false,
+        codex: codexAvailable(), gemini: false, agy: false, mac: false },
+      subLabels: {},
+    });
+  }
+  return res.json({
   home: HOME,
   ownerName: OWNER_NAME,
   defaultCwd: DEFAULT_CWD,
+  team: { workspaceRoot: team.workspaceRoot(), members: team.listMembers().filter((m) => !m.revoked).length },
   appSettings: appSettingsPayload(),
   features: {
     linear: LINEAR_ENABLED,
@@ -2863,7 +3107,8 @@ app.get('/api/config', requireAuth, (req, res) => res.json({
   },
   // Display names for Automated-tab sub-buckets; a private overlay can add its own.
   subLabels: overlay.subLabels || {},
-}));
+  });
+});
 
 // Live screenshot of the user's Mac (the composer "View screen" button) — proxies the
 // cu-bridge worker's /screenshot over the reverse tunnel; no agent, no cost. Only useful
@@ -3690,12 +3935,17 @@ function rt(extKey) {
     RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (codex && codex.cwd) || null, agent: p.agent || (codex ? 'codex' : null),
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (codex && codex.title) || '',
       settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
-      context: p.context || null,
-      queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), proc: null, codexGoalProc: null, canceled: false });
+      context: p.context || null, createdBy: p.createdBy || null,
+      queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), typing: new Map(), curAuthor: null, proc: null, codexGoalProc: null, canceled: false });
   }
   return RT.get(key);
 }
-function persist(s) { try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, queue: s.queue, inflight: s.inflight || null })); } catch {} }
+function persist(s) {
+  // A chat a guest started is theirs to keep reaching. The real session id only appears
+  // partway through the first turn, and it lands via five different engine paths — so
+  // claim it here, on the one call every path already makes afterwards.
+  if (s.createdBy && s.sessionId) { try { team.claimSession(s.sessionId, s.createdBy); } catch {} }
+  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, queue: s.queue, inflight: s.inflight || null })); } catch {} }
 function activityLabelForEvent(o, previous = '') {
   if (!o || !o.type) return '';
   if (o.type === 'turn_start') return 'Starting';
@@ -3724,9 +3974,67 @@ function bcast(s, event) {
   }
   for (const ws of s.subs) { try { ws.send(JSON.stringify(o)); } catch {} }
 }
+
+// ---- team presence ---------------------------------------------------------
+// Who is looking at what, derived live from the per-session subscriber sets. There is no
+// separate presence store to go stale: a viewer disappears the instant their socket closes.
+const TYPING_TTL_MS = 4000;
+function principalsOf(s) {
+  const seen = new Map();
+  for (const ws of s.subs) {
+    const p = ws.principal;
+    if (!p || ws.readyState !== 1) continue;
+    if (!seen.has(p.id)) seen.set(p.id, { id: p.id, name: p.name, role: p.role, color: p.color });
+  }
+  return [...seen.values()];
+}
+function typingNow(s) {
+  if (!s.typing) return [];
+  const now = Date.now(), out = [];
+  for (const [id, v] of s.typing) {
+    if (now - v.at > TYPING_TTL_MS) s.typing.delete(id);
+    else out.push({ id, name: v.name, color: v.color });
+  }
+  return out;
+}
+function viewersOf(sessionId) {
+  const s = RT.get(resolveKey(String(sessionId || '')));
+  return s ? principalsOf(s) : [];
+}
+function onlineMemberIds() {
+  const ids = new Set();
+  for (const ws of wss.clients) if (ws.principal && ws.readyState === 1) ids.add(ws.principal.id);
+  return [...ids];
+}
+// Presence rides its own event so it never perturbs `activityLabel` (which drives the
+// "what is the agent doing" line) — a teammate opening a tab is not agent activity.
+function broadcastPresence(s) {
+  const o = JSON.stringify({ type: 'presence', viewers: principalsOf(s), typing: typingNow(s) });
+  for (const ws of s.subs) { try { ws.send(o); } catch {} }
+}
+// Revoking access has to be immediate, not "next time they reload".
+function dropMemberSockets(memberId) {
+  for (const ws of wss.clients) {
+    if (ws.principal && ws.principal.id === memberId) {
+      try { ws.send(JSON.stringify({ type: 'revoked' })); } catch {}
+      try { ws.close(); } catch {}
+    }
+  }
+}
+function evictGuestsFromSession(sessionId) {
+  const s = RT.get(resolveKey(String(sessionId || '')));
+  if (!s) return;
+  for (const ws of [...s.subs]) {
+    if (!ws.principal || ws.principal.kind !== 'guest') continue;
+    if (team.canAccessSession(ws.principal, s.sessionId || s.key)) continue;   // still theirs
+    try { ws.send(JSON.stringify({ type: 'unshared' })); } catch {}
+    s.subs.delete(ws);
+  }
+  broadcastPresence(s);
+}
 // The active message lives in `s.inflight`; every item still in `s.queue` is pending
 // and must remain editable/cancelable, including the first item while a turn runs.
-const queueView = (s) => s.queue.map((q) => ({ qid: q.qid, text: q.displayText != null ? q.displayText : q.text, mode: q.mode, agent: q.agent || s.agent || 'claude', images: q.images || [], running: false }));
+const queueView = (s) => s.queue.map((q) => ({ qid: q.qid, text: q.displayText != null ? q.displayText : q.text, mode: q.mode, agent: q.agent || s.agent || 'claude', images: q.images || [], author: q.author || null, running: false }));
 
 // locate a session's jsonl across project dirs (sessions can live under any cwd)
 function jsonlPath(id) {
@@ -4307,6 +4615,7 @@ function combineQueued(batch) {
     agent: batch.find((m) => m.agent)?.agent || batch[0].agent || 'claude',
     cwd: batch[0].cwd,
     force: batch.some((m) => m.force),
+    author: batch[0].author || null,   // the batch is single-author by construction
     parentId: batch.find((m) => m.parentId)?.parentId || batch[0].parentId || null,
     parentTitle: batch.find((m) => m.parentTitle)?.parentTitle || batch[0].parentTitle || '',
     title: batch.find((m) => m.title)?.title || batch[0].title || '',
@@ -4355,7 +4664,14 @@ async function runWorker(s) {
   }
   s.running = true;
   while (s.queue.length) {
-    const batch = s.queue.splice(0, s.queue.length);   // drain ALL currently queued
+    // Drain the leading run of messages from the SAME sender. Batching two people's
+    // messages into one turn would merge them into a single bubble and lose the "who
+    // said what" the whole shared-session feature rests on. On a solo box every author
+    // is null, so this drains the entire queue exactly as it always did.
+    const headAuthor = s.queue[0].author ? s.queue[0].author.id : null;
+    let take = 1;
+    while (take < s.queue.length && (s.queue[take].author ? s.queue[take].author.id : null) === headAuthor) take++;
+    const batch = s.queue.splice(0, take);
     const msg = combineQueued(batch.map((message) => prepareRecoveredMessage(s, message)));
     // Removing a message from `queue` must not remove it from durable state. A deploy or
     // crash can happen before Codex emits anything; retain the active turn separately so
@@ -4366,8 +4682,9 @@ async function runWorker(s) {
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
     s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.lastActivityAt = Date.now(); s.activityLabel = 'Starting'; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
+    s.curAuthor = msg.author || null;   // so a mid-turn (re)subscriber sees who asked
     if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
-    bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [] });
+    bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [], author: msg.author || null });
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });  // emptied — chips clear
     if (typeof msg.onStart === 'function') { try { msg.onStart({ sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude' }); } catch {} }
@@ -4381,7 +4698,7 @@ async function runWorker(s) {
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
-  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; s.lastActivityAt = 0; s.activityLabel = ''; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
+  s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; s.curAuthor = null; s.lastActivityAt = 0; s.activityLabel = ''; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
 // Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
@@ -4956,9 +5273,13 @@ sttWss.on('connection', (client, url) => {
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
-  if (url.searchParams.get('token') !== AUTH_TOKEN) return socket.destroy();
-  if (url.pathname === '/ws') return wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, url));
-  if (url.pathname === '/stt') return sttWss.handleUpgrade(req, socket, head, (ws) => sttWss.emit('connection', ws, url));
+  const principal = principalOf(url.searchParams.get('token'));
+  if (!principal) return socket.destroy();
+  // The principal is stamped on the socket at upgrade and is the ONLY identity the
+  // connection ever has — a client cannot name itself in a later frame.
+  if (url.pathname === '/ws') return wss.handleUpgrade(req, socket, head, (ws) => { ws.principal = principal; wss.emit('connection', ws, url); });
+  // Speech-to-text burns a paid provider key on someone else's account. Owner only.
+  if (url.pathname === '/stt' && principal.kind === 'owner') return sttWss.handleUpgrade(req, socket, head, (ws) => sttWss.emit('connection', ws, url));
   socket.destroy();
 });
 // Keep WebSocket connections alive through Cloudflare tunnels (which drop idle sockets after ~100s).
@@ -4978,21 +5299,73 @@ wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
   let subKey = null;
-  const unsub = () => { if (subKey != null) { const s = RT.get(resolveKey(subKey)); if (s) s.subs.delete(ws); } };
+  const isGuest = ws.principal && ws.principal.kind === 'guest';
+  const unsub = () => {
+    if (subKey == null) return;
+    const s = RT.get(resolveKey(subKey));
+    if (!s) return;
+    s.subs.delete(ws);
+    if (s.typing && ws.principal) s.typing.delete(ws.principal.id);
+    broadcastPresence(s);   // the room should see them leave immediately
+  };
+  // Guests may only touch sessions shared with them or started by them. Every inbound
+  // frame re-checks: sharing can be revoked mid-session and must take effect at once.
+  const mayTouch = (key) => {
+    if (!isGuest) return true;
+    const s = RT.get(resolveKey(key)) || null;
+    const id = (s && s.sessionId) || key;
+    // A brand-new chat has no session id yet; it is claimed for this guest on creation.
+    if (!s || !s.sessionId) return String(key || '').startsWith('new-') || team.canAccessSession(ws.principal, id);
+    return team.canAccessSession(ws.principal, id);
+  };
+  const deny = () => { try { ws.send(JSON.stringify({ type: 'error', msg: 'not shared with you' })); } catch {} };
   ws.on('message', (raw) => {
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (m && m.key != null && !mayTouch(m.key)) return deny();
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
+      broadcastPresence(s);
       if (s.sessionId) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s) }));
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
+        me: team.authorOf(ws.principal), curAuthor: s.curAuthor || null,
+        shared: s.sessionId ? team.isShared(s.sessionId) : false,
+        viewers: principalsOf(s), typing: typingNow(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
-      enqueue(m.key, { text: m.text || '', displayText: m.displayText, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude', cwd: m.cwd, force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '' });
+      const s0 = rt(m.key);
+      if (isGuest && !s0.createdBy && !s0.sessionId) s0.createdBy = ws.principal.id;
+      const shared = !!(s0.sessionId && team.isShared(s0.sessionId)) || isGuest;
+      // In a SHARED session the sender's name is folded into the prompt itself, so the
+      // agent knows who it's answering and the durable JSONL transcript records
+      // authorship for anyone replaying it later (including outside Box). A solo session
+      // is left byte-for-byte unchanged — `displayText` always stays the clean text.
+      const rawText = m.text || '';
+      const author = team.authorOf(ws.principal);
+      enqueue(m.key, {
+        text: shared ? team.attributePrompt(rawText, ws.principal) : rawText,
+        displayText: m.displayText != null ? m.displayText : (shared ? rawText : undefined),
+        author, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude',
+        // A guest's chat is pinned inside the shared workspace no matter what cwd the
+        // client asks for; the clamp is here on the server, never in the UI.
+        cwd: isGuest ? team.guestCwd(m.cwd) : m.cwd,
+        force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
+      });
+      if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
+    } else if (m.type === 'typing') {
+      const s = rt(m.key);
+      if (!s.typing) s.typing = new Map();
+      if (ws.principal) {
+        if (m.on === false) s.typing.delete(ws.principal.id);
+        else s.typing.set(ws.principal.id, { name: ws.principal.name, color: ws.principal.color, at: Date.now() });
+        broadcastPresence(s);
+      }
     } else if (m.type === 'settings') {
       const s = rt(m.key);
       s.settings = normalizeSettings(m.settings || s.settings || {});
-      const nextCwd = expandUserPath(m.cwd);
+      // A guest must not be able to relocate a session out of the shared workspace by
+      // pushing a settings frame — clamp before the directory check, not after.
+      const nextCwd = isGuest ? team.guestCwd(expandUserPath(m.cwd)) : expandUserPath(m.cwd);
       if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;
       persist(s);
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });

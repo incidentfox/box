@@ -3,6 +3,53 @@ const $ = (id) => document.getElementById(id);
 const LS = localStorage;
 let TOKEN = LS.getItem('cc_token') || '';
 let ws = null;
+
+/* ---------- endpoints: this box, and (optionally) a teammate's box ----------
+   Every request used to be implicitly "this origin". A teammate who joined someone
+   else's box has TWO servers in play: their own local Box (owner token) and the host
+   they joined (guest token). The tempting fix — one global mutable endpoint — is wrong:
+   background pollers (session feed, board, config, needs-attention) keep running while a
+   shared chat is open on desktop, and they would silently start hitting the wrong server.
+   So the remote endpoint is passed EXPLICITLY (`api(path, { ep })`), and an open chat
+   remembers its own in `cur.ep`. Anything that doesn't ask for one stays local. */
+const LOCAL_EP = { base: '', remote: false, get token() { return TOKEN; } };
+let TEAM = null;   // a joined remote box: { host, token, member, ownerName, workspaceRoot, joinedAt }
+try { TEAM = JSON.parse(LS.getItem('box_team') || 'null'); } catch { TEAM = null; }
+const epBase = (host) => String(host || '').trim().replace(/\/+$/, '');
+function teamEp() {
+  return TEAM && TEAM.host && TEAM.token ? { base: epBase(TEAM.host), remote: true, token: TEAM.token } : null;
+}
+function saveTeam(t) {
+  TEAM = t || null;
+  if (TEAM) LS.setItem('box_team', JSON.stringify(TEAM)); else LS.removeItem('box_team');
+}
+// Where the Team screen talks: a joined remote box, or THIS one when the token we logged
+// in with is itself a guest token (a teammate who has no server of their own and just
+// opens the host's URL).
+const teamApiEp = () => teamEp() || LOCAL_EP;
+const teamWorkspaceRoot = () => (TEAM && TEAM.workspaceRoot) || (CFG && CFG.workspaceRoot) || '';
+// True when this browser is signed in as a guest of the box it's talking to — the whole
+// app then runs in the reduced, workspace-scoped shape the server enforces anyway.
+const isGuestHere = () => !!(CFG && CFG.guest);
+const hasTeam = () => !!(teamEp() || isGuestHere());
+const chatEp = () => (cur && cur.ep) || LOCAL_EP;
+const epUrl = (ep, path) => ((ep && ep.base) || '') + path;
+function epWsUrl(ep, path, params) {
+  const base = (ep && ep.base) || location.origin;
+  const u = new URL(base + path, location.origin);
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  for (const [k, v] of Object.entries(params || {})) u.searchParams.set(k, v);
+  return u.toString();
+}
+// The host revoked us (or the invite expired). Drop the dead token rather than let every
+// Team request fail silently, and get out of any remote chat we're sitting in.
+function onTeamAccessLost() {
+  if (!teamEp()) return;
+  saveTeam(null);
+  toast('Your access to that team was revoked');
+  if (cur && cur.ep && cur.ep.remote) { try { if (ws) ws.close(); } catch {} openSessions(); }
+  else if (typeof renderTeam === 'function' && document.body.dataset.view === 'team') renderTeam();
+}
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
@@ -65,7 +112,7 @@ applyVV();
   document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
 /* ---------- helpers ---------- */
-const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew', 'voice'];
+const TOP_SCREENS = ['login', 'sessions', 'chat', 'pipelines', 'board', 'issue', 'issueNew', 'voice', 'team'];
 const desktopMq = window.matchMedia ? window.matchMedia('(min-width: 900px)') : null;
 const isDesktopShell = () => !!(desktopMq && desktopMq.matches);
 function show(id) {
@@ -91,15 +138,19 @@ function routeSlug(value, fallback = '') {
 }
 function routeUrl(state) {
   const s = state || { view: 'sessions', filter: 'all' };
+  // A shared chat that lives on someone else's box is routed under /team, so a reload or
+  // a Back/Forward step re-opens it against that box instead of looking for it here.
+  const teamPrefix = s.remote ? '/team' : '';
   switch (s.view) {
+    case 'team': return '/team';
     case 'board': return '/board';
     case 'issue': return `/issues/${safeRoutePart(s.id)}${routeSlug(s.title) ? `/${routeSlug(s.title)}` : ''}`;
     case 'issueNew': return '/issues/new';
     case 'pipelines': return '/pipelines';
     case 'voice': return '/voice';
     case 'chat': return s.id
-      ? `/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}`
-      : '/sessions/new';
+      ? `${teamPrefix}/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}`
+      : `${teamPrefix}/sessions/new`;
     case 'sessions': {
       const filter = s.filter || 'all';
       return filter === 'all' ? '/sessions' : `/sessions?filter=${encodeURIComponent(filter)}`;
@@ -109,10 +160,16 @@ function routeUrl(state) {
   }
 }
 function routeFromLocation() {
-  const parts = location.pathname.split('/').filter(Boolean).map((part) => {
+  const raw = location.pathname.split('/').filter(Boolean).map((part) => {
     try { return decodeURIComponent(part); } catch { return part; }
   });
+  const remote = raw[0] === 'team';
+  const parts = remote ? raw.slice(1) : raw;
   const filter = new URLSearchParams(location.search).get('filter') || 'all';
+  if (remote && !parts.length) return { view: 'team' };
+  if (remote && parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, remote: true };
+  if (remote && parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1], remote: true };
+  if (remote) return { view: 'team' };
   if (parts[0] === 'board' && parts.length === 1) return { view: 'board' };
   if (parts[0] === 'issues' && parts[1] === 'new') return { view: 'issueNew' };
   if (parts[0] === 'issues' && parts[1]) return { view: 'issue', id: parts[1] };
@@ -147,7 +204,7 @@ function renderRoute(s) {
     // visible as the left sidebar even though the active route is chat/board/etc.
     // Hydrate that sidebar independently; otherwise it stays blank until another
     // navigation happens to fetch the session feed.
-    if (isDesktopShell() && s && s.view !== 'login' && s.view !== 'sessions') {
+    if (isDesktopShell() && s && s.view !== 'login' && s.view !== 'sessions' && !isGuestHere()) {
       fetchSessions(curFilter || 'all').catch(() => {});
     }
     // leaving the chat → drop the live socket (matches the old goBackFromChat)
@@ -160,11 +217,15 @@ function renderRoute(s) {
       case 'voice':     if (typeof openVoice === 'function') openVoice(); else openSessions(); break;
       case 'issue':     openIssue(s.id); break;
       case 'issueNew':  openIssueNew(); break;
+      case 'team':      if (typeof openTeam === 'function') openTeam(); else openSessions(); break;
       case 'chat':
         if (s.id && cur.id === s.id && chatVisible()) { if (attnMode) closeAttention(); break; } // just closing the overlay
         if (attnMode) closeAttention();
-        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent });
-        else if (s.new) openChat({ id: null, title: 'New chat', cwd: defaultCwd, agent: configuredDefaultAgent() });
+        // `remote` chats live on the box we joined — re-resolve the endpoint here so a
+        // reload or Back/Forward lands on the same server the chat was opened against.
+        if (s.remote && !teamEp() && !isGuestHere()) { openSessions(); break; }
+        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote });
+        else if (s.new) openChat({ id: null, title: 'New chat', cwd: s.remote ? teamWorkspaceRoot() : defaultCwd, agent: configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: !!s.remote });
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
         else openSessions();
         break;
@@ -199,8 +260,15 @@ function toast(m, ms = 2200, action) {
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const isPlaceholderChatTitle = (s) => /^New (Claude |Codex )?chat$/i.test(String(s || '').trim());
 async function api(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + TOKEN, ...(opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) } });
-  if (r.status === 401) { throw new Error('unauthorized'); }   // never auto-logout — token is long & annoying to re-enter
+  const { ep = LOCAL_EP, ...init } = opts;
+  const r = await fetch(epUrl(ep, path), { ...init, headers: { Authorization: 'Bearer ' + ep.token, ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}), ...(init.headers || {}) } });
+  if (r.status === 401) {
+    // A revoked guest token is dead forever — keeping it around just makes every
+    // Team request fail silently. The owner's own token is never dropped on a 401
+    // (it's long and annoying to re-enter, and a 401 there means a transient fault).
+    if (ep.remote) onTeamAccessLost();
+    throw new Error('unauthorized');
+  }
   return r;
 }
 function setChatTitle(title) {
@@ -245,9 +313,34 @@ function applyConfig() {
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   setVis('boardBtn', !!f.linear);       // header Linear-board button
   setVis('attnTabLinear', !!f.linear);  // Linear tab in the needs-attention panel
+  applyTeamChrome();
   if (CFG.defaultCwd) defaultCwd = CFG.defaultCwd;
   if (CFG.appSettings && CFG.appSettings.codexSandbox) DEFAULT_SETTINGS.codex.sandbox = CFG.appSettings.codexSandbox;
   if (!LS.getItem('box_agent') && cur && !cur.id) { cur.agent = configuredDefaultAgent(); refreshAgentChip(); }
+}
+/* ---------- what this browser is allowed to do ----------
+   Two reduced modes exist, and both are enforced server-side — this only hides controls
+   that would 403 rather than letting them fail in the user's face.
+   • guest mode: we're signed in to THIS box with a guest token (a teammate with no server
+     of their own). The whole owner surface — settings, accounts, board, session feed — is
+     gone; the Team screen is the app.
+   • foreign chat: an owner of their own box, viewing a chat that runs on a teammate's. */
+const chatIsForeign = () => !!(cur && cur.ep && cur.ep.remote) || isGuestHere();
+function applyTeamChrome() {
+  const guest = isGuestHere();
+  document.body.classList.toggle('guestMode', guest);
+  const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
+  if (guest) {
+    for (const id of ['settingsBtn', 'boardBtn', 'pipesBtn', 'voiceBtn', 'sessSearchBtn', 'sessionMenuBtn', 'bulkBtn']) setVis(id, false);
+  }
+  // The Team button only earns header space once there IS a team.
+  setVis('teamBtn', guest || !!teamEp() || !!(CFG && CFG.team && (CFG.team.members > 0)));
+}
+function applyChatCapabilities() {
+  const foreign = chatIsForeign();
+  const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
+  setVis('archiveBtn', !foreign);   // archive/favorite/fork/schedule are the owner's calls
+  setVis('attnBtn', !foreign);      // the needs-attention inbox is the box owner's queue
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
 function atBottom() { const m = $('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
@@ -332,6 +425,7 @@ const ICONS = {
   fold: SVG('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
   'arrow-up-dir': SVG('<path d="M12 19V6M6 12l6-6 6 6"/>', { w: 2.1 }),
   laptop: SVG('<rect x="4" y="5" width="16" height="11" rx="1.6"/><path d="M2 20h20"/>', { w: 1.8 }),
+  chat: SVG('<path d="M20 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/>', { w: 1.9 }),
   'arrow-down': SVG('<path d="M12 5v14M5 12l7 7 7-7"/>', { w: 2.2 }),
   pulse: SVG('<path d="M3 12h4l3 8 4-16 3 8h4"/>', { w: 2 }),
   moon: SVG('<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.7 6.7 0 0 0 9.8 9.8z"/>', { w: 2 }),
@@ -352,6 +446,8 @@ const ICONS = {
   'sidebar-expand': SVG('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M13 9l3 3-3 3"/>', { w: 1.9 }),
   search: SVG('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', { w: 2 }),
   more: SVG('<circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/>'),
+  team: SVG('<circle cx="9" cy="8" r="3.2"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16.5 5.4a3.2 3.2 0 0 1 0 5.2M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>', { w: 1.9 }),
+  share: SVG('<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/>', { w: 1.9 }),
   settings: SVG('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1A1.7 1.7 0 0 0 10 3V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1A1.7 1.7 0 0 0 21 10h0a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>', { w: 1.8 }),
 };
 function paintIcons(root = document) { root.querySelectorAll('[data-icon]').forEach((el) => { if (!el._painted) { el.innerHTML = ICONS[el.dataset.icon] || ''; el._painted = 1; } }); }
@@ -674,8 +770,12 @@ async function login() {
   const token = $('tokenInput').value.trim(); if (!token) return;
   const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
   if (!r.ok) { $('loginErr').textContent = 'Wrong token'; return; }
+  let role = 'owner';
+  try { role = (await r.json()).role || 'owner'; } catch {}
   TOKEN = token; LS.setItem('cc_token', token);
-  const initialRoute = (history.state && history.state.returnTo) || routeFromLocation();
+  // A guest token opens the same URL into the reduced, team-scoped app — a deep link to
+  // this box's session list would only 403, so guests land on Team.
+  const initialRoute = role === 'guest' ? { view: 'team' } : ((history.state && history.state.returnTo) || routeFromLocation());
   navTo(initialRoute, { replace: true });
   loadConfig(); renderRoute(initialRoute);
 }
@@ -694,7 +794,12 @@ const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input',
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
 
-async function openSessions(filter = 'all') { navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter); }
+async function openSessions(filter = 'all') {
+  // A guest can't enumerate this box's chats (the server refuses), and shouldn't want to —
+  // the Team screen is their home screen.
+  if (isGuestHere()) return openTeam();
+  navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter);
+}
 let lastSessionRenderSig = '';
 async function fetchSessions(filter) {
   curFilter = filter || 'all';
@@ -713,7 +818,7 @@ async function fetchSessions(filter) {
   renderTabs(); renderBulkBar(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
 }
 function refreshSessionsSoon(delay = 350) {
-  if (!TOKEN) return;
+  if (!TOKEN || isGuestHere()) return;   // guests have no session feed to refresh
   clearTimeout(sessionRefreshTimer);
   sessionRefreshTimer = setTimeout(() => {
     sessionRefreshTimer = null;
@@ -2253,8 +2358,10 @@ function subscribeCurrentWS() {
 function connectWS() {
   if (ws && ws.readyState <= 1) { if (ws.readyState === 1) subscribeCurrentWS(); return; }
   if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; }
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+  // A shared chat opened from the Team screen lives on the HOST's box, so its socket must
+  // go there, not to this origin. cur.ep is only set for those; solo chats stay local.
+  const ep = chatEp();
+  ws = new WebSocket(epWsUrl(ep, '/ws', { token: ep.token }));
   ws.onmessage = (e) => { resetWsWatchdog(); onServer(JSON.parse(e.data)); };
   ws.onopen = () => { resetWsWatchdog(); subscribeCurrentWS(); };
   ws.onerror = () => { try { ws.close(); } catch {} };
@@ -2280,14 +2387,19 @@ function annotateHistoryMessages(messages, start = 0) {
 async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id };
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id,
+    // A chat opened from the Team screen runs on the HOST's box: every request and the
+    // live socket for it must target that endpoint for as long as it stays open.
+    ep: s.ep || null, shared: !!s.shared };
   syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived });
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote) });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   setChatTitle(cur.title);
   updateFavoriteButton();
   updateArchiveButton();
+  renderPresence();       // clear the previous chat's viewers before this one's sync arrives
+  applyChatCapabilities();
   renderContextMeter();
   $('messages').innerHTML = ''; live = null; liveUser = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
@@ -2305,7 +2417,7 @@ async function openChat(s) {
   if (s.id) {
     const loader = addHistoryLoader();
     try {
-      const h = await (await api(`/api/sessions/${s.id}/history`)).json();
+      const h = await (await api(`/api/sessions/${s.id}/history`, { ep: cur.ep || LOCAL_EP })).json();
       if (renderSeq !== chatRenderSeq) return;
       loader.remove();
       cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
@@ -2426,12 +2538,44 @@ function historyParts(m) {
   }
   return [];
 }
+/* ---------- "who sent this" ----------
+   In a shared session every prompt is prefixed with the sender's name before it reaches
+   the agent, and the server hands that back as a structured `author` (both live and when
+   replaying the transcript). A solo box never sets one, so nothing below renders and the
+   chat looks exactly as it always did. */
+function myMemberId() {
+  if (cur && cur.me && cur.me.id) return cur.me.id;              // authoritative: from the WS sync
+  if (cur && cur.ep && cur.ep.remote) return (TEAM && TEAM.member && TEAM.member.id) || '';
+  if (isGuestHere()) return CFG.guest.id;
+  return 'owner';
+}
+function authorBadge(a) {
+  if (!a || !a.name) return null;
+  const el = document.createElement('div'); el.className = 'msgAuthor';
+  const dot = document.createElement('span'); dot.className = 'msgAuthorDot';
+  if (a.color) dot.style.background = a.color;
+  const name = document.createElement('span');
+  name.textContent = a.id && a.id === myMemberId() ? `${a.name} (you)` : a.name;
+  el.appendChild(dot); el.appendChild(name);
+  if (a.role === 'owner') { const t = document.createElement('span'); t.className = 'msgAuthorRole'; t.textContent = 'host'; el.appendChild(t); }
+  return el;
+}
+// Teammates' messages get their own tint so a fast-moving shared chat stays readable
+// without having to read the name on every bubble.
+function applyAuthor(wrap, author) {
+  const badge = authorBadge(author);
+  if (!badge) return;
+  wrap.classList.add(author.id === myMemberId() ? 'fromMe' : 'fromOther');
+  wrap.dataset.authorId = author.id || '';
+  wrap.appendChild(badge);
+}
 function buildHistElement(m) {
   m = (m && typeof m === 'object') ? m : { role: 'assistant', parts: [{ t: 'text', text: String(m || '') }] };
   const role = m.role === 'user' ? 'user' : 'assistant';
   const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
   if (m._idx != null) wrap.dataset.idx = String(m._idx);
   if (m.live) wrap.dataset.historyLive = 'true';
+  if (role === 'user') applyAuthor(wrap, m.author);
   const body = document.createElement('div'); body.className = 'body';
   let rawText = '';
   for (const p of historyParts(m)) {
@@ -2533,7 +2677,7 @@ async function loadEarlierMessages() {
       container.scrollTop += container.scrollHeight - prevHeight;
       return;
     }
-    const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`)).json();
+    const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`, { ep: chatEp() })).json();
     loader.remove();
     if (!h.messages || !h.messages.length) { cur.hasMoreHistory = false; const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); return; }
     scheduleHistoryPathResolve(h.messages);
@@ -2789,7 +2933,11 @@ function renderQueue(items) {
     const imgs = Array.isArray(q.images) ? q.images : [];
     const wakeFired = /^⏰ Scheduled wake-up\s*·/.test(q.text || '');
     const el = document.createElement('div'); el.className = 'qchip' + (q.running ? ' running' : '') + (wakeFired ? ' wakeFired' : '');
-    el.innerHTML = `${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qcopy"><span class="qt"></span></span><button class="qcancel" type="button">Cancel</button>`;
+    // In a shared chat the queue holds everyone's pending messages — say whose is whose,
+    // otherwise "Cancel" looks like it applies to your own.
+    const who = q.author && q.author.name && q.author.id !== myMemberId()
+      ? `<span class="qmode qwho" style="${q.author.color ? `background:${esc(q.author.color)}` : ''}">${esc(q.author.name)}</span>` : '';
+    el.innerHTML = `${who}${q.agent && q.agent !== 'claude' ? `<span class="qmode">${esc(q.agent)}</span>` : q.mode === 'bash' ? '<span class="qmode">bash</span>' : ''}${imgs.length ? '<span class="qthumbs"></span>' : ''}<span class="qcopy"><span class="qt"></span></span><button class="qcancel" type="button">Cancel</button>`;
     if (imgs.length) { const th = el.querySelector('.qthumbs'); imgs.forEach((p) => { const im = document.createElement('img'); im.src = imgUrl(p); th.appendChild(im); }); }
     const queueText = q.text || (imgs.length ? `${imgs.length} image${imgs.length > 1 ? 's' : ''}` : '');
     el.querySelector('.qt').textContent = wakeFired ? queueText.replace(/^⏰ Scheduled wake-up/, '⏰ Wake-up fired') : queueText;
@@ -2879,9 +3027,10 @@ function clearLoading() { if (live && live.loading) { live.loading.remove(); liv
 // remove orphaned streaming indicators (blinking cursor / loading dots) left by a previous
 // turn or a reconnect — prevents stray ghost indicators lingering in the transcript.
 function killGhostIndicators() { stopLiveProgress(); $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); $('messages').querySelectorAll('.liveProgress').forEach((e) => e.remove()); }
-const imgUrl = (p) => '/api/img?path=' + encodeURIComponent(p) + '&token=' + encodeURIComponent(TOKEN);
+// Attachments belong to whichever box the open chat runs on (chatEp), not necessarily this one.
+const imgUrl = (p) => epUrl(chatEp(), '/api/img?path=' + encodeURIComponent(p)) + '&token=' + encodeURIComponent(chatEp().token);
 // For arbitrary filesystem paths (e.g. tool Read on an image), use /api/raw which has no dir restriction
-const rawFileUrl = (p, download = false) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN) + (download ? '&dl=1' : '');
+const rawFileUrl = (p, download = false) => epUrl(chatEp(), '/api/raw?path=' + encodeURIComponent(expandBoxPath(p))) + '&token=' + encodeURIComponent(chatEp().token) + (download ? '&dl=1' : '');
 // Remember the last user bubble we drew, so a re-echoed copy of the SAME message (e.g. the
 // server's own injected-echo suppression desyncing on a force-queue + Stop, which leaks the
 // echo back as a `remote_user`) can be dropped instead of rendering the message twice.
@@ -2895,12 +3044,13 @@ function userAttachmentGrid(paths) {
   });
   return r;
 }
-function addUser(text, images) {
+function addUser(text, images, author) {
   setNewChatIntro(false);
   lastUserRender = { text: text || '', at: Date.now() };
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   wrap.dataset.ts = new Date().toISOString();
+  applyAuthor(wrap, author);
   const body = document.createElement('div'); body.className = 'body';
   if (images && images.length) {
     body.appendChild(userAttachmentGrid(images));
@@ -2914,7 +3064,7 @@ function addUser(text, images) {
   $('messages').appendChild(wrap);
   return wrap;
 }
-function beginTurn(text, images) { clearWaitingCard(); liveUser = addUser(text || '', images); startAssistant(); running = true; refreshButton(); }
+function beginTurn(text, images, author) { clearWaitingCard(); liveUser = addUser(text || '', images, author); startAssistant(); running = true; refreshButton(); }
 
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
@@ -2929,14 +3079,14 @@ function onServer(o) {
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
   // force-queue + Stop), so the message doesn't render twice.
-  if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', []); return; }
+  if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', [], o.author); return; }
   if (o.type === 'queue') { renderQueue(o.queue); refreshSessionModesSoon(); return; }
   if (o.type === 'queue_canceled') { queueCancelUndo.set(o.qid, Number(o.expiresAt) || Date.now() + 8000); showQueueCancelUndo(); return; }
   if (o.type === 'queue_restored') { queueCancelUndo.delete(o.qid); toast('Queued message restored'); return; }
   if (o.type === 'queue_undo_expired') { queueCancelUndo.delete(o.qid); toast('Undo window expired'); return; }
   if (o.type === 'attention_updated') { refreshAttnBadge(); if (attnMode) showAttention(); return; }
   if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
-  if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images); }
+  if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images, o.author); }
   if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); refreshSessionModesSoon(); return; }
   if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
   else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
@@ -2962,10 +3112,19 @@ function onServer(o) {
   else if (o.type === 'waiting') renderWaiting(o);
   else if (o.type === 'waiting_clear') clearWaitingCard();
   else if (o.type === 'done') finishTurn(o);
+  else if (o.type === 'presence') { cur.viewers = o.viewers || []; cur.typing = o.typing || []; renderPresence(); }
+  else if (o.type === 'share') { cur.shared = !!o.shared; renderPresence(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); }
+  else if (o.type === 'revoked') { onTeamAccessLost(); }
 }
 function onSync(o) {
   // restore in-flight turn + pending queue after a (re)connect
   if (o.sessionId) cur.id = o.sessionId;
+  // Identity + presence for a shared chat. `me` is per-connection and authoritative —
+  // it's how the same transcript can say "(you)" on the host's box and on a guest's.
+  if (o.me) cur.me = o.me;
+  if (typeof o.shared === 'boolean') cur.shared = o.shared;
+  cur.viewers = o.viewers || []; cur.typing = o.typing || [];
+  renderPresence();
   // Only let the server's agent win for a REAL, already-created session. A brand-new chat
   // has no server-side session yet, so subscribe returns the default agent ('claude') — applying
   // it here would clobber the agent the user just picked (e.g. Codex), making the menu flip back
@@ -3025,7 +3184,7 @@ function onSync(o) {
     } else if (o.curUser || (o.curUserImages || []).length) {
       // sync arrived before turn_start (or REST history had not persisted the user yet):
       // append the actual current user after the intact previous answer.
-      liveUser = addUser(o.curUser || '', o.curUserImages || []);
+      liveUser = addUser(o.curUser || '', o.curUserImages || [], o.curAuthor);
     }
     startAssistant();
     setLiveActivity(o.activityLabel || 'Working', o.activityAt || Date.now());
@@ -3159,7 +3318,7 @@ function enqueueText(text, opts = {}) {
   if (opts.parentTitle || cur.parentTitle) payload.parentTitle = opts.parentTitle || cur.parentTitle;
   if (opts.title) payload.title = opts.title;
   connectWS();
-  const go = () => { try { ws.send(JSON.stringify(payload)); } catch {} };
+  const go = () => { try { ws.send(JSON.stringify(payload)); } catch {} sendTyping(false); };
   if (ws.readyState === 1) go();
   else ws.addEventListener('open', () => { ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); go(); }, { once: true });
   refreshButton(); scrollBottom();
@@ -3227,7 +3386,7 @@ async function submit() {
       toast('Tap an option above, or answer on desktop'); return;
     }
     const ft = waitingState.freeTextIndex; const hadMenu = waitingState.hasOptions; waitingState = null;   // optimistic
-    $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); addUser(text, []);
+    $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); sendTyping(false); addUser(text, [], cur.shared ? cur.me : null);
     const sel = (hadMenu && ft >= 1) ? { text, freeTextIndex: ft } : { text };
     try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel })); } catch {}
     document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
@@ -3490,7 +3649,8 @@ async function uploadFiles(files) {
   const fd = new FormData(); prepared.forEach((f) => fd.append('images', f));
   toast('uploading…');
   try {
-    const d = await (await api('/api/upload', { method: 'POST', body: fd })).json();
+    // Upload to the box that will actually run the turn, so the agent can read the path.
+    const d = await (await api('/api/upload', { method: 'POST', body: fd, ep: chatEp() })).json();
     d.paths.forEach((p, i) => {
       const f = picked[i]; const img = isImageFile(f);   // preview from the original (nicer, already local)
       images.push({ path: p, url: img ? URL.createObjectURL(f) : '', name: (f && f.name) || p.split('/').pop(), isImage: img });
@@ -3526,10 +3686,51 @@ function curToken() {
   return m ? { trigger: m[2][0], frag: m[2].slice(1), start: pos - m[2].length, end: pos } : null;
 }
 async function onType() {
+  sendTyping($('input').value.trim().length > 0);
   const tok = curToken();
   if (!tok) return hideSuggest();
   if (tok.trigger === '/') return showCommands(tok);
   if (tok.trigger === '@') return showFiles(tok);
+}
+
+/* ---------- presence + typing (shared sessions only) ----------
+   Both are derived server-side from who is actually subscribed, so they can't go stale:
+   a viewer disappears the instant their socket closes. On a solo box `viewers` is just
+   you and `shared` is false, so the bar never appears. */
+let lastTypingSentAt = 0, lastTypingState = false;
+function sendTyping(on) {
+  if (!cur.shared || !ws || ws.readyState !== 1) return;
+  // The server expires a typing flag after 4s, so a steady typist needs a refresh every
+  // couple of seconds — but not one frame per keystroke.
+  const now = Date.now();
+  if (on === lastTypingState && now - lastTypingSentAt < 2000) return;
+  lastTypingState = on; lastTypingSentAt = now;
+  try { ws.send(JSON.stringify({ type: 'typing', key: cur.key, on })); } catch {}
+}
+function renderPresence() {
+  const bar = $('presenceBar'); if (!bar) return;
+  const me = myMemberId();
+  const viewers = (cur.viewers || []).filter((v) => v.id !== me);
+  const typing = (cur.typing || []).filter((t) => t.id !== me);
+  if (!cur.shared && !viewers.length) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  bar.classList.remove('hidden');
+  bar.innerHTML = '';
+  const chip = document.createElement('span'); chip.className = 'presShared';
+  chip.textContent = cur.shared ? 'Shared' : 'Private';
+  bar.appendChild(chip);
+  for (const v of viewers) {
+    const p = document.createElement('span'); p.className = 'presPerson';
+    const dot = document.createElement('span'); dot.className = 'presDot';
+    if (v.color) dot.style.background = v.color;
+    const nm = document.createElement('span'); nm.textContent = v.name;
+    p.appendChild(dot); p.appendChild(nm); bar.appendChild(p);
+  }
+  if (!viewers.length) { const m = document.createElement('span'); m.className = 'presMuted'; m.textContent = 'only you here'; bar.appendChild(m); }
+  if (typing.length) {
+    const t = document.createElement('span'); t.className = 'presTyping';
+    t.textContent = `${typing.map((x) => x.name).join(', ')} ${typing.length > 1 ? 'are' : 'is'} typing…`;
+    bar.appendChild(t);
+  }
 }
 // Built-in CLI slash commands, shown for the ACTIVE agent. Agent-specific skills
 // and custom commands are loaded from /api/commands?agent=...
@@ -4380,7 +4581,16 @@ function renameChat(s, onDone) {
 }
 function openChatTitleSheet() {
   const title = cur.title || 'New chat';
-  openSheet(title, [
+  // On someone else's box we can rename and copy; everything that mutates THEIR box's
+  // library (fork, pin, archive) is theirs to do.
+  if (chatIsForeign()) {
+    return openSheet(title, [
+      { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
+      { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
+      { ic: '', label: 'My messages', desc: 'Browse and copy just your prompts', fn: openMyMessages },
+    ]);
+  }
+  const rows = [
     { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
     { ic: '', label: 'Fork chat', desc: 'Start a child conversation with this transcript', fn: () => confirmFork() },
     { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
@@ -4388,14 +4598,25 @@ function openChatTitleSheet() {
     cur.favorite
       ? { ic: '★', label: 'Unpin', desc: 'Remove from Favorites', fn: () => cur.id ? doFavorite({ id: cur.id, title: cur.title, favorite: true }, false) : toast('No session yet') }
       : { ic: '☆', label: 'Pin', desc: 'Keep at the top of the chat list', fn: () => cur.id ? doFavorite({ id: cur.id, title: cur.title, favorite: false }, true) : toast('No session yet') },
-  ]);
+  ];
+  if (hasTeam() && typeof toggleShareCurrentChat === 'function') {
+    rows.splice(1, 0, cur.shared
+      ? { ic: ICONS.share, label: 'Stop sharing', desc: 'Teammates lose access immediately', fn: () => toggleShareCurrentChat(false) }
+      : { ic: ICONS.share, label: 'Share with team', desc: 'Your team can read and send messages here', fn: () => toggleShareCurrentChat(true) });
+  }
+  openSheet(title, rows);
 }
 $('chatTitle').onclick = openChatTitleSheet;
 
 /* ---------- file explorer + reader ---------- */
 let expPath = '';
 const parentOf = (p) => p.replace(/\/[^/]+\/?$/, '') || '/';
-$('filesBtn').onclick = () => { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); const i = $('expJumpInput'); try { i.focus(); i.select(); } catch {} };
+$('filesBtn').onclick = () => {
+  // The explorer browses THIS box. For a chat running on a teammate's box, the files that
+  // matter are theirs — send it to the shared-workspace browser instead of a dead end.
+  if (chatIsForeign() && typeof openTeamFiles === 'function') return openTeamFiles(chatEp());
+  $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); const i = $('expJumpInput'); try { i.focus(); i.select(); } catch {}
+};
 
 /* ---- my messages overlay ---- */
 function closeMyMsgs() { $('myMsgsOverlay').classList.add('hidden'); }
@@ -5729,7 +5950,11 @@ const requestedRoute = routeFromLocation();
 if (TOKEN) {
   const initialRoute = requestedRoute;
   navTo(initialRoute, { replace: true });
-  loadConfig();
+  // We don't yet know whether this token is the owner's or a guest's — /api/config answers
+  // that. A guest has no session feed here, so re-home them on the Team screen once it lands.
+  loadConfig().then(() => {
+    if (isGuestHere() && document.body.dataset.view !== 'chat') openTeam();
+  }).catch(() => {});
   renderRoute(initialRoute);
 }
 else {
