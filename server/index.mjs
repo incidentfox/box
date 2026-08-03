@@ -3092,7 +3092,7 @@ app.get('/api/config', requireAuth, (req, res) => {
   home: HOME,
   ownerName: OWNER_NAME,
   defaultCwd: DEFAULT_CWD,
-  team: { workspaceRoot: team.workspaceRoot(), members: team.listMembers().filter((m) => !m.revoked).length },
+  team: { enabled: !team.teamDisabled(), workspaceRoot: team.workspaceRoot(), members: team.listMembers().filter((m) => !m.revoked).length },
   appSettings: appSettingsPayload(),
   features: {
     linear: LINEAR_ENABLED,
