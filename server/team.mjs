@@ -15,10 +15,10 @@
 // paths, other people's sessions) is owner-only. The route allowlist in index.mjs is
 // DEFAULT-DENY — a new endpoint is owner-only until someone opts it into GUEST_ROUTES.
 //
-// HONEST LIMIT, STATED OUT LOUD: a guest steering a shared agent session can still make
-// that agent run commands as the box user. This is trust-scoped access for a teammate,
-// not a sandbox for someone you don't trust. The isolation here is about blast radius
-// and attribution, not containment.
+// Team turns are launched through team-sandbox.mjs. Bubblewrap gives each turn an empty
+// mount namespace containing only this workspace, a small runtime, and a fresh HOME.
+// These checks still matter for the HTTP API, but are defence in depth: a command inside
+// a team turn cannot reach the host home directory or another checkout at all.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -37,13 +37,13 @@ const GUEST_TOKEN_PREFIX = 'boxg_';
 const MEMBER_COLORS = ['#e0567a', '#3f9d6d', '#4a7fd4', '#c9803a', '#8a63c9', '#2f9aa8', '#b8553f', '#5c7a3f'];
 
 const EMPTY_TEAM = () => ({
-  version: 1,
+  version: 2,
   workspaceRoot: '',
   members: [],
   invites: [],
   shared: {},     // sessionId -> { sharedAt, sharedBy, cwd }
   owned: {},      // sessionId -> memberId (guest-created sessions)
-  roots: {},      // absPath -> { addedAt, addedBy, auto } — directories the team may reach
+  roots: {},      // legacy only; v2 deliberately ignores additional host directories
 });
 
 // No hyphen in the default name, deliberately. Claude records a session's cwd only as
@@ -66,6 +66,7 @@ export function loadTeam() {
   let t = EMPTY_TEAM();
   try { t = { ...EMPTY_TEAM(), ...JSON.parse(readFileSync(TEAM_PATH, 'utf8')) }; } catch {}
   if (!t.workspaceRoot) t.workspaceRoot = defaultWorkspaceRoot();
+  t.version = Math.max(Number(t.version) || 1, 2);
   cache = t;
   return cache;
 }
@@ -269,31 +270,23 @@ export function touchMember(id) {
 
 // ---- session sharing -------------------------------------------------------
 
-// Sharing a chat also decides whether the team can reach the DIRECTORY that chat works in.
-// Without that, the owner and a guest sit in the same conversation running turns in two
-// different folders (the guest gets clamped to the scratch root), which looks like the
-// agent going mad rather than a permissions boundary.
-//
-// The session's cwd is recorded on the share record so unsharing can withdraw the root
-// again without index.mjs having to hand us a session list.
+// A team chat must already live in the canonical shared workspace. We never turn an
+// arbitrary host checkout into a team root as a side effect of sharing it.
 export function setShared(sessionId, on, by = 'owner', cwd = '') {
   const t = loadTeam();
   const id = String(sessionId || '');
   if (!id) return false;
+  // A first shared session may be created before the canonical directory
+  // exists (as it does in a fresh CI/home environment).  Materialize it
+  // before doing the symlink-aware containment check below.
+  const effectiveCwd = cwd || ensureWorkspace();
+  if (on && !withinWorkspace(effectiveCwd)) return false;
   if (on) {
-    t.shared[id] = { sharedAt: Date.now(), sharedBy: by, cwd: String(cwd || '') };
+    t.shared[id] = { sharedAt: Date.now(), sharedBy: by, cwd: guestCwd(effectiveCwd) };
     saveTeam(t);
-    if (cwd) addRoot(cwd, by, true);
   } else {
-    const was = t.shared[id];
     delete t.shared[id];
     saveTeam(t);
-    // Withdraw the directory only if no OTHER shared chat still works there. A root the
-    // owner added by hand (auto === false) is left alone — they asked for it explicitly.
-    if (was && was.cwd) {
-      const stillUsed = Object.values(loadTeam().shared).some((r) => r && r.cwd === was.cwd);
-      if (!stillUsed) removeRoot(was.cwd, { autoOnly: true });
-    }
   }
   return true;
 }
@@ -314,6 +307,17 @@ export function claimSession(sessionId, memberId) {
 
 export const sessionOwner = (sessionId) => loadTeam().owned[String(sessionId || '')] || null;
 
+// Legacy guest chats were created before the isolated mount namespace. Once imported,
+// remove their ownership entry so the old host-backed record cannot be reached from Team.
+export function releaseSession(sessionId) {
+  const id = String(sessionId || '');
+  const t = loadTeam();
+  if (!id || !t.owned[id]) return false;
+  delete t.owned[id];
+  saveTeam(t);
+  return true;
+}
+
 // The single authorization question for session access.
 export function canAccessSession(principal, sessionId) {
   if (!principal) return false;
@@ -327,13 +331,17 @@ export function canAccessSession(principal, sessionId) {
 
 export function workspaceRoot() {
   const t = loadTeam();
-  return t.workspaceRoot || defaultWorkspaceRoot();
+  // On disk, this is deliberately not configurable: an edited state file must not turn
+  // the team mount into the owner's home or another checkout. Tests retain an in-memory
+  // seam so they can use scratch directories.
+  return diskEnabled ? defaultWorkspaceRoot() : (t.workspaceRoot || defaultWorkspaceRoot());
 }
 
 export function ensureWorkspace() {
   const root = workspaceRoot();
   try {
     mkdirSync(root, { recursive: true });
+    mkdirSync(join(root, '.box-runtime'), { recursive: true, mode: 0o700 });
     const readme = join(root, 'README.md');
     if (!existsSync(readme)) {
       writeFileSync(readme, [
@@ -342,7 +350,7 @@ export function ensureWorkspace() {
         'Sessions started by teammates through the Box **Team** tab are confined to this',
         'directory. Files here are readable and writable by everyone on the team.',
         '',
-        'Anything outside this directory is owner-only.',
+        'Team-run agents receive this directory as their only writable host mount.',
         '',
       ].join('\n'));
     }
@@ -352,7 +360,9 @@ export function ensureWorkspace() {
 
 export function setWorkspaceRoot(dir) {
   const t = loadTeam();
-  t.workspaceRoot = resolve(String(dir || '').trim() || defaultWorkspaceRoot());
+  const requested = resolve(String(dir || '').trim() || defaultWorkspaceRoot());
+  if (diskEnabled && requested !== resolve(defaultWorkspaceRoot())) return workspaceRoot();
+  t.workspaceRoot = requested;
   saveTeam(t);
   ensureWorkspace();
   return t.workspaceRoot;
@@ -381,79 +391,30 @@ function containedBy(p, root) {
 
 // ---- team roots ------------------------------------------------------------
 //
-// The team can reach the scratch workspace plus any directory a shared chat works in.
-// This replaces "move your files into the shared folder to collaborate": nothing is
-// relocated, the directory is simply admitted. Repos stay where every worktree, script
-// and other session already expects them.
-
-// Directories that must never become a team root, because admitting them would hand over
-// the credentials the guest env filter just took away. HOME is rejected too: a root at
-// $HOME contains .ssh, .aws, .claude and the box's own state, so it's the whole machine
-// wearing a workspace costume.
-const FORBIDDEN_ROOTS = () => [
-  '/', '/etc', '/root', '/run', '/proc', '/sys', '/var', '/boot', '/dev',
-  HOME,
-  join(HOME, '.ssh'), join(HOME, '.aws'), join(HOME, '.gnupg'), join(HOME, '.config'),
-  join(HOME, '.claude'), join(HOME, '.cc-mobile'), join(HOME, '.local'),
-];
-
-// Returns '' if the directory is acceptable, else a human-readable reason.
+// There is exactly one team root. Earlier versions admitted host directories as extra
+// roots; keep these exports for API compatibility, but never widen this boundary.
 export function rootRejection(dir) {
   const abs = resolve(String(dir || '').trim());
   if (!abs || abs === '.') return 'not a directory';
-  if (!existsSync(abs)) return 'that directory does not exist';
-  let real = abs;
-  try { real = realpathSync(abs); } catch {}
-  for (const bad of FORBIDDEN_ROOTS()) {
-    let realBad = bad;
-    try { realBad = realpathSync(bad); } catch {}
-    if (real === realBad) return real === HOME ? 'your home directory holds every credential on this box' : `${bad} is off limits`;
-    // An ancestor of a forbidden path is worse than the path itself.
-    if (realBad.startsWith(real.endsWith(sep) ? real : real + sep)) return `that would also expose ${bad}`;
-  }
-  return '';
+  return containedBy(abs, workspaceRoot()) ? '' : 'only the shared team workspace is available';
 }
 
-export const teamRoots = () => {
-  const t = loadTeam();
-  const out = [workspaceRoot(), ...Object.keys(t.roots || {})];
-  return [...new Set(out.filter(Boolean))];
-};
+export const teamRoots = () => [workspaceRoot()];
 
-export function listRoots() {
-  const t = loadTeam();
-  return Object.entries(t.roots || {}).map(([path, meta]) => ({ path, ...meta }));
-}
+export const listRoots = () => [];
 
 export function addRoot(dir, by = 'owner', auto = false) {
   const abs = resolve(String(dir || '').trim());
   if (!abs) return { ok: false, error: 'not a directory' };
-  // The scratch workspace is always reachable; recording it again would be noise.
   if (containedBy(abs, workspaceRoot())) return { ok: true, root: null };
-  const why = rootRejection(abs);
-  if (why) return { ok: false, error: why };
-  const t = loadTeam();
-  t.roots = t.roots || {};
-  if (!t.roots[abs]) t.roots[abs] = { addedAt: Date.now(), addedBy: by, auto: !!auto };
-  else if (!auto) t.roots[abs].auto = false;   // a manual add pins a previously automatic root
-  saveTeam(t);
-  return { ok: true, root: abs };
+  return { ok: false, error: 'only the shared team workspace is available' };
 }
 
-export function removeRoot(dir, { autoOnly = false } = {}) {
-  const abs = resolve(String(dir || '').trim());
-  const t = loadTeam();
-  if (!t.roots || !t.roots[abs]) return false;
-  if (autoOnly && !t.roots[abs].auto) return false;
-  delete t.roots[abs];
-  saveTeam(t);
-  return true;
-}
+export const removeRoot = () => false;
 
 // Containment against the whole team space. Pass an explicit root to check just that one.
 export function withinWorkspace(p, root = null) {
-  const roots = root ? [root] : teamRoots();
-  return roots.some((r) => containedBy(p, r));
+  return containedBy(p, root || workspaceRoot());
 }
 
 // A guest's effective cwd: whatever they asked for if it's inside the team space,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   _setTeamForTest, attributePrompt, authorTag, canAccessSession, claimSession, createInvite,
@@ -183,9 +183,9 @@ assert.equal(renameMember('nope', 'x'), false);
 renameMember(sneaky.member.id, '');
 assert.equal(listMembers()[0].name, 'Eve');
 
-// ---- team roots ------------------------------------------------------------
-// Sharing a chat admits its DIRECTORY, so the owner and a guest work in the same folder
-// instead of the guest being silently clamped to the scratch root.
+// ---- canonical team workspace ---------------------------------------------
+// Team sessions deliberately have one root. Sharing a chat must never admit its
+// old host directory, even when that directory happens to be a sibling project.
 const rootBase = mkdtempSync(join(tmpdir(), 'box-roots-'));
 const scratch = join(rootBase, 'scratch');
 const repo = join(rootBase, 'repo');
@@ -193,57 +193,24 @@ const elsewhere = join(rootBase, 'elsewhere');
 for (const d of [scratch, repo, elsewhere]) mkdirSync(d, { recursive: true });
 _setTeamForTest({ workspaceRoot: scratch });
 
-assert.equal(withinWorkspace(join(repo, 'src')), false);      // not admitted yet
-setShared('sess-repo', true, 'owner', repo);
-assert.equal(withinWorkspace(join(repo, 'src')), true);       // admitted by sharing
-assert.equal(withinWorkspace(join(elsewhere, 'x')), false);   // and nothing else came with it
-assert.equal(guestCwd(join(repo, 'src')), join(repo, 'src')); // guest is no longer clamped away
-assert.equal(guestCwd(join(elsewhere, 'x')), scratch);        // still clamped outside team space
-
-// A second chat in the same directory must keep the root alive when the first unshares.
-setShared('sess-repo-2', true, 'owner', repo);
-setShared('sess-repo', false, 'owner');
-assert.equal(withinWorkspace(join(repo, 'src')), true, 'root withdrawn while another chat still uses it');
-setShared('sess-repo-2', false, 'owner');
-assert.equal(withinWorkspace(join(repo, 'src')), false, 'root outlived the last chat sharing it');
-
-// A root the owner added by hand is NOT withdrawn by unsharing a chat that happened to live there.
-addRoot(repo, 'owner', false);
-setShared('sess-repo-3', true, 'owner', repo);
-setShared('sess-repo-3', false, 'owner');
-assert.equal(withinWorkspace(join(repo, 'src')), true, 'manual root removed by an unrelated unshare');
-assert.equal(removeRoot(repo), true);
-assert.equal(listRoots().length, 0);
-
-// The scratch workspace is always reachable and is never recorded as a separate root.
 assert.equal(withinWorkspace(join(scratch, 'notes.md')), true);
 assert.equal(addRoot(join(scratch, 'sub'), 'owner').root, null);
 assert.equal(listRoots().length, 0);
-assert.ok(teamRoots().includes(scratch));
+assert.deepEqual(teamRoots(), [scratch]);
+assert.equal(removeRoot(join(scratch, 'sub')), false);
 
-// Directories that would hand back everything the guest env filter just removed.
-const HOME = homedir();
-assert.ok(rootRejection(HOME));                               // home holds every credential
-assert.ok(rootRejection('/'));
-assert.ok(rootRejection('/etc'));
-assert.ok(rootRejection(join(HOME, '.ssh')));                 // forbidden if it exists, missing if it doesn't
-assert.equal(addRoot('/etc', 'owner').ok, false);
-assert.equal(addRoot(HOME, 'owner').ok, false);
-// An ancestor of a forbidden path is refused too: admitting ~/development's parent would
-// admit ~/.ssh by walking up, which is the whole point of the forbidden list.
-assert.ok(rootRejection('/home'));
-assert.equal(rootRejection(join(rootBase, 'does-not-exist')), 'that directory does not exist');
-assert.equal(rootRejection(repo), '');
+setShared('sess-repo', true, 'owner', repo);
+assert.equal(withinWorkspace(join(repo, 'src')), false);
+assert.equal(guestCwd(join(repo, 'src')), scratch);
+assert.equal(addRoot(repo, 'owner').ok, false);
+assert.ok(rootRejection(repo));
+assert.equal(rootRejection(join(scratch, 'sub')), '');
+assert.ok(rootRejection(join(rootBase, 'does-not-exist')));
 
-// Containment resolves symlinks against EVERY root, not just the one you came in through:
-// a link out of team space is still refused, but a link into another admitted root is fine.
+// A link out of the canonical space cannot re-admit an external tree.
 writeFileSync(join(elsewhere, 'secret.txt'), 'x');
 symlinkSync(elsewhere, join(scratch, 'escape'));
-symlinkSync(repo, join(scratch, 'to-repo'));
 assert.equal(withinWorkspace(join(scratch, 'escape', 'secret.txt')), false, 'symlink escaped team space');
-addRoot(repo, 'owner', false);
-assert.equal(withinWorkspace(join(scratch, 'to-repo', 'src')), true, 'symlink into a sibling root was refused');
-removeRoot(repo);
 
 // ---- team secrets ----------------------------------------------------------
 _setTeamForTest({ workspaceRoot: scratch });

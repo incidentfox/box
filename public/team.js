@@ -148,8 +148,7 @@ function hostCard({ ep, remote, me, list, host }) {
   if (!sessions.length) card.appendChild(tNote(`Nothing shared yet — ${ownerName} shares a chat from its ⋯ menu.`));
   for (const s of sessions) card.appendChild(teamSessionRow(s, remote ? ep : null, { remote }));
 
-  rootsSection(card, (me && me.roots) || [], ep, { canEdit: false });
-  secretsSection(card, (me && me.secrets) || [], { canDelete: false });
+  secretsSection(card, (me && me.secrets) || [], { canDelete: false, canAdd: false });
 
   const members = (me && me.members) || [];
   const online = new Set((me && me.online) || []);
@@ -161,19 +160,14 @@ function hostCard({ ep, remote, me, list, host }) {
   return card;
 }
 
-/* ---------- what a guest is actually agreeing to ----------
-   This box's team feature is a soft boundary, not a sandbox: chats a guest starts run on
-   the host's machine, under the host's user, and the host can read them. That is a
-   perfectly reasonable arrangement between people who work together — but it has to be
-   stated, because every other chat app they've used implies the opposite. Saying it here
-   is cheaper than having them discover it. */
+/* ---------- what a guest is actually agreeing to ---------- */
 function whereYourWorkLives(ownerName, remote, host) {
   const where = remote ? hostLabel(host) : 'this box';
   const foot = tEl('div', 'tFoot');
   foot.appendChild(tEl('div', 'tSubHead', 'Where your work lives'));
   foot.appendChild(tNote(
-    `Chats you start here run on ${where} — ${ownerName}'s machine, not yours. `
-    + `${ownerName} can read them, and anything you create lands in the folders above. `
+    `Chats you start here run in an isolated shared workspace on ${where}. `
+    + `They can read and write that workspace, and cannot reach the host's home folder, credentials, or other checkouts. `
     + `For work you'd rather keep to yourself, run your own Box and keep those chats there.`));
   foot.appendChild(tBtn('Run my own Box', 'ghost', openOwnBoxSheet));
   return foot;
@@ -217,12 +211,11 @@ function ownerCard(admin, list) {
   }
 
   const root = (admin && admin.workspaceRoot) || '';
-  card.appendChild(workspaceRow(root || '(not set)', LOCAL_EP, () => openWorkspaceSheet(root)));
+  card.appendChild(workspaceRow(root || '(not set)', LOCAL_EP, null));
 
   card.appendChild(tBtn('Invite a teammate', 'primary', openInviteSheet));
 
-  rootsSection(card, admin.roots, LOCAL_EP, { canEdit: true });
-  secretsSection(card, admin.secrets, { canDelete: true });
+  secretsSection(card, admin.secrets, { canDelete: true, canAdd: true });
 
   const invites = (admin.invites || []).filter((i) => i.live);
   if (invites.length) {
@@ -258,10 +251,9 @@ function workspaceRow(root, ep, onChange) {
   return row;
 }
 
-/* ---------- folders the team can reach ----------
-   Sharing a chat admits its folder, so this list mostly fills itself — which is exactly
-   why it needs to be visible. "Who can read this repo" should be answerable by looking,
-   not by remembering which chats you shared six weeks ago. */
+/* ---------- retired dynamic-root controls ----------
+   The server keeps these handlers only to return a clear error to older clients. Team
+   work is deliberately limited to the one canonical shared workspace. */
 function rootsSection(card, roots, ep, { canEdit = false } = {}) {
   const list = roots || [];
   tSub(card, canEdit ? `Folders your team can reach (${list.length})` : `Folders you can reach (${list.length})`);
@@ -317,14 +309,16 @@ function openAddRootSheet() {
    in and never comes back out of the server, for anyone, including you. That's not a
    security boundary — an agent running here can obviously read what it was given — it
    just means the phone screen and the API are never where a key leaks from. */
-function secretsSection(card, secrets, { canDelete = false } = {}) {
+function secretsSection(card, secrets, { canDelete = false, canAdd = false } = {}) {
   const list = secrets || [];
   tSub(card, `Shared keys (${list.length})`);
   card.appendChild(tNote(list.length
-    ? 'Every agent on this box gets these in its environment — yours and your teammates’.'
-    : 'Add an API key here and every agent on this box can use it, yours and your teammates’. Values are never shown again after you save them.'));
+    ? 'Every team session receives these environment variables. Treat them as shared with the team.'
+    : (canAdd
+      ? 'Add a team-scoped API key to let isolated team sessions run. Values are never shown again after you save them.'
+      : 'The team owner can add a team-scoped API key when the shared workspace needs one.')));
   for (const s of list) card.appendChild(secretRow(s, canDelete));
-  card.appendChild(tBtn('Add a key', 'ghost', () => openSecretSheet()));
+  if (canAdd) card.appendChild(tBtn('Add a key', 'ghost', () => openSecretSheet()));
 }
 
 function secretRow(s, canDelete) {
@@ -360,7 +354,7 @@ function openSecretSheet() {
     const d = await r.json().catch(() => ({ error: 'bad response' }));
     if (d.error) return d.error;
     closeSheet(); toast(`${v.key} shared with the team`); renderTeam();
-  }, tNote('This goes to everyone’s agents on this box, including the owner’s. Only add keys you’re happy for the whole team to spend.'));
+  }, tNote('This goes only to isolated team sessions. Add only a key you intentionally authorize the whole team to use.'));
 }
 
 function peopleStrip(members, online, meId, ownerName) {
@@ -566,10 +560,7 @@ async function toggleShareCurrentChat(on) {
   if (!d) return;
   cur.shared = !!d.shared;
   renderPresence();
-  // Sharing admits this chat's folder to the team. When the server refuses that folder
-  // (home, /etc, …) the chat is still shared — but the teammate lands in the scratch
-  // workspace instead of here, and finding that out by surprise is the bad version.
-  if (d.rootError) return toast(`Shared, but ${d.rootError}`, 6000);
+  if (d.rootError) return toast(d.rootError, 6000);
   // The server broadcasts `share` to every subscriber (us included) and app.js toasts
   // on that. Only toast here if we're not actually listening.
   if (!ws || ws.readyState !== 1) toast(d.shared ? 'Shared with your team' : 'No longer shared');

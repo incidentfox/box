@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { buildChildEnv } from './child-env.mjs';
+import { buildTeamSandbox } from './team-sandbox.mjs';
 
 const childEnv = (opts = {}) => buildChildEnv(process.env, opts);
 
@@ -103,15 +104,18 @@ export class CodexExecEngine {
     this.spawnImpl = spawnImpl;
   }
 
-  run({ sessionId, cwd, prompt, images = [], settings = {}, guest = false, onEvent }) {
+  run({ sessionId, cwd, prompt, images = [], settings = {}, guest = false, team = false, teamWorkspace = '', teamEnv = {}, onEvent }) {
     const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
 
     // Optionally source an env file before codex (set CODEX_ENV_FILE); otherwise just run codex.
     const envFile = process.env.CODEX_ENV_FILE;
     const script = (envFile ? `[ -f ${JSON.stringify(envFile)} ] && . ${JSON.stringify(envFile)}; ` : '') + 'exec codex "$@"';
-    const child = this.spawnImpl('bash', ['-lc', script, 'codex-mobile', ...args], {
-      cwd: cwd || process.cwd(),
-      env: childEnv(),
+    const launch = team
+      ? buildTeamSandbox({ workspaceRoot: teamWorkspace, cwd, args, env: teamEnv })
+      : { command: 'bash', args: ['-lc', script, 'codex-mobile', ...args], cwd: cwd || process.cwd(), env: childEnv() };
+    const child = this.spawnImpl(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
