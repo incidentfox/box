@@ -59,6 +59,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const PUBLIC = join(ROOT, 'public');
 const HOME = homedir();
+// The keeper deliberately does not inherit provider credentials into Box. An owner can
+// still explicitly publish the two supported provider keys to Team through the
+// write-only endpoint below; this protected runtime file is the source for that action.
+const HOST_SECRETS_FILE = process.env.BOX_HOST_SECRETS_FILE || '/run/software-factory/secrets.env';
 const PROJECTS = join(HOME, '.claude', 'projects'); // primary; for fallbacks only — scans must use eachProjectDir()
 const CODEX_HOME = process.env.CODEX_HOME || join(HOME, '.codex'); // where Codex writes session rollouts
 const RC_REGISTRY = join(HOME, '.config', 'cc-rc-sessions.tsv');
@@ -2421,11 +2425,20 @@ app.post('/api/team/secrets', requireOwner, (req, res) => {
 // This is intentionally a fixed allow-list rather than a generic environment import.
 // It lets the owner explicitly publish the two provider credentials to Team without
 // ever returning or logging their values. Existing team-managed keys are left intact.
+function hostProviderSecret(key) {
+  const direct = String(process.env[key] || '').trim();
+  if (direct) return direct;
+  try {
+    const prefix = `${key}=`;
+    const line = readFileSync(HOST_SECRETS_FILE, 'utf8').split(/\r?\n/).find((entry) => entry.startsWith(prefix));
+    return line ? line.slice(prefix.length).trim() : '';
+  } catch { return ''; }
+}
 app.post('/api/team/secrets/import-host', requireOwner, (req, res) => {
   const existing = new Set(team.listSecrets().map((s) => s.key));
   const imported = [], skipped = [], unavailable = [];
   for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']) {
-    const value = String(process.env[key] || '').trim();
+    const value = hostProviderSecret(key);
     if (!value) { unavailable.push(key); continue; }
     if (existing.has(key)) { skipped.push(key); continue; }
     const out = team.setSecret(key, value, req.principal.name || req.principal.kind, 'Imported from owner host credentials');
