@@ -1957,7 +1957,25 @@ function runningCodexThreadIds() {
   const now = Date.now();
   if (now - CODEX_LIVE_CACHE.ts < 2500) return new Set(CODEX_LIVE_CACHE.ids);
   const ids = new Set();
-  const procText = pgrepFull('codex');
+  // On Linux, inspect only actual Codex executable processes. `pgrepFull('codex')`
+  // also finds every parent shell and agent command line which merely *mentions*
+  // Codex; on a busy Box that expands to hundreds of processes and blocks the main
+  // feed for hundreds of milliseconds. `/proc` gives us the executable name and
+  // argv without spawning `pgrep` + `ps`. Keep the portable command-line scan as a
+  // fallback for macOS and other hosts without procfs.
+  let procText = '';
+  try {
+    const lines = [];
+    for (const entry of readdirSync('/proc', { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      const base = `/proc/${entry.name}`;
+      if (readFileSync(`${base}/comm`, 'utf8').trim() !== 'codex') continue;
+      lines.push(readFileSync(`${base}/cmdline`, 'utf8').replaceAll('\0', ' '));
+    }
+    procText = lines.join('\n');
+  } catch {
+    procText = pgrepFull('codex');
+  }
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   for (const line of procText.split('\n')) {
     const argv = line.trim().split(/\s+/);
