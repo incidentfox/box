@@ -37,12 +37,13 @@ const GUEST_TOKEN_PREFIX = 'boxg_';
 const MEMBER_COLORS = ['#e0567a', '#3f9d6d', '#4a7fd4', '#c9803a', '#8a63c9', '#2f9aa8', '#b8553f', '#5c7a3f'];
 
 const EMPTY_TEAM = () => ({
-  version: 2,
+  version: 3,
   workspaceRoot: '',
   members: [],
   invites: [],
   shared: {},     // sessionId -> { sharedAt, sharedBy, cwd }
   owned: {},      // sessionId -> memberId (guest-created sessions)
+  sessionChats: {}, // sessionId -> { messages: [{ id, text, ts, author }] }
   roots: {},      // legacy only; v2 deliberately ignores additional host directories
 });
 
@@ -66,7 +67,7 @@ export function loadTeam() {
   let t = EMPTY_TEAM();
   try { t = { ...EMPTY_TEAM(), ...JSON.parse(readFileSync(TEAM_PATH, 'utf8')) }; } catch {}
   if (!t.workspaceRoot) t.workspaceRoot = defaultWorkspaceRoot();
-  t.version = Math.max(Number(t.version) || 1, 2);
+  t.version = Math.max(Number(t.version) || 1, 3);
   cache = t;
   return cache;
 }
@@ -229,6 +230,52 @@ export function revokeMember(id) {
   m.tokenHash = '';   // hard kill: the token can never resolve again
   saveTeam(t);
   return true;
+}
+
+// ---- per-session team chat -------------------------------------------------
+
+const TEAM_CHAT_MAX_MESSAGES = 500;
+const TEAM_CHAT_MAX_MESSAGE_CHARS = 4000;
+
+// A team chat exists only alongside a team session: either owner-shared or created by
+// a guest in the sandbox. Keeping it in team.json means it never leaks into a private
+// agent transcript or the personal session feed.
+export function isTeamSession(sessionId) {
+  const id = String(sessionId || '');
+  return !!id && (isShared(id) || !!sessionOwner(id));
+}
+
+function publicChatMessage(message) {
+  if (!message || typeof message !== 'object' || !String(message.text || '').trim()) return null;
+  const author = message.author && typeof message.author === 'object' ? message.author : {};
+  return {
+    id: String(message.id || ''),
+    text: String(message.text).slice(0, TEAM_CHAT_MAX_MESSAGE_CHARS),
+    ts: Number(message.ts) || 0,
+    author: {
+      id: String(author.id || ''), name: cleanName(author.name, 'Teammate'),
+      role: author.role === 'owner' ? 'owner' : 'guest', color: String(author.color || ''),
+    },
+  };
+}
+
+export function listSessionChat(sessionId) {
+  if (!isTeamSession(sessionId)) return [];
+  const messages = loadTeam().sessionChats?.[String(sessionId)]?.messages;
+  return Array.isArray(messages) ? messages.map(publicChatMessage).filter(Boolean) : [];
+}
+
+export function appendSessionChat(sessionId, text, principal) {
+  const id = String(sessionId || '');
+  const clean = String(text || '').trim().slice(0, TEAM_CHAT_MAX_MESSAGE_CHARS);
+  if (!id || !principal || !clean || !isTeamSession(id)) return null;
+  const t = loadTeam();
+  t.sessionChats ||= {};
+  const prior = Array.isArray(t.sessionChats[id]?.messages) ? t.sessionChats[id].messages : [];
+  const message = { id: randomBytes(8).toString('hex'), text: clean, ts: Date.now(), author: authorOf(principal) };
+  t.sessionChats[id] = { messages: [...prior, message].slice(-TEAM_CHAT_MAX_MESSAGES) };
+  saveTeam(t);
+  return publicChatMessage(message);
 }
 
 export function renameMember(id, name) {
