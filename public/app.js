@@ -333,8 +333,11 @@ function applyTeamChrome() {
   if (guest) {
     for (const id of ['settingsBtn', 'boardBtn', 'pipesBtn', 'voiceBtn', 'sessSearchBtn', 'sessionMenuBtn', 'bulkBtn']) setVis(id, false);
   }
-  // The Team button only earns header space once there IS a team.
-  setVis('teamBtn', guest || !!teamEp() || !!(CFG && CFG.team && (CFG.team.members > 0)));
+  // Always shown. Gating this on "you already have a team" made the first invite
+  // unreachable: the Team screen is the ONLY place to mint one, so hiding it until a
+  // member exists meant a member could never exist. It's also where you join someone
+  // else's box, which a brand-new owner has every reason to do on day one.
+  setVis('teamBtn', true);
 }
 function applyChatCapabilities() {
   const foreign = chatIsForeign();
