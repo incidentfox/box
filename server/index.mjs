@@ -423,7 +423,7 @@ function sessionCwd(id) {
   const live = RT.get(resolveKey(id));
   if (live && live.cwd) return live.cwd;
   try {
-    const hit = listSessions({ filter: 'all', limit: 10000 }).sessions.find((x) => x.id === id);
+    const hit = ['personal', 'team'].flatMap((workspace) => listSessions({ filter: 'all', limit: 10000, workspace }).sessions).find((x) => x.id === id);
     return (hit && hit.cwd) || '';
   } catch { return ''; }
 }
@@ -477,7 +477,7 @@ function reconcileLiveBridges() {
   // respawned) is torn down within one tick — the chronic memory pressure / OOM crash-restart
   // loop behind INC-980. Resuming a chat un-archives it (see runWorker → unarchiveOnResume),
   // so an actively used session is never reaped.
-  let archived; try { archived = loadArchived(); } catch { archived = new Set(); }
+  let archived; try { archived = new Set([...loadArchived(), ...loadTeamArchived()]); } catch { archived = new Set(); }
   let reaped = 0;
   const out = pgrepFull('--remote-control');
   for (const line of out.split('\n')) {
@@ -806,9 +806,52 @@ const saveArchived = (set) => { writeJsonAtomic(ARCH_FILE, [...set]); invalidate
 const ARCH_AT_FILE = join(STATE_DIR, 'archived-at.json');   // { sessionId: archivedAtMs } — additive sidecar
 const loadArchivedAt = () => { try { const o = JSON.parse(readFileSync(ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
 const saveArchivedAt = (m) => { writeJsonAtomic(ARCH_AT_FILE, m); invalidateSessionLists(); };
+// Team archives are deliberately independent from the owner's personal archive. A shared
+// chat belongs to the Team workspace even when the owner is the person archiving it.
+const TEAM_ARCH_FILE = join(STATE_DIR, 'team-archived.json');
+const TEAM_ARCH_AT_FILE = join(STATE_DIR, 'team-archived-at.json');
+const loadTeamArchived = () => { try { return new Set(JSON.parse(readFileSync(TEAM_ARCH_FILE, 'utf8'))); } catch { return new Set(); } };
+const saveTeamArchived = (set) => { writeJsonAtomic(TEAM_ARCH_FILE, [...set]); invalidateSessionLists(); };
+const loadTeamArchivedAt = () => { try { const o = JSON.parse(readFileSync(TEAM_ARCH_AT_FILE, 'utf8')); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; } catch { return {}; } };
+const saveTeamArchivedAt = (m) => { writeJsonAtomic(TEAM_ARCH_AT_FILE, m); invalidateSessionLists(); };
 const FAVORITES_FILE = join(STATE_DIR, 'favorites.json');
 const loadFavorites = () => { try { return new Set(JSON.parse(readFileSync(FAVORITES_FILE, 'utf8'))); } catch { return new Set(); } };
 const saveFavorites = (set) => { writeJsonAtomic(FAVORITES_FILE, [...set]); invalidateSessionLists(); };
+// Personal favorites remain the long-standing owner-only favorites.json. Team favorites
+// are deliberately separate and keyed by the authenticated member: pinning a shared
+// chat organizes *your* Team workspace without changing anyone else's view.
+const TEAM_FAVORITES_FILE = join(STATE_DIR, 'team-favorites.json');
+const teamFavoriteKey = (principal) => principal && principal.kind === 'guest' ? `guest:${principal.id}` : 'owner';
+function loadTeamFavorites() {
+  try {
+    const data = JSON.parse(readFileSync(TEAM_FAVORITES_FILE, 'utf8'));
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch { return {}; }
+}
+function teamFavoritesFor(principal) {
+  const all = loadTeamFavorites();
+  return new Set(Array.isArray(all[teamFavoriteKey(principal)]) ? all[teamFavoriteKey(principal)] : []);
+}
+function saveTeamFavoritesFor(principal, set) {
+  const all = loadTeamFavorites();
+  all[teamFavoriteKey(principal)] = [...set];
+  writeJsonAtomic(TEAM_FAVORITES_FILE, all);
+  invalidateSessionLists();
+}
+function removeTeamFavoriteEverywhere(id) {
+  const all = loadTeamFavorites(); let changed = false;
+  for (const [key, ids] of Object.entries(all)) {
+    if (!Array.isArray(ids) || !ids.includes(id)) continue;
+    all[key] = ids.filter((value) => value !== id); changed = true;
+  }
+  if (changed) { writeJsonAtomic(TEAM_FAVORITES_FILE, all); invalidateSessionLists(); }
+}
+const isTeamSessionId = (id) => !!(id && (team.isShared(id) || (loadTeamClaude().sessions || {})[id]));
+function archiveStoreFor(id) {
+  return isTeamSessionId(id)
+    ? { load: loadTeamArchived, save: saveTeamArchived, loadAt: loadTeamArchivedAt, saveAt: saveTeamArchivedAt }
+    : { load: loadArchived, save: saveArchived, loadAt: loadArchivedAt, saveAt: saveArchivedAt };
+}
 // Resuming an archived chat brings it back to life: when the user sends a new message we
 // un-archive it so it rejoins the active feed AND the reconcile reaper (which tears down
 // bridges for archived sessions, see reconcileLiveBridges) leaves its freshly-spawned bridge
@@ -817,10 +860,10 @@ const saveFavorites = (set) => { writeJsonAtomic(FAVORITES_FILE, [...set]); inva
 function unarchiveOnResume(id) {
   if (!id) return false;
   try {
-    const set = loadArchived();
+    const store = archiveStoreFor(id); const set = store.load();
     if (!set.has(id)) return false;
-    set.delete(id); saveArchived(set);
-    const at = loadArchivedAt(); if (id in at) { delete at[id]; saveArchivedAt(at); }
+    set.delete(id); store.save(set);
+    const at = store.loadAt(); if (id in at) { delete at[id]; store.saveAt(at); }
     return true;
   } catch { return false; }
 }
@@ -1938,14 +1981,13 @@ function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds()) {
   return ids;
 }
 
-function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) {
-  // Old shared links are now the dedicated Team list.
-  if (filter === 'shared') filter = 'team';
+function listSessions({ limit = 40, filter = 'all', workspace = 'personal', principal = null } = {}) {
+  const teamWorkspace = workspace === 'team';
   const rc = readRcRegistry();
   const names = loadNames();
-  const archived = loadArchived();
-  const archivedAt = loadArchivedAt();
-  const favorites = loadFavorites();
+  const archived = teamWorkspace ? loadTeamArchived() : loadArchived();
+  const archivedAt = teamWorkspace ? loadTeamArchivedAt() : loadArchivedAt();
+  const favorites = teamWorkspace ? teamFavoritesFor(principal) : loadFavorites();
   const sharedNow = new Set(team.sharedIds());
   const files = [];
   const seenIds = new Set();
@@ -2029,12 +2071,10 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
   const isVob = (id) => isVobCallSession(byId.get(id) || {});
-  // Team work has a separate destination.  Never let a shared session leak back into
-  // the personal feed via a status, favorite, archive, or live-session filter.
-  // The Team API opts in so it can resolve the records it is explicitly authorized
-  // to expose.
+  // A workspace is a hard list boundary. Team work never appears in the personal
+  // workspace, including its archive; personal work never appears in Team.
   const isTeamSession = (f) => !!(f && (sharedNow.has(f.id) || f.teamSandbox));
-  const isTeamSpace = (f) => !includeTeam && isTeamSession(f);
+  const inWorkspace = (f) => teamWorkspace ? isTeamSession(f) : !isTeamSession(f);
   // Counts over all sessions. VOB calls appear in `all` and their dedicated
   // category, but remain excluded from Working/Needs input/Live to avoid double
   // counting those status tabs. Automated sessions remain separate.
@@ -2042,15 +2082,10 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
   const counts = { all: 0, favorites: 0, team: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
-    // Team work is deliberately excluded from every personal count, including
-    // favorites and live sessions, and has its own first-class tab instead.
-    if (isTeamSession(f)) {
-      if (!archived.has(f.id)) counts.team++;
-      continue;
-    }
+    if (!inWorkspace(f)) continue;
     if (archived.has(f.id)) { counts.archived++; continue; }
-    if (f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
-    if (isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
+    if (!teamWorkspace && f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
+    if (!teamWorkspace && isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
     if (favorites.has(f.id)) counts.favorites++;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
@@ -2059,21 +2094,21 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
   // `auto:<subkey>` narrows to one subcategory.
   const [fbase, fsub] = String(filter || 'all').split(':');
   let cand;
-  if (filter === 'archived') cand = items.filter((f) => !isTeamSpace(f) && archived.has(f.id));
-  else if (filter === 'favorites') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && favorites.has(f.id));
-  else if (filter === 'team') cand = items.filter((f) => isTeamSession(f) && !archived.has(f.id));
-  else if (filter === 'vob') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && isVobCallSession(f));
-  else if (fbase === 'auto') cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
-  else if (filter && filter !== 'all') cand = items.filter((f) => !isTeamSpace(f) && !(f.file && isAutoFile(f.file)) && !isVobCallSession(f) && statusOf(f.id) === filter);
-  else cand = items.filter((f) => !isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)));
+  const activeRegular = (f) => inWorkspace(f) && !archived.has(f.id) && (teamWorkspace || (!(f.file && isAutoFile(f.file)) && !isVobCallSession(f)));
+  if (filter === 'archived') cand = items.filter((f) => inWorkspace(f) && archived.has(f.id));
+  else if (filter === 'favorites') cand = items.filter((f) => activeRegular(f) && favorites.has(f.id));
+  else if (filter === 'vob') cand = teamWorkspace ? [] : items.filter((f) => inWorkspace(f) && !archived.has(f.id) && isVobCallSession(f));
+  else if (fbase === 'auto') cand = teamWorkspace ? [] : items.filter((f) => inWorkspace(f) && !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
+  else if (filter && filter !== 'all') cand = items.filter((f) => activeRegular(f) && statusOf(f.id) === filter);
+  else cand = items.filter(activeRegular);
   const chosen = [], seen = new Set();
-  if (!filter || filter === 'all') {
+  if ((!filter || filter === 'all') && !teamWorkspace) {
     // Reserve every VOB session before the general recency limit, just as live
     // sessions are reserved. This keeps the complete VOB group on the main page.
-    for (const f of items) if (!isTeamSpace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
+    for (const f of items) if (inWorkspace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
     for (const id of liveIds) {
       const f = byId.get(id);
-      if ((!f || !isTeamSpace(f)) && !archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(f || { id, file: null, mtime: 0 }); seen.add(id); }
+      if ((!f || inWorkspace(f)) && !archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(f || { id, file: null, mtime: 0 }); seen.add(id); }
     }
   }
   for (const f of cand) { if (chosen.length >= limit) break; if (!seen.has(f.id)) { chosen.push(f); seen.add(f.id); } }
@@ -2102,15 +2137,15 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
       parentId: s.parentId || null, parentTitle: s.parentTitle || '',
       live: !!r || !!lb || cxLive, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
       favorite: favorites.has(s.id),
-      status: statusOf(s.id), category: s.file && isAutoFile(s.file) ? 'auto' : vob ? 'vob' : 'main',
-      subcat: s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
+      status: statusOf(s.id), category: teamWorkspace ? 'main' : (s.file && isAutoFile(s.file) ? 'auto' : vob ? 'vob' : 'main'),
+      subcat: !teamWorkspace && s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
       hasAttention,
       // Which chats the team can see. Without this the owner's list gives no hint that a
       // conversation is being read by someone else, which is the thing you most want to
       // know before typing into it.
-      shared: sharedNow.has(s.id),
+      shared: isTeamSession(s),
     };
   });
   // Archived view sorts most-recently-archived first (so a chat you JUST archived is
@@ -2124,12 +2159,12 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
 }
 const SESSION_LIST_CACHE = new Map();
 function invalidateSessionLists() { try { SESSION_LIST_CACHE.clear(); } catch {} }
-function cachedListSessions(filter) {
-  const key = String(filter || 'all');
+function cachedListSessions(filter, workspace = 'personal', principal = null) {
+  const key = `${workspace}:${teamFavoriteKey(principal)}:${String(filter || 'all')}`;
   const now = Date.now();
   const cached = SESSION_LIST_CACHE.get(key);
   if (cached && now - cached.ts < 5000) return cached.value;
-  const value = listSessions({ filter: key });
+  const value = listSessions({ filter, workspace, principal });
   SESSION_LIST_CACHE.set(key, { ts: now, value });
   return value;
 }
@@ -2416,8 +2451,11 @@ const GUEST_ROUTES = [
   { m: 'POST', re: /^\/api\/upload$/ },
   { m: 'GET',  re: /^\/api\/img$/ },                          // already hard-scoped to UPLOAD_DIR
   { m: 'GET',  re: /^\/api\/raw$/, check: (req) => team.withinWorkspace(resolve(req.query.path || '')) },
+  { m: 'GET',  re: /^\/api\/sessions$/ },
   { m: 'GET',  re: /^\/api\/sessions\/([^/]+)\/history$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
   { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/rename$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
+  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/archive$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
+  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/favorite$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
 ];
 function guestRouteFor(req) {
   for (const r of GUEST_ROUTES) {
@@ -2667,7 +2705,7 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
   if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) {
     if (mid === p.id && sessionIsTeam(rt(sid))) ids.add(sid);
   }
-  const all = listSessions({ filter: 'all', limit: 10000, includeTeam: true }).sessions;
+  const all = listSessions({ filter: 'all', limit: 10000, workspace: 'team', principal: p }).sessions;
   const byId = new Map(all.map((s) => [s.id, s]));
   const sessions = [...ids].map((id) => {
     const s = byId.get(id);
@@ -2715,17 +2753,25 @@ app.post('/api/team/leave', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/sessions', requireOwner, (req, res) => { const r = cachedListSessions(req.query.filter || 'all'); res.json({ sessions: r.sessions, counts: r.counts, defaultCwd: DEFAULT_CWD, defaultAgent: appDefaultAgent() }); });
+app.get('/api/sessions', requireAuth, (req, res) => {
+  const workspace = req.principal.kind === 'guest' ? 'team' : req.query.workspace === 'team' ? 'team' : 'personal';
+  const r = cachedListSessions(req.query.filter || 'all', workspace, req.principal);
+  res.json({ sessions: r.sessions, counts: r.counts, workspace,
+    defaultCwd: workspace === 'team' ? team.workspaceRoot() : DEFAULT_CWD,
+    defaultAgent: appDefaultAgent() });
+});
 app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
   const body = req.body || {};
   const on = !(body.archived === false);
   const preserve = new Set(Array.isArray(body.preserveIds) ? body.preserveIds.map(String) : []);
   const explicitIds = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : null;
   const filter = String(body.filter || 'all');
-  const fullList = listSessions({ filter, limit: 10000 }).sessions;
+  const workspace = req.principal.kind === 'guest' ? 'team' : body.workspace === 'team' ? 'team' : 'personal';
+  const fullList = listSessions({ filter, limit: 10000, workspace, principal: req.principal }).sessions;
   const sessionById = new Map(fullList.map((s) => [s.id, s]));
   const candidates = explicitIds || fullList.map((s) => s.id);
-  const set = loadArchived(); const at = loadArchivedAt(); const now = Date.now();
+  const set = workspace === 'team' ? loadTeamArchived() : loadArchived();
+  const at = workspace === 'team' ? loadTeamArchivedAt() : loadArchivedAt(); const now = Date.now();
   let changed = 0, killed = 0;
   for (const raw of candidates) {
     const id = String(raw || '').trim();
@@ -2739,14 +2785,17 @@ app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
     else { if (had) { set.delete(id); delete at[id]; changed++; } }
     if (on) { try { killed += killSessionBridge(id).killed || 0; } catch {} }
   }
-  saveArchived(set); saveArchivedAt(at);
+  if (workspace === 'team') { saveTeamArchived(set); saveTeamArchivedAt(at); }
+  else { saveArchived(set); saveArchivedAt(at); }
   res.json({ ok: true, archived: on, changed, killed });
 });
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
-  const set = loadArchived(); const at = loadArchivedAt();
   const id = req.params.id; const on = !(req.body && req.body.archived === false);
+  if (req.principal.kind === 'guest' && !team.canAccessSession(req.principal, id)) return res.status(403).json({ error: 'not a team session' });
+  const store = archiveStoreFor(id);
+  const set = store.load(); const at = store.loadAt();
   if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
-  saveArchived(set); saveArchivedAt(at);
+  store.save(set); store.saveAt(at);
   // Archiving = done with it → kill its remote-control bridge so it stops consuming a
   // claude process + heartbeating. Unarchiving explicitly warms a fresh bridge below.
   let killed = 0;
@@ -2755,11 +2804,13 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   res.json({ ok: true, archived: on, killed, restored });
 });
 app.post('/api/sessions/:id/favorite', requireAuth, (req, res) => {
-  const set = loadFavorites();
   const id = req.params.id;
+  const teamSession = isTeamSessionId(id);
+  if (req.principal.kind === 'guest' && (!teamSession || !team.canAccessSession(req.principal, id))) return res.status(403).json({ error: 'not a team session' });
+  const set = teamSession ? teamFavoritesFor(req.principal) : loadFavorites();
   const on = !(req.body && req.body.favorite === false);
   if (on) set.add(id); else set.delete(id);
-  saveFavorites(set);
+  if (teamSession) saveTeamFavoritesFor(req.principal, set); else saveFavorites(set);
   res.json({ ok: true, favorite: on });
 });
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
@@ -2776,6 +2827,7 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
     const codexIds = new Set(Object.values(loadCodex().sessions || {}).map((s) => s.id));
     const teamClaudeIds = new Set(Object.values(loadTeamClaude().sessions || {}).map((s) => s.id));
     const archived = loadArchived();
+    const teamArchived = loadTeamArchived();
     const byId = new Map();
     for (const search of searches) {
       for (const r of search.results) {
@@ -2793,7 +2845,7 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
       title: r.title || r.snippet || r.preview || 'session',
       cwd: r.cwd, preview: sessionSearchPreview(r), age: r.age,
       match: r.match, matchedQuery: r.matchedQuery, matchKind: r.matchKind,
-      archived: archived.has(r.id),
+      archived: (teamClaudeIds.has(r.id) || team.isShared(r.id) ? teamArchived : archived).has(r.id),
     }));
     res.json({ results, searched: variants.map((v) => v.query) });
   } catch (e) {
@@ -2805,8 +2857,9 @@ app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
     const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
     const h = await sessionHistory(req.params.id, { before });
     h.messages = compactHistoryMessages(h.messages || []);
-    h.archived = loadArchived().has(req.params.id);
-    h.favorite = loadFavorites().has(req.params.id);
+    const teamSession = isTeamSessionId(req.params.id);
+    h.archived = (teamSession ? loadTeamArchived() : loadArchived()).has(req.params.id);
+    h.favorite = (teamSession ? teamFavoritesFor(req.principal) : loadFavorites()).has(req.params.id);
     res.json(h);
   } catch (e) {
     res.status(500).json({ error: String(e && e.message || e) });
@@ -2820,7 +2873,10 @@ app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
       const idx = Math.max(-1, Math.min(messages.length - 1, parseInt(req.query.through, 10)));
       messages = idx >= 0 ? messages.slice(0, idx + 1) : [];
     }
-    res.json({ ...h, messages: compactHistoryMessages(messages), archived: loadArchived().has(req.params.id), favorite: loadFavorites().has(req.params.id) });
+    const teamSession = isTeamSessionId(req.params.id);
+    res.json({ ...h, messages: compactHistoryMessages(messages),
+      archived: (teamSession ? loadTeamArchived() : loadArchived()).has(req.params.id),
+      favorite: (teamSession ? teamFavoritesFor(req.principal) : loadFavorites()).has(req.params.id) });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
@@ -3013,7 +3069,10 @@ app.delete('/api/codex/threads/:id', ...codexControlRoute(async (id) => {
   try { unlinkSync(sessionAttOff(id)); } catch {}
   const archived = loadArchived(); archived.delete(id); saveArchived(archived);
   const archivedAt = loadArchivedAt(); delete archivedAt[id]; saveArchivedAt(archivedAt);
+  const teamArchived = loadTeamArchived(); teamArchived.delete(id); saveTeamArchived(teamArchived);
+  const teamArchivedAt = loadTeamArchivedAt(); delete teamArchivedAt[id]; saveTeamArchivedAt(teamArchivedAt);
   const favorites = loadFavorites(); favorites.delete(id); saveFavorites(favorites);
+  removeTeamFavoriteEverywhere(id);
   const names = loadNames(); delete names[id]; saveNames(names);
   const schedules = loadSchedules(); if (schedules.sessions) { delete schedules.sessions[id]; saveSchedules(schedules); }
   deleteRunning(id); RT.delete(resolveKey(id)); ALIAS.delete(id);
@@ -5775,9 +5834,12 @@ wss.on('connection', (ws) => {
       broadcastPresence(s);
       if (s.sessionId && !sessionIsTeam(s)) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context && !sessionIsTeam(s)) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
+      const teamSession = s.sessionId && sessionIsTeam(s);
+      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null,
+        archived: s.sessionId ? (teamSession ? loadTeamArchived() : loadArchived()).has(s.sessionId) : false,
+        favorite: s.sessionId ? (teamSession ? teamFavoritesFor(ws.principal) : loadFavorites()).has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
         me: team.authorOf(ws.principal), curAuthor: s.curAuthor || null,
-        shared: s.sessionId ? sessionIsTeam(s) : false,
+        shared: !!teamSession,
         teamChat: s.sessionId && sessionIsTeam(s) ? team.listSessionChat(s.sessionId) : [],
         viewers: principalsOf(s), typing: typingNow(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
