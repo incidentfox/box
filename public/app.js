@@ -136,7 +136,7 @@ function show(id) {
 // History API and re-render the previous screen on `popstate`, so the browser
 // Back/Forward buttons, the in-app back arrows, and swipe-back all walk one stack.
 let navSuppress = false;   // true while restoring a popped route, so the render itself doesn't re-push
-const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || ''].join('|') : '');
+const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || '', s.team ? 'team' : ''].join('|') : '');
 const safeRoutePart = (value) => encodeURIComponent(String(value || '').trim());
 function routeSlug(value, fallback = '') {
   const slug = String(value || '').toLowerCase().trim()
@@ -159,7 +159,7 @@ function routeUrl(state) {
     case 'voice': return '/voice';
     case 'chat': return s.id
       ? `${teamPrefix}/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}`
-      : `${teamPrefix}/sessions/new`;
+      : `${teamPrefix}/sessions/new${s.team ? '?team=1' : ''}`;
     case 'sessions': {
       const filter = s.filter || 'all';
       return filter === 'all' ? '/sessions' : `/sessions?filter=${encodeURIComponent(filter)}`;
@@ -174,9 +174,11 @@ function routeFromLocation() {
   });
   const remote = raw[0] === 'team';
   const parts = remote ? raw.slice(1) : raw;
-  const filter = new URLSearchParams(location.search).get('filter') || 'all';
+  const params = new URLSearchParams(location.search);
+  const filter = params.get('filter') || 'all';
+  const team = params.get('team') === '1';
   if (remote && !parts.length) return { view: 'team' };
-  if (remote && parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, remote: true };
+  if (remote && parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, remote: true, team: true };
   if (remote && parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1], remote: true };
   if (remote) return { view: 'team' };
   if (parts[0] === 'board' && parts.length === 1) return { view: 'board' };
@@ -184,7 +186,7 @@ function routeFromLocation() {
   if (parts[0] === 'issues' && parts[1]) return { view: 'issue', id: parts[1] };
   if (parts[0] === 'pipelines') return { view: 'pipelines' };
   if (parts[0] === 'voice') return { view: 'voice' };
-  if (parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true };
+  if (parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, team };
   if (parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1] };
   if (parts[0] === 'sessions') return { view: 'sessions', filter };
   return { view: 'sessions', filter: 'all' };
@@ -233,8 +235,11 @@ function renderRoute(s) {
         // `remote` chats live on the box we joined — re-resolve the endpoint here so a
         // reload or Back/Forward lands on the same server the chat was opened against.
         if (s.remote && !teamEp() && !isGuestHere()) { openSessions(); break; }
-        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote });
-        else if (s.new) openChat({ id: null, title: 'New chat', cwd: s.remote ? teamWorkspaceRoot() : defaultCwd, agent: configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: !!s.remote });
+        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote, team: !!s.remote });
+        else if (s.new) {
+          const teamNew = !!s.team || !!s.remote;
+          openChat({ id: null, title: 'New chat', cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent: teamNew ? 'codex' : configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: teamNew, team: teamNew });
+        }
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
         else openSessions();
         break;
@@ -340,13 +345,8 @@ function applyTeamChrome() {
   document.body.classList.toggle('guestMode', guest);
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   if (guest) {
-    for (const id of ['settingsBtn', 'boardBtn', 'pipesBtn', 'voiceBtn', 'sessSearchBtn', 'sessionMenuBtn', 'bulkBtn']) setVis(id, false);
+    for (const id of ['settingsBtn', 'boardBtn', 'voiceBtn', 'sessSearchBtn', 'sessionMenuBtn', 'bulkBtn']) setVis(id, false);
   }
-  // Always shown. Gating this on "you already have a team" made the first invite
-  // unreachable: the Team screen is the ONLY place to mint one, so hiding it until a
-  // member exists meant a member could never exist. It's also where you join someone
-  // else's box, which a brand-new owner has every reason to do on day one.
-  setVis('teamBtn', true);
 }
 function applyChatCapabilities() {
   const foreign = chatIsForeign();
@@ -1410,6 +1410,7 @@ function openAppSettings() {
     { ic: '⌂', label: 'Default workspace', desc: shortCwd(s.defaultCwd || defaultCwd), fn: openDefaultWorkspaceSheet },
     { ic: agentIcon(configuredDefaultAgent()), label: 'Default agent', desc: agentLabel(configuredDefaultAgent()), fn: openDefaultAgentSheet },
     { ic: '◆', label: 'Codex permissions', desc: sandboxLabel(s.codexSandbox || DEFAULT_SETTINGS.codex.sandbox || 'off'), fn: openDefaultCodexSandboxSheet },
+    { ic: ICONS.team, label: 'Team', desc: 'Members, shared workspace, and team sessions', fn: () => typeof openTeam === 'function' ? openTeam() : toast('Team is unavailable') },
     { ic: '', label: 'Prompts & hooks', desc: 'View and edit built-in prompt text and hook scripts', fn: openPromptHub },
     { ic: document.documentElement.dataset.theme === 'dark' ? '☀' : '☾', label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Dark' : 'Light', fn: toggleTheme },
   ]);
@@ -1468,13 +1469,14 @@ $('newBtn').onclick = () => {
     agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
     mac: ['Drive your Mac (Computer Use)', 'New Computer Use chat'],
   };
-  const def = configuredDefaultAgent();
-  const order = [def, 'codex', 'claude', 'gemini', 'agy', 'mac'].filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
+  const teamNew = curFilter === 'team' || isGuestHere();
+  const def = teamNew ? 'codex' : configuredDefaultAgent();
+  const order = (teamNew ? ['codex'] : [def, 'codex', 'claude', 'gemini', 'agy', 'mac']).filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
   const rows = order.map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
-    desc: agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0],
-    fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: defaultCwd, agent }); },
+    desc: teamNew ? 'Shared team workspace · sandboxed' : (agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0]),
+    fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent, shared: teamNew, team: teamNew }); },
   }));
   openSheet('New chat', rows);
 };
@@ -1558,7 +1560,7 @@ function searchMatchLabel(s) {
 }
 
 /* ---------- pipelines health panel ---------- */
-$('pipesBtn').onclick = openPipelines;
+if ($('pipesBtn')) $('pipesBtn').onclick = openPipelines;
 $('pipesBack').onclick = () => history.back();
 $('pipesRefresh').onclick = openPipelines;
 async function openPipelines() {
@@ -2429,9 +2431,9 @@ async function openChat(s) {
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id,
     // A chat opened from the Team screen runs on the HOST's box: every request and the
     // live socket for it must target that endpoint for as long as it stays open.
-    ep: s.ep || null, shared: !!s.shared, teamChat: [] };
+    ep: s.ep || null, shared: !!s.shared || !!s.team, team: !!s.team, teamChat: [] };
   syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote) });
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote), team: cur.team });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   setChatTitle(cur.title);
@@ -3161,7 +3163,7 @@ function onServer(o) {
   // The broadcast is what tells OTHER viewers (and other tabs) that sharing changed, so it
   // repaints the list too — otherwise the Team badge and the Shared tab count stay stale
   // until the next poll. The person who tapped gets their own toast from doShare().
-  else if (o.type === 'share') { cur.shared = !!o.shared; renderPresence(); renderTeamChat(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
+  else if (o.type === 'share') { cur.shared = !!o.shared; cur.team = cur.team || !!o.shared; renderPresence(); renderTeamChat(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
   else if (o.type === 'revoked') { onTeamAccessLost(); }
 }
 function onSync(o) {
@@ -3170,7 +3172,7 @@ function onSync(o) {
   // Identity + presence for a shared chat. `me` is per-connection and authoritative —
   // it's how the same transcript can say "(you)" on the host's box and on a guest's.
   if (o.me) cur.me = o.me;
-  if (typeof o.shared === 'boolean') cur.shared = o.shared;
+  if (typeof o.shared === 'boolean') { cur.shared = o.shared || !!cur.team; cur.team = cur.team || o.shared; }
   if (Array.isArray(o.teamChat)) cur.teamChat = o.teamChat;
   cur.viewers = o.viewers || []; cur.typing = o.typing || [];
   renderPresence(); renderTeamChat();
@@ -3360,7 +3362,7 @@ function enqueueText(text, opts = {}) {
     const s = allSessions.find((x) => x.id === cur.id); if (s) s.archived = false;
     fetchSessions(curFilter === 'archived' ? 'all' : curFilter);
   }
-  const payload = { type: 'enqueue', key: cur.key, text, images: opts.images || [], mode: cur.mode, agent: cur.agent || 'claude', cwd: cur.cwd };
+  const payload = { type: 'enqueue', key: cur.key, text, images: opts.images || [], mode: cur.mode, agent: cur.agent || 'claude', cwd: cur.cwd, team: !!cur.team };
   if (opts.force) payload.force = true;  // take-over: spawn the box's bridge even though a foreign owner is live
   if (opts.displayText != null) payload.displayText = opts.displayText;
   if (opts.parentId || cur.parentId) payload.parentId = opts.parentId || cur.parentId;
@@ -6012,17 +6014,6 @@ async function stopRec(useIt) {
 })();
 
 /* ---------- boot ---------- */
-// Version label auto-tracks the live app.js: we stamp it from the served file's
-// Last-Modified, so it bumps itself on every deploy — no hand-editing a constant.
-// (The SW is network-first, so an online relaunch always pulls the fresh app.js.)
-const BUILD = 82;  // static fallback if the HEAD probe can't run (offline / old server)
-function stampVersion(s) { try { $('ver').textContent = s; } catch {} }
-stampVersion('v' + BUILD);
-fetch('/app.js', { method: 'HEAD', cache: 'no-store' }).then((r) => {
-  const lm = r.headers.get('last-modified'); if (!lm) return;
-  const d = new Date(lm), p = (n) => String(n).padStart(2, '0');
-  stampVersion('build ' + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + '·' + p(d.getUTCHours()) + p(d.getUTCMinutes()) + 'Z');
-}).catch(() => {});
 paintIcons();
 applySidebarCollapsed();
 setInterval(() => {
