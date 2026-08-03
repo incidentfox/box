@@ -1277,10 +1277,23 @@ function openTextEditor({ title, text, meta, save, reset, resetLabel = 'Reset to
   const ta = document.createElement('textarea'); ta.className = 'sheetTextarea'; ta.value = text || ''; ta.spellcheck = false; ta.autocomplete = 'off'; inner.appendChild(ta);
   const err = document.createElement('p'); err.className = 'err sheetErr'; inner.appendChild(err);
   const row = document.createElement('div'); row.className = 'sheetRow sel'; row.innerHTML = '<span class="ic">✓</span><div>Save</div>';
+  let saving = false;
   row.onclick = async () => {
+    if (saving) return;
+    saving = true;
     err.textContent = '';
+    ta.disabled = true;
+    row.classList.add('disabled');
+    row.querySelector('div').textContent = 'Saving…';
     try { await save(ta.value); closeSheet(); }
-    catch (e) { err.textContent = String(e.message || e); }
+    catch (e) {
+      err.textContent = String(e.message || e);
+      toast(`Save failed: ${String(e.message || e)}`);
+      saving = false;
+      ta.disabled = false;
+      row.classList.remove('disabled');
+      row.querySelector('div').textContent = 'Save';
+    }
   };
   inner.appendChild(row);
   if (reset) {
@@ -4496,7 +4509,9 @@ function openGoalEditor(goal = null) {
       objective = objective.trim();
       if (!objective || objective.length > 4000) throw new Error('Goal must be 1-4000 characters');
       if (!cur.id) { enqueueText(`/goal ${objective}`, { displayText: `/goal ${objective}` }); return; }
-      await codexGoal('PUT', { objective, status: 'active' });
+      // An objective edit must not also issue a runtime status transition. That
+      // transition can be rejected while this thread is actively running.
+      await codexGoal('PUT', { objective });
       await refreshSessionModes();
       toast(goal ? 'Goal updated' : 'Goal started');
     },
@@ -4538,7 +4553,7 @@ async function setGoalFromSlash(args) {
     if (value === 'pause') await codexGoal('PUT', { status: 'paused' });
     else if (value === 'resume') await codexGoal('PUT', { status: 'active' });
     else if (value === 'clear') await codexGoal('DELETE');
-    else await codexGoal('PUT', { objective: value, status: 'active' });
+    else await codexGoal('PUT', { objective: value });
     await refreshSessionModes();
     toast(value === 'clear' ? 'Goal cleared' : value === 'pause' ? 'Goal paused' : value === 'resume' ? 'Goal resumed' : 'Goal started');
   } catch (error) { toast(String(error.message || error)); }
