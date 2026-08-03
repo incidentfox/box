@@ -136,7 +136,7 @@ function show(id) {
 // History API and re-render the previous screen on `popstate`, so the browser
 // Back/Forward buttons, the in-app back arrows, and swipe-back all walk one stack.
 let navSuppress = false;   // true while restoring a popped route, so the render itself doesn't re-push
-const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || '', s.team ? 'team' : ''].join('|') : '');
+const routeKey = (s) => (s ? [s.view, s.id || '', s.filter || '', s.workspace || '', s.team ? 'team' : ''].join('|') : '');
 const safeRoutePart = (value) => encodeURIComponent(String(value || '').trim());
 function routeSlug(value, fallback = '') {
   const slug = String(value || '').toLowerCase().trim()
@@ -157,12 +157,19 @@ function routeUrl(state) {
     case 'issueNew': return '/issues/new';
     case 'pipelines': return '/pipelines';
     case 'voice': return '/voice';
-    case 'chat': return s.id
-      ? `${teamPrefix}/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}`
-      : `${teamPrefix}/sessions/new${s.team ? '?team=1' : ''}`;
+    case 'chat': {
+      const workspace = !s.remote && s.workspace === 'team' ? 'workspace=team' : '';
+      const suffix = workspace ? `?${workspace}` : '';
+      return s.id
+        ? `${teamPrefix}/sessions/${safeRoutePart(s.id)}${routeSlug(s.title, 'chat') ? `/${routeSlug(s.title, 'chat')}` : ''}${suffix}`
+        : `${teamPrefix}/sessions/new${s.team ? `?team=1${workspace ? '&' + workspace : ''}` : suffix}`;
+    }
     case 'sessions': {
       const filter = s.filter || 'all';
-      return filter === 'all' ? '/sessions' : `/sessions?filter=${encodeURIComponent(filter)}`;
+      const q = new URLSearchParams();
+      if (s.workspace === 'team') q.set('workspace', 'team');
+      if (filter !== 'all') q.set('filter', filter);
+      return q.toString() ? `/sessions?${q}` : '/sessions';
     }
     case 'login':
     default: return '/';
@@ -177,6 +184,7 @@ function routeFromLocation() {
   const params = new URLSearchParams(location.search);
   const filter = params.get('filter') || 'all';
   const team = params.get('team') === '1';
+  const workspace = params.get('workspace') === 'team' ? 'team' : 'personal';
   if (remote && !parts.length) return { view: 'team' };
   if (remote && parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, remote: true, team: true };
   if (remote && parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1], remote: true };
@@ -186,10 +194,10 @@ function routeFromLocation() {
   if (parts[0] === 'issues' && parts[1]) return { view: 'issue', id: parts[1] };
   if (parts[0] === 'pipelines') return { view: 'pipelines' };
   if (parts[0] === 'voice') return { view: 'voice' };
-  if (parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, team };
-  if (parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1] };
-  if (parts[0] === 'sessions') return { view: 'sessions', filter };
-  return { view: 'sessions', filter: 'all' };
+  if (parts[0] === 'sessions' && parts[1] === 'new') return { view: 'chat', new: true, team, workspace };
+  if (parts[0] === 'sessions' && parts[1]) return { view: 'chat', id: parts[1], workspace };
+  if (parts[0] === 'sessions') return { view: 'sessions', filter, workspace };
+  return { view: 'sessions', filter: 'all', workspace };
 }
 function navTo(state, { replace = false } = {}) {
   if (navSuppress) return;                       // we're rendering a popped route — don't push
@@ -216,7 +224,7 @@ function renderRoute(s) {
     // Hydrate that sidebar independently; otherwise it stays blank until another
     // navigation happens to fetch the session feed.
     if (isDesktopShell() && s && s.view !== 'login' && s.view !== 'sessions' && !isGuestHere()) {
-      fetchSessions(curFilter || 'all').catch(() => {});
+      fetchSessions(curFilter || 'all', s.workspace || activeWorkspace()).catch(() => {});
     }
     // leaving the chat → drop the live socket (matches the old goBackFromChat)
     if (s && s.view !== 'chat' && s.view !== 'chatAttn' && ws) { try { ws.close(); } catch {} }
@@ -235,9 +243,9 @@ function renderRoute(s) {
         // `remote` chats live on the box we joined — re-resolve the endpoint here so a
         // reload or Back/Forward lands on the same server the chat was opened against.
         if (s.remote && !teamEp() && !isGuestHere()) { openSessions(); break; }
-        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote, team: !!s.remote });
+        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote || s.workspace === 'team', team: !!s.remote || s.workspace === 'team' });
         else if (s.new) {
-          const teamNew = !!s.team || !!s.remote;
+          const teamNew = !!s.team || !!s.remote || s.workspace === 'team';
           openChat({ id: null, title: 'New chat', cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent: teamNew ? (s.agent === 'claude' ? 'claude' : 'codex') : configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: teamNew, team: teamNew });
         }
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
@@ -250,7 +258,7 @@ function renderRoute(s) {
         else openSessions();
         break;
       case 'sessions':
-      default:          openSessions((s && s.filter) || 'all'); break;
+      default:          openSessions((s && s.filter) || 'all', s && s.workspace); break;
     }
   } finally { navSuppress = false; }
 }
@@ -788,7 +796,7 @@ async function login() {
   TOKEN = token; LS.setItem('cc_token', token);
   // A guest token opens the same URL into the reduced, team-scoped app — a deep link to
   // this box's session list would only 403, so guests land on Team.
-  const initialRoute = role === 'guest' ? { view: 'team' } : ((history.state && history.state.returnTo) || routeFromLocation());
+  const initialRoute = role === 'guest' ? { view: 'sessions', filter: 'all', workspace: 'team' } : ((history.state && history.state.returnTo) || routeFromLocation());
   navTo(initialRoute, { replace: true });
   loadConfig(); renderRoute(initialRoute);
 }
@@ -796,30 +804,45 @@ function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); n
 
 /* ---------- sessions ---------- */
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
-let allSessions = [], sessionCounts = { all: 0, team: 0 }, curFilter = 'all';
+let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
+let currentWorkspace = LS.getItem('box_workspace') === 'team' ? 'team' : 'personal';
 let chatRenderSeq = 0;
 let sessionRefreshTimer = null;
 let lastSessionFetchAt = 0;
 let bulkMode = false;
 const bulkSelected = new Set();
-const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['team', 'Team'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+const PERSONAL_STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+const TEAM_STATUS_TABS = [['all', 'Active'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['live', 'Live'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
 
-async function openSessions(filter = 'all') {
-  // A guest can't enumerate this box's chats (the server refuses), and shouldn't want to —
-  // the Team screen is their home screen.
-  if (isGuestHere()) return openTeam();
-  // Preserve old bookmarked URLs, now pointing at the dedicated Team tab.
-  if (filter === 'shared') filter = 'team';
-  navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter);
+const activeWorkspace = () => isGuestHere() ? 'team' : currentWorkspace;
+function renderWorkspaceButton() {
+  const btn = $('workspaceBtn'); if (!btn) return;
+  const team = activeWorkspace() === 'team';
+  btn.textContent = team ? 'Team' : 'Personal';
+  btn.title = isGuestHere() ? 'Team workspace' : `Switch workspace (currently ${team ? 'Team' : 'Personal'})`;
+}
+function setWorkspace(workspace) {
+  currentWorkspace = workspace === 'team' ? 'team' : 'personal';
+  if (!isGuestHere()) LS.setItem('box_workspace', currentWorkspace);
+  return openSessions('all', currentWorkspace);
+}
+async function openSessions(filter = 'all', workspace = activeWorkspace()) {
+  if (filter === 'shared' || filter === 'team') { workspace = 'team'; filter = 'all'; }
+  workspace = isGuestHere() ? 'team' : (workspace === 'team' ? 'team' : 'personal');
+  currentWorkspace = workspace;
+  if (!isGuestHere()) LS.setItem('box_workspace', workspace);
+  navTo({ view: 'sessions', filter, workspace }); show('sessions'); await fetchSessions(filter, workspace);
 }
 let lastSessionRenderSig = '';
-async function fetchSessions(filter) {
-  if (filter === 'shared') filter = 'team';
+async function fetchSessions(filter, workspace = activeWorkspace()) {
+  if (filter === 'shared' || filter === 'team') { workspace = 'team'; filter = 'all'; }
+  workspace = isGuestHere() ? 'team' : (workspace === 'team' ? 'team' : 'personal');
+  currentWorkspace = workspace;
   curFilter = filter || 'all';
-  const d = await (await api('/api/sessions?filter=' + curFilter)).json();
+  const d = await (await api('/api/sessions?filter=' + encodeURIComponent(curFilter) + '&workspace=' + workspace)).json();
   lastSessionFetchAt = Date.now();
   defaultCwd = d.defaultCwd; cur.cwd = cur.cwd || d.defaultCwd;
   allSessions = d.sessions || [];
@@ -828,13 +851,13 @@ async function fetchSessions(filter) {
   // The feed re-fetches on every turn_start/idle of the open chat plus a heartbeat; most
   // of those return byte-identical data. Skip the full DOM rebuild (cards + listeners +
   // layout) when nothing changed — just keep the relative times fresh.
-  const sig = curFilter + '\x1f' + JSON.stringify(d.sessions) + '\x1f' + JSON.stringify(d.counts);
+  const sig = workspace + '\x1f' + curFilter + '\x1f' + JSON.stringify(d.sessions) + '\x1f' + JSON.stringify(d.counts);
   if (sig === lastSessionRenderSig && $('sessionList').childElementCount) { refreshSessionListTimes(); return; }
   lastSessionRenderSig = sig;
-  renderTabs(); renderBulkBar(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
+  renderWorkspaceButton(); renderTabs(); renderBulkBar(); renderSessionList(); refreshSessionListTimes(); paintIcons($('sessions'));
 }
 function refreshSessionsSoon(delay = 350) {
-  if (!TOKEN || isGuestHere()) return;   // guests have no session feed to refresh
+  if (!TOKEN) return;
   clearTimeout(sessionRefreshTimer);
   sessionRefreshTimer = setTimeout(() => {
     sessionRefreshTimer = null;
@@ -847,10 +870,9 @@ function sessionListIsVisible() {
 function renderTabs() {
   const c = sessionCounts; const wrap = $('tabs'); wrap.innerHTML = '';
   const base = curFilter.split(':')[0];
-  for (const [k, label] of STATUS_TABS) {
-    // Team is a destination, not a transient status: keep it available even before
-    // the first shared session exists.
-    if (k !== 'all' && k !== 'team' && !c[k] && base !== k) continue;
+  const tabs = activeWorkspace() === 'team' ? TEAM_STATUS_TABS : PERSONAL_STATUS_TABS;
+  for (const [k, label] of tabs) {
+    if (k !== 'all' && !c[k] && base !== k) continue;
     const t = document.createElement('button'); t.className = 'tab' + (base === k ? ' on' : '');
     t.innerHTML = `${label}<span class="tcount">${c[k] || 0}</span>`;
     // A filter is a destination, not merely a refresh. Keep it in history so a
@@ -860,8 +882,8 @@ function renderTabs() {
   }
   // when Automated is active, show a second row breaking it into subcategories
   const srow = $('subtabs'); if (!srow) return;   // tolerate a stale cached index.html
-  srow.innerHTML = ''; srow.classList.toggle('hidden', base !== 'auto');
-  if (base === 'auto') {
+  srow.innerHTML = ''; srow.classList.toggle('hidden', base !== 'auto' || activeWorkspace() === 'team');
+  if (base === 'auto' && activeWorkspace() !== 'team') {
     const sub = c.autoSub || {};
     const mk = (key, label, count) => {
       const want = key ? 'auto:' + key : 'auto';
@@ -990,7 +1012,7 @@ function renderSessionList() {
   for (const s of items) {
     // Favorites and live sessions are sorted to the top by the server. Group them
     // before time buckets so "Today" does not repeat between pinned and regular cards.
-    const g = s.category === 'vob' ? 'VOB calls' : s.favorite && !s.archived ? 'Favorites' : s.pinned ? 'Live' : timeGroup(cardTime(s));
+    const g = activeWorkspace() === 'personal' && s.category === 'vob' ? 'VOB calls' : s.favorite && !s.archived ? 'Favorites' : s.pinned ? 'Live' : timeGroup(cardTime(s));
     if (g !== group) { group = g; const h = document.createElement('div'); h.className = 'grouphd'; h.textContent = g; list.appendChild(h); }
     list.appendChild(sessionCard(s));
   }
@@ -1096,7 +1118,7 @@ function attachSwipeActions(card, front, s) {
     if (bulkMode) { e.preventDefault(); e.stopPropagation(); toggleBulkSelection(s.id, !bulkSelected.has(s.id)); return; }
     if (open) { e.preventDefault(); e.stopPropagation(); close(); return; }   // tap front to dismiss
     if (moved && horiz) { e.preventDefault(); return; }                       // was a swipe, not a tap
-    openChat(s);
+    openChat({ ...s, team: activeWorkspace() === 'team' || !!s.team, shared: activeWorkspace() === 'team' || !!s.shared });
   });
   return { close, isOpen: () => open };
 }
@@ -1181,7 +1203,7 @@ async function bulkArchiveStale() {
 async function bulkArchive(payload) {
   let j = null;
   try {
-    const r = await api('/api/sessions/bulk-archive', { method: 'POST', body: JSON.stringify(payload) });
+    const r = await api('/api/sessions/bulk-archive', { method: 'POST', body: JSON.stringify({ ...payload, workspace: activeWorkspace() }) });
     j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error((j && j.error) || 'bulk archive failed');
   } catch {
@@ -1471,7 +1493,7 @@ $('newBtn').onclick = () => {
     agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
     mac: ['Drive your Mac (Computer Use)', 'New Computer Use chat'],
   };
-  const teamNew = curFilter === 'team' || isGuestHere();
+  const teamNew = activeWorkspace() === 'team';
   const def = teamNew ? 'codex' : configuredDefaultAgent();
   const order = (teamNew ? ['codex', 'claude'] : [def, 'codex', 'claude', 'gemini', 'agy', 'mac']).filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
   const rows = order.map((agent) => ({
@@ -1485,6 +1507,14 @@ $('newBtn').onclick = () => {
 if ($('homeLink')) $('homeLink').onclick = (e) => {
   e.preventDefault();
   openSessions('all');
+};
+if ($('workspaceBtn')) $('workspaceBtn').onclick = () => {
+  if (isGuestHere()) return toast('You are in the Team workspace');
+  const now = activeWorkspace();
+  openSheet('Choose workspace', [
+    { ic: '⌂', label: 'Personal', desc: 'Your private sessions, archive, and favorites', fn: () => now === 'personal' ? closeSheet() : setWorkspace('personal') },
+    { ic: ICONS.team, label: 'Team', desc: 'Shared sessions, archive, and your Team favorites', fn: () => now === 'team' ? closeSheet() : setWorkspace('team') },
+  ]);
 };
 if ($('settingsBtn')) $('settingsBtn').onclick = openAppSettings;
 if ($('sessionMenuBtn')) $('sessionMenuBtn').onclick = openSessionMenu;
@@ -2435,7 +2465,7 @@ async function openChat(s) {
     // live socket for it must target that endpoint for as long as it stays open.
     ep: s.ep || null, shared: !!s.shared || !!s.team, team: !!s.team, teamChat: [] };
   syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote), team: cur.team });
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote), team: cur.team, workspace: cur.team ? 'team' : activeWorkspace() });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   setChatTitle(cur.title);
@@ -6050,9 +6080,9 @@ if (TOKEN) {
   const initialRoute = requestedRoute;
   navTo(initialRoute, { replace: true });
   // We don't yet know whether this token is the owner's or a guest's — /api/config answers
-  // that. A guest has no session feed here, so re-home them on the Team screen once it lands.
+  // that. Guests are constrained to the Team workspace, so ensure their first feed is Team once it lands.
   loadConfig().then(() => {
-    if (isGuestHere() && document.body.dataset.view !== 'chat') openTeam();
+    if (isGuestHere() && document.body.dataset.view !== 'chat') openSessions('all', 'team');
   }).catch(() => {});
   renderRoute(initialRoute);
 }

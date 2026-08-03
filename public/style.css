@@ -273,6 +273,9 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 /* sessions list */
 /* sessions header + compose */
 .sbar .apptitle { color: inherit; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; text-decoration: none; }
+.workspaceSwitch { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 700; padding: 5px 4px; border-radius: 7px; white-space: nowrap; }
+.workspaceSwitch::after { content: ' ▾'; font-size: 10px; opacity: .72; }
+.workspaceSwitch:active { background: var(--subtle-2); color: var(--ink); }
 .compose { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; box-shadow: 0 3px 10px rgba(200,110,80,.4); flex: none; }
 .compose svg { width: 22px; height: 22px; }
 .sidebarToggle.sidebarToggle, .sidebarRestore.sidebarRestore, .sessionMenu.sessionMenu { display: none; }
@@ -982,6 +985,9 @@ textarea.acctInput { resize: vertical; }
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .sbar .apptitle {
     font-size: 18px;
+  }
+  body:not([data-view="login"]):not([data-view="sessions"]) #sessions .workspaceSwitch {
+    font-size: 11px;
   }
   body:not([data-view="login"]):not([data-view="sessions"]) #sessions .iconbtn {
     width: 34px; height: 34px;
