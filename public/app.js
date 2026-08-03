@@ -2414,6 +2414,12 @@ async function openPipeDetail(path, title) {
 const INITIAL_HISTORY_RENDER_LIMIT = 120;
 const EARLIER_HISTORY_BATCH = 120;
 let wsLastMsg = 0, wsWatchdog = null;
+let historyAbortController = null;
+function beginHistoryRequest() {
+  if (historyAbortController) historyAbortController.abort();
+  historyAbortController = new AbortController();
+  return historyAbortController;
+}
 function resetWsWatchdog() {
   wsLastMsg = Date.now();
   if (wsWatchdog) return;
@@ -2467,6 +2473,7 @@ function annotateHistoryMessages(messages, start = 0) {
   return (messages || []).map((m, i) => ({ ...m, _idx: start + i }));
 }
 async function openChat(s) {
+  if (historyAbortController) historyAbortController.abort();
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id,
@@ -2498,8 +2505,9 @@ async function openChat(s) {
   focusComposerSoon();
   if (s.id) {
     const loader = addHistoryLoader();
+    const historyRequest = beginHistoryRequest();
     try {
-      const h = await (await api(`/api/sessions/${s.id}/history`, { ep: cur.ep || LOCAL_EP })).json();
+      const h = await (await api(`/api/sessions/${s.id}/history`, { ep: cur.ep || LOCAL_EP, signal: historyRequest.signal })).json();
       if (renderSeq !== chatRenderSeq) return;
       loader.remove();
       cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
@@ -2515,8 +2523,10 @@ async function openChat(s) {
       await renderHistoryBatch(messages.slice(-INITIAL_HISTORY_RENDER_LIMIT), renderSeq);
       if (renderSeq !== chatRenderSeq) return;
       scrollBottom();
-    } catch {
-      loader.textContent = 'Could not load history.';
+    } catch (err) {
+      if (renderSeq === chatRenderSeq && err && err.name !== 'AbortError') loader.textContent = 'Could not load history.';
+    } finally {
+      if (historyAbortController === historyRequest) historyAbortController = null;
     }
   } else if (s.carry && s.carry.length) {
     // Agent switch: render the prior transcript inline so it reads as ONE continuous
@@ -2725,6 +2735,22 @@ async function renderHistoryBatch(messages, seq) {
   }
   return true;
 }
+async function prependHistoryBatch(messages, container, seq) {
+  const list = messages || [];
+  const batchSize = list.length > 140 ? 12 : 24;
+  scheduleHistoryPathResolve(list, seq);
+  // Insert the newest chunk first, then each older chunk before it. This preserves the
+  // transcript order while giving the browser a paint opportunity between markdown work.
+  for (let end = list.length; end > 0; end -= batchSize) {
+    if (seq !== chatRenderSeq) return false;
+    const start = Math.max(0, end - batchSize);
+    const frag = document.createDocumentFragment();
+    for (const m of list.slice(start, end)) frag.appendChild(buildHistElement(m));
+    container.insertBefore(frag, container.firstChild);
+    if (start > 0) await nextPaint();
+  }
+  return true;
+}
 function scheduleHistoryPathResolve(messages, seq) {
   const refs = (messages || []).flatMap(messagePathRefs);
   if (!refs.length) return;
@@ -2740,6 +2766,8 @@ function scheduleHistoryPathResolve(messages, seq) {
 /* load older history when user scrolls to top */
 async function loadEarlierMessages() {
   if (!cur.id || !cur.hasMoreHistory || cur.loadingEarlier) return;
+  const renderSeq = chatRenderSeq;
+  const sessionKey = cur.key;
   cur.loadingEarlier = true;
   const container = $('messages');
   const loader = document.createElement('div'); loader.className = 'histLoader'; loader.textContent = 'Loading earlier…';
@@ -2750,23 +2778,19 @@ async function loadEarlierMessages() {
       const start = Math.max(0, cur.localEarlier.length - EARLIER_HISTORY_BATCH);
       const messages = cur.localEarlier.splice(start);
       loader.remove();
-      scheduleHistoryPathResolve(messages);
-      for (let i = messages.length - 1; i >= 0; i--) {
-        container.insertBefore(buildHistElement(messages[i]), container.firstChild);
-      }
+      if (!await prependHistoryBatch(messages, container, renderSeq)) return;
       cur.hasMoreHistory = cur.localEarlier.length > 0 || !!cur.remoteHasMoreHistory;
       if (!cur.hasMoreHistory) { const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); }
       container.scrollTop += container.scrollHeight - prevHeight;
       return;
     }
-    const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`, { ep: chatEp() })).json();
+    const historyRequest = beginHistoryRequest();
+    const h = await (await api(`/api/sessions/${cur.id}/history?before=${cur.histCursor}`, { ep: chatEp(), signal: historyRequest.signal })).json();
+    if (historyAbortController === historyRequest) historyAbortController = null;
+    if (renderSeq !== chatRenderSeq || sessionKey !== cur.key) return;
     loader.remove();
     if (!h.messages || !h.messages.length) { cur.hasMoreHistory = false; const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); return; }
-    scheduleHistoryPathResolve(h.messages);
-    // prepend in order (oldest first = same as h.messages array order)
-    for (let i = h.messages.length - 1; i >= 0; i--) {
-      container.insertBefore(buildHistElement(h.messages[i]), container.firstChild);
-    }
+    if (!await prependHistoryBatch(h.messages, container, renderSeq)) return;
     cur.histCursor = h.cursor; cur.remoteHasMoreHistory = !!h.hasMore; cur.hasMoreHistory = cur.remoteHasMoreHistory;
     if (!cur.hasMoreHistory) { const note = document.createElement('div'); note.className = 'histEnd'; note.textContent = '— beginning of conversation —'; container.insertBefore(note, container.firstChild); }
     // restore scroll position — shift by how much content was added above
