@@ -31,7 +31,12 @@ const teamWorkspaceRoot = () => (TEAM && TEAM.workspaceRoot) || (CFG && CFG.work
 // True when this browser is signed in as a guest of the box it's talking to — the whole
 // app then runs in the reduced, workspace-scoped shape the server enforces anyway.
 const isGuestHere = () => !!(CFG && CFG.guest);
-const hasTeam = () => !!(teamEp() || isGuestHere());
+// "Team surfaces are relevant here" — true for a guest, for anyone who joined a remote
+// box, AND for the owner of a team-enabled box. That last case was missing: the owner
+// hosts the team but has no `teamEp` (they never joined anyone), so "Share with team"
+// never rendered in their own chat sheet — the host couldn't share a chat, which is the
+// entire point. Same chicken-and-egg as the Team button; don't gate on member count.
+const hasTeam = () => !!(teamEp() || isGuestHere() || (CFG && CFG.team && CFG.team.enabled));
 const chatEp = () => (cur && cur.ep) || LOCAL_EP;
 const epUrl = (ep, path) => ((ep && ep.base) || '') + path;
 function epWsUrl(ep, path, params) {
