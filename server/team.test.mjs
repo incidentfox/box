@@ -6,7 +6,7 @@ import {
   _setTeamForTest, attributePrompt, authorTag, canAccessSession, claimSession, createInvite,
   formatInviteCode, guestCwd, isShared, listInvites, listMembers, normalizeInviteCode,
   OWNER, redeemInvite, renameMember, resolveGuest, revokeInvite, revokeMember, setOwnerName,
-  setShared, setWorkspaceRoot, splitAuthorTag, withinWorkspace,
+  setShared, setWorkspaceRoot, splitAuthorTag, withinWorkspace, listSessionChat, appendSessionChat,
   addRoot, removeRoot, listRoots, teamRoots, rootRejection,
   listSecrets, setSecret, deleteSecret, secretsEnv, secretKeyRejection,
 } from './team.mjs';
@@ -100,6 +100,13 @@ setShared('sess-shared', true, 'owner');
 assert.equal(isShared('sess-shared'), true);
 assert.equal(canAccessSession(bobP, 'sess-shared'), true);
 assert.equal(canAccessSession(carolP, 'sess-shared'), true);
+assert.deepEqual(listSessionChat('sess-shared'), []);
+const teamMessage = appendSessionChat('sess-shared', 'hello team', bobP);
+assert.equal(teamMessage.text, 'hello team');
+assert.equal(teamMessage.author.name, 'Bob');
+assert.equal(listSessionChat('sess-shared').length, 1);
+assert.equal(appendSessionChat('sess-private', 'nope', bobP), null);
+assert.equal(appendSessionChat('sess-shared', '   ', bobP), null);
 
 // Unsharing revokes access immediately.
 setShared('sess-shared', false);

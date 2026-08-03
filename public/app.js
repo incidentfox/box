@@ -2432,7 +2432,7 @@ async function openChat(s) {
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id,
     // A chat opened from the Team screen runs on the HOST's box: every request and the
     // live socket for it must target that endpoint for as long as it stays open.
-    ep: s.ep || null, shared: !!s.shared };
+    ep: s.ep || null, shared: !!s.shared, teamChat: [] };
   syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
   navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote) });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
@@ -2440,7 +2440,7 @@ async function openChat(s) {
   setChatTitle(cur.title);
   updateFavoriteButton();
   updateArchiveButton();
-  renderPresence();       // clear the previous chat's viewers before this one's sync arrives
+  renderPresence(); renderTeamChat(); // clear the previous chat's team state before sync arrives
   applyChatCapabilities();
   renderContextMeter();
   $('messages').innerHTML = ''; live = null; liveUser = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
@@ -2617,7 +2617,7 @@ function buildHistElement(m) {
   const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
   if (m._idx != null) wrap.dataset.idx = String(m._idx);
   if (m.live) wrap.dataset.historyLive = 'true';
-  if (role === 'user') applyAuthor(wrap, m.author);
+  if (role === 'user' && cur && cur.shared) applyAuthor(wrap, m.author);
   const body = document.createElement('div'); body.className = 'body';
   let rawText = '';
   for (const p of historyParts(m)) {
@@ -3092,7 +3092,7 @@ function addUser(text, images, author) {
   const wrap = document.createElement('div'); wrap.className = 'msg user';
   wrap.dataset.rawText = text || '';
   wrap.dataset.ts = new Date().toISOString();
-  applyAuthor(wrap, author);
+  if (cur && cur.shared) applyAuthor(wrap, author);
   const body = document.createElement('div'); body.className = 'body';
   if (images && images.length) {
     body.appendChild(userAttachmentGrid(images));
@@ -3155,10 +3155,16 @@ function onServer(o) {
   else if (o.type === 'waiting_clear') clearWaitingCard();
   else if (o.type === 'done') finishTurn(o);
   else if (o.type === 'presence') { cur.viewers = o.viewers || []; cur.typing = o.typing || []; renderPresence(); }
+  else if (o.type === 'team_chat') {
+    if (!cur.shared || !o.message) return;
+    const messages = Array.isArray(cur.teamChat) ? cur.teamChat : [];
+    if (!messages.some((message) => message.id === o.message.id)) messages.push(o.message);
+    cur.teamChat = messages.slice(-500); renderTeamChat();
+  }
   // The broadcast is what tells OTHER viewers (and other tabs) that sharing changed, so it
   // repaints the list too — otherwise the Team badge and the Shared tab count stay stale
   // until the next poll. The person who tapped gets their own toast from doShare().
-  else if (o.type === 'share') { cur.shared = !!o.shared; renderPresence(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
+  else if (o.type === 'share') { cur.shared = !!o.shared; renderPresence(); renderTeamChat(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
   else if (o.type === 'revoked') { onTeamAccessLost(); }
 }
 function onSync(o) {
@@ -3168,8 +3174,9 @@ function onSync(o) {
   // it's how the same transcript can say "(you)" on the host's box and on a guest's.
   if (o.me) cur.me = o.me;
   if (typeof o.shared === 'boolean') cur.shared = o.shared;
+  if (Array.isArray(o.teamChat)) cur.teamChat = o.teamChat;
   cur.viewers = o.viewers || []; cur.typing = o.typing || [];
-  renderPresence();
+  renderPresence(); renderTeamChat();
   // Only let the server's agent win for a REAL, already-created session. A brand-new chat
   // has no server-side session yet, so subscribe returns the default agent ('claude') — applying
   // it here would clobber the agent the user just picked (e.g. Codex), making the menu flip back
@@ -3538,6 +3545,9 @@ function stopCurrent() {
 }
 $('stopBtn').onclick = stopCurrent;
 $('sendBtn').onclick = () => { if ($('sendBtn').dataset.act === 'stop') stopCurrent(); else submit(); };
+$('teamChatBtn').onclick = () => { teamChatOpen = !teamChatOpen; renderTeamChat(); };
+$('teamChatClose').onclick = () => { teamChatOpen = false; renderTeamChat(); };
+$('teamChatForm').onsubmit = (e) => { e.preventDefault(); sendTeamChat(); };
 $('copyInputBtn').onclick = () => {
   const text = $('input').value;
   if (!text) return;
@@ -3795,6 +3805,41 @@ function renderPresence() {
     t.textContent = `${typing.map((x) => x.name).join(', ')} ${typing.length > 1 ? 'are' : 'is'} typing…`;
     bar.appendChild(t);
   }
+}
+let teamChatOpen = false;
+function teamChatTime(ts) {
+  try { return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(ts)); } catch { return ''; }
+}
+function renderTeamChat() {
+  const btn = $('teamChatBtn'), panel = $('teamChatPanel'), list = $('teamChatMessages');
+  if (!btn || !panel || !list) return;
+  const enabled = !!(cur && cur.shared && cur.id);
+  btn.classList.toggle('hidden', !enabled);
+  if (!enabled) { teamChatOpen = false; panel.classList.add('hidden'); list.replaceChildren(); return; }
+  panel.classList.toggle('hidden', !teamChatOpen);
+  if (!teamChatOpen) return;
+  list.replaceChildren();
+  const messages = Array.isArray(cur.teamChat) ? cur.teamChat : [];
+  if (!messages.length) {
+    const empty = document.createElement('div'); empty.className = 'presMuted'; empty.textContent = 'No team messages yet.'; list.appendChild(empty);
+  }
+  for (const message of messages) {
+    const row = document.createElement('div'); row.className = 'teamChatMessage' + (message.author?.id === myMemberId() ? ' mine' : '');
+    const meta = document.createElement('div'); meta.className = 'teamChatMeta';
+    const name = document.createElement('span'); name.textContent = message.author?.id === myMemberId() ? 'You' : (message.author?.name || 'Teammate');
+    const time = document.createElement('span'); time.textContent = teamChatTime(message.ts);
+    const body = document.createElement('div'); body.textContent = message.text || '';
+    meta.append(name, time); row.append(meta, body); list.appendChild(row);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+function sendTeamChat() {
+  const input = $('teamChatInput');
+  const text = String(input.value || '').trim();
+  if (!text || !cur || !cur.shared || !cur.id) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Reconnecting…'); return; }
+  ws.send(JSON.stringify({ type: 'team_chat', key: cur.key, text }));
+  input.value = '';
 }
 // Built-in CLI slash commands, shown for the ACTIVE agent. Agent-specific skills
 // and custom commands are loaded from /api/commands?agent=...

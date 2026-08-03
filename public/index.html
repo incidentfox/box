@@ -160,6 +160,7 @@
     <button id="backBtn" class="iconbtn ghost" data-icon="back"></button>
     <button id="chatTitle" class="ctitle titleBtn" type="button">New chat</button>
     <button id="filesBtn" class="iconbtn ghost" title="files" data-icon="folder"></button>
+    <button id="teamChatBtn" class="iconbtn ghost hidden" title="team chat" aria-label="team chat" data-icon="chat"></button>
     <button id="myMsgsBtn" class="iconbtn ghost" title="my messages" data-icon="list"></button>
     <button id="archiveBtn" class="iconbtn ghost" title="Archive this conversation" data-icon="archive"></button>
     <button id="attnBtn" class="iconbtn ghost" title="needs attention" style="position:relative"><span id="attnBadge" class="attnBadge hidden"></span></button>
@@ -167,6 +168,11 @@
 
   <!-- who else is in this shared chat right now (empty + hidden on a solo box) -->
   <div id="presenceBar" class="presenceBar hidden"></div>
+  <section id="teamChatPanel" class="teamChatPanel hidden" aria-label="Team chat">
+    <div class="teamChatHead"><div><strong>Team chat</strong><span>Visible to the agent as context on the next turn</span></div><button id="teamChatClose" class="iconbtn ghost" title="close team chat" data-icon="close"></button></div>
+    <div id="teamChatMessages" class="teamChatMessages"></div>
+    <form id="teamChatForm" class="teamChatComposer"><textarea id="teamChatInput" rows="1" maxlength="4000" placeholder="Message the team…"></textarea><button class="iconbtn send" type="submit" title="send" data-icon="send"></button></form>
+  </section>
   <div id="contextMeter" class="contextMeter" title="Context used before compaction"></div>
   <div id="linearBar" class="linearBar hidden"></div>
   <div id="sessionModes" class="sessionModes hidden" aria-label="Active goal and schedules"></div>

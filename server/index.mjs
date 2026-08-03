@@ -396,6 +396,19 @@ const sessionIsGuest = (s) => !!(s && (s.createdBy || (s.sessionId && team.sessi
 // `createdBy` alone may describe a pre-isolation legacy chat. Only records explicitly
 // marked sandboxed (or shared by the constrained share API) cross the hard boundary.
 const sessionIsTeam = (s) => !!(s && (s.teamSandbox || team.isShared(s.sessionId || s.key)));
+const TEAM_CHAT_CONTEXT_MAX_MESSAGES = 40;
+const TEAM_CHAT_CONTEXT_MAX_CHARS = 12_000;
+function teamChatContextForAgent(sessionId) {
+  const messages = team.listSessionChat(sessionId).slice(-TEAM_CHAT_CONTEXT_MAX_MESSAGES);
+  if (!messages.length) return '';
+  const lines = []; let used = 0;
+  for (const message of messages.reverse()) {
+    const line = `[${message.author?.name || 'Teammate'}] ${String(message.text || '').replace(/\s+/g, ' ').trim()}\n`;
+    if (used + line.length > TEAM_CHAT_CONTEXT_MAX_CHARS && lines.length) break;
+    lines.push(line.slice(0, TEAM_CHAT_CONTEXT_MAX_CHARS - used)); used += line.length;
+  }
+  return `\n\n<team-chat-context>\nThis is a separate human team discussion. Use it as context for the requested work; do not pretend you sent messages there.\n${lines.reverse().join('')}</team-chat-context>`;
+}
 
 // The working directory of a session that may have no live runtime entry — sharing an old
 // chat from the list, rather than the one currently open. Falls back to the session list,
@@ -4997,7 +5010,7 @@ function runCodexTurn(s, msg, resolve) {
   s.proc = codexEngine.run({
     sessionId: s.sessionId,
     cwd: s.cwd,
-    prompt: msg.text || '',
+    prompt: `${msg.text || ''}${teamSession && s.sessionId ? teamChatContextForAgent(s.sessionId) : ''}`,
     images: msg.images || [],
     settings: (s.settings || {}).codex || DEFAULT_SETTINGS.codex,
     guest: sessionIsGuest(s),
@@ -5467,7 +5480,8 @@ wss.on('connection', (ws) => {
       if (s.sessionId && !s.context && !sessionIsTeam(s)) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
       ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
         me: team.authorOf(ws.principal), curAuthor: s.curAuthor || null,
-        shared: s.sessionId ? team.isShared(s.sessionId) : false,
+        shared: s.sessionId ? sessionIsTeam(s) : false,
+        teamChat: s.sessionId && sessionIsTeam(s) ? team.listSessionChat(s.sessionId) : [],
         viewers: principalsOf(s), typing: typingNow(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
@@ -5506,6 +5520,12 @@ wss.on('connection', (ws) => {
         force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
       });
       if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
+    } else if (m.type === 'team_chat') {
+      const s = rt(m.key);
+      if (!s.sessionId || !sessionIsTeam(s) || !team.canAccessSession(ws.principal, s.sessionId)) return deny();
+      const message = team.appendSessionChat(s.sessionId, m.text, ws.principal);
+      if (!message) { try { ws.send(JSON.stringify({ type: 'error', msg: 'Team chat message cannot be empty.' })); } catch {} return; }
+      bcast(s, { type: 'team_chat', message });
     } else if (m.type === 'typing') {
       const s = rt(m.key);
       if (!s.typing) s.typing = new Map();
