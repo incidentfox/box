@@ -390,10 +390,12 @@ function childEnv(opts = {}) {
 
 // A session STARTED BY a guest runs with the restricted env for its whole life — an
 // agent process's env is fixed when it spawns, so this is a property of the session, not
-// of the individual turn. A session the OWNER started keeps the owner's env even after
-// it's shared, and a guest typing into it inherits that: sharing a chat shares its
-// process. That's the documented edge of the trust model, not an accident.
+// of the individual turn. Any shared or teammate-owned session is a team session: it
+// always runs in the Bubblewrap workspace, even when the owner sends the turn.
 const sessionIsGuest = (s) => !!(s && (s.createdBy || (s.sessionId && team.sessionOwner(s.sessionId))));
+// `createdBy` alone may describe a pre-isolation legacy chat. Only records explicitly
+// marked sandboxed (or shared by the constrained share API) cross the hard boundary.
+const sessionIsTeam = (s) => !!(s && (s.teamSandbox || team.isShared(s.sessionId || s.key)));
 
 // The working directory of a session that may have no live runtime entry — sharing an old
 // chat from the list, rather than the one currently open. Falls back to the session list,
@@ -542,13 +544,14 @@ function killSessionBridge(id) {
 
 function restoreSessionBridge(id) {
   if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { started: false, reason: 'bad-id' };
+  const s = rt(id);
+  if (sessionIsTeam(s)) return { started: false, reason: 'team-sandbox' };
   try {
     if ((loadCodex().sessions || {})[id]) return { started: false, reason: 'codex-on-demand' };
   } catch {}
   const file = findSessionFile(id);
   if (!file) return { started: false, reason: 'history-not-found' };
   try {
-    const s = rt(id);
     s.sessionId = id;
     s.agent = s.agent || 'claude';
     s.cwd = s.cwd || decodeCwd(dirname(file)) || DEFAULT_CWD;
@@ -2351,6 +2354,7 @@ app.post('/api/team/members/:id/rename', requireOwner, (req, res) =>
 app.post('/api/team/workspace', requireOwner, (req, res) => {
   const dir = expandUserPath((req.body || {}).path);
   if (!dir) return res.status(400).json({ error: 'bad path' });
+  if (resolve(dir) !== resolve(team.defaultWorkspaceRoot())) return res.status(409).json({ error: 'The team workspace is fixed to the isolated shared workspace.' });
   res.json({ ok: true, workspaceRoot: team.setWorkspaceRoot(dir) });
 });
 // Share / unshare a session with the team. Unsharing takes effect immediately: any
@@ -2359,44 +2363,34 @@ app.post('/api/sessions/:id/share', requireOwner, (req, res) => {
   const id = req.params.id;
   const on = !((req.body || {}).shared === false);
   const s = RT.get(resolveKey(id));
-  // The chat's directory rides along, so a teammate ends up in the same folder instead of
-  // being clamped to the scratch root mid-conversation. Some directories can't be admitted
-  // (home, /etc, …) — when that happens the chat is still shared, and we say why rather
-  // than silently sharing a conversation nobody else can actually work in.
+  // Sharing never admits a host checkout. Migrate its artifacts into the shared workspace
+  // first, then start a fresh team session there.
   const cwd = on ? (s && s.cwd) || sessionCwd(id) : '';
-  team.setShared(id, on, 'owner', cwd);
-  let rootError = '';
-  if (on && cwd && !team.withinWorkspace(cwd)) rootError = team.rootRejection(cwd) || 'that directory could not be added';
+  if (on && !team.withinWorkspace(cwd)) return res.status(409).json({ error: 'Move artifacts into the shared team workspace before sharing this chat.' });
+  if (!team.setShared(id, on, 'owner', cwd)) return res.status(400).json({ error: 'Could not share this session.' });
   if (!on) evictGuestsFromSession(id);
   if (s) bcast(s, { type: 'share', shared: on });
-  if (on && cwd && !rootError) console.log(`[team] shared ${id} (${cwd})`);
+  if (on && cwd) console.log(`[team] shared ${id} (${cwd})`);
   invalidateSessionLists();
-  res.json({ ok: true, shared: on, cwd: cwd || null, rootError: rootError || undefined });
+  res.json({ ok: true, shared: on, cwd: cwd || null });
 });
 
-// Directories the team may reach, beyond the scratch workspace. Most get here implicitly
-// by sharing a chat; this is the manual door for "let them into this repo" on its own.
+// Kept as explicit 409s for older clients. Team sessions have one fixed workspace; no
+// request can add another host directory to their mount namespace.
 app.get('/api/team/roots', requireAuth, (req, res) =>
   res.json({ workspaceRoot: team.workspaceRoot(), roots: team.listRoots() }));
 app.post('/api/team/roots', requireOwner, (req, res) => {
-  const dir = expandUserPath((req.body || {}).path);
-  if (!dir) return res.status(400).json({ error: 'bad path' });
-  const out = team.addRoot(dir, 'owner', false);
-  if (!out.ok) return res.status(400).json({ error: out.error });
-  res.json({ ok: true, root: out.root, roots: team.listRoots() });
+  res.status(409).json({ error: 'Only the shared team workspace is available.' });
 });
 app.delete('/api/team/roots', requireOwner, (req, res) => {
-  const dir = expandUserPath(req.query.path || (req.body || {}).path);
-  // No live eviction needed: containment is re-checked on every frame and every fs
-  // request, so a guest sitting in a withdrawn root is clamped on their next action.
-  res.json({ ok: team.removeRoot(dir), roots: team.listRoots() });
+  res.status(409).json({ error: 'Only the shared team workspace is available.' });
 });
 
 // Team secrets. Keys and hints go out; values never do, in any response, for anyone —
 // including the owner. Write-only by design: this is a way to hand a key to the agents,
 // not a password manager to read back from a phone.
 app.get('/api/team/secrets', requireAuth, (req, res) => res.json({ secrets: team.listSecrets() }));
-app.post('/api/team/secrets', requireAuth, (req, res) => {
+app.post('/api/team/secrets', requireOwner, (req, res) => {
   const b = req.body || {};
   const out = team.setSecret(b.key, b.value, req.principal.name || req.principal.kind, b.note);
   if (!out.ok) return res.status(400).json({ error: out.error });
@@ -2427,7 +2421,9 @@ app.get('/api/team/me', requireAuth, (req, res) => {
 app.get('/api/team/sessions', requireAuth, (req, res) => {
   const p = req.principal;
   const ids = new Set(team.sharedIds());
-  if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) if (mid === p.id) ids.add(sid);
+  if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) {
+    if (mid === p.id && sessionIsTeam(rt(sid))) ids.add(sid);
+  }
   const all = listSessions({ filter: 'all', limit: 10000 }).sessions;
   const byId = new Map(all.map((s) => [s.id, s]));
   const sessions = [...ids].map((id) => {
@@ -2435,7 +2431,7 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
     if (!s) return null;
     return {
       id: s.id, title: s.title, agent: s.agent, mtime: s.mtime, status: s.status, live: s.live,
-      cwd: p.kind === 'guest' ? (team.withinWorkspace(s.cwd || '') ? s.cwd : null) : s.cwd,
+      cwd: team.withinWorkspace(s.cwd || '') ? s.cwd : null,
       shared: team.isShared(id),
       mine: team.sessionOwner(id) === p.id,
       viewers: viewersOf(id),
@@ -2444,23 +2440,12 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
   res.json({ sessions, workspaceRoot: team.workspaceRoot(), me: { id: p.id, name: p.name, color: p.color } });
 });
 
-// Workspace file browser. Every path is clamped to the team's roots — a request for
-// anything outside them is answered with the scratch root, not an error, so probing tells
-// you nothing.
+// Workspace file browser. Owner and guest requests are both clamped: this endpoint is a
+// team view, never an alternate raw host filesystem browser.
 app.get('/api/team/fs', requireAuth, (req, res) => {
   const root = team.ensureWorkspace();
-  const isGuest = req.principal.kind === 'guest';
-  const roots = team.teamRoots();
-  // With more than one root there is no single directory that contains them all, so the
-  // top level is a synthetic listing of the roots themselves rather than a real folder.
-  if (req.query.path === '@roots' || (!req.query.path && roots.length > 1)) {
-    return res.json({
-      type: 'roots', path: '@roots', root, atRoot: true, parent: null,
-      entries: roots.map((r) => ({ name: r.startsWith(HOME) ? '~' + r.slice(HOME.length) : r, path: r, dir: true, root: true })),
-    });
-  }
   const want = expandUserPath(req.query.path) || root;
-  const p = isGuest ? team.guestCwd(want) : resolve(want);
+  const p = team.guestCwd(want);
   try {
     const st = statSync(p);
     if (st.isDirectory()) {
@@ -2469,12 +2454,9 @@ app.get('/api/team/fs', requireAuth, (req, res) => {
         .map((e) => ({ name: e.name, dir: e.isDirectory() }))
         .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
       const parent = dirname(p);
-      // "At a root" means going up would leave team space. With several roots that's the
-      // signal to hand the browser back to the roots list rather than to a real parent.
-      const atRoot = roots.some((r) => resolve(r) === p);
+      const atRoot = resolve(root) === p;
       return res.json({ type: 'dir', path: p, root, atRoot,
-        parent: atRoot ? (roots.length > 1 ? '@roots' : null)
-          : (!isGuest || team.withinWorkspace(parent)) ? parent : null,
+        parent: atRoot ? null : team.withinWorkspace(parent) ? parent : null,
         entries });
     }
     if (st.size > 1_000_000) return res.json({ type: 'file', path: p, root, tooBig: true, size: st.size });
@@ -4029,12 +4011,12 @@ function rt(extKey) {
   if (!RT.has(key)) {
     let p = {};
     try { p = JSON.parse(readFileSync(qpath(key), 'utf8')); } catch {}
-    const codex = isUuid(key) ? (loadCodex().sessions || {})[key] : null;
+    const codex = (loadCodex().sessions || {})[key] || null;
     const manualTitle = isUuid(key) ? loadNames()[key] : '';
     RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (codex && codex.cwd) || null, agent: p.agent || (codex ? 'codex' : null),
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (codex && codex.title) || '',
       settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
-      context: p.context || null, createdBy: p.createdBy || null,
+      context: p.context || null, createdBy: p.createdBy || null, teamSandbox: !!p.teamSandbox,
       queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), typing: new Map(), curAuthor: null, proc: null, codexGoalProc: null, canceled: false });
   }
   return RT.get(key);
@@ -4044,7 +4026,7 @@ function persist(s) {
   // partway through the first turn, and it lands via five different engine paths — so
   // claim it here, on the one call every path already makes afterwards.
   if (s.createdBy && s.sessionId) { try { team.claimSession(s.sessionId, s.createdBy); } catch {} }
-  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, queue: s.queue, inflight: s.inflight || null })); } catch {} }
+  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, queue: s.queue, inflight: s.inflight || null })); } catch {} }
 function activityLabelForEvent(o, previous = '') {
   if (!o || !o.type) return '';
   if (o.type === 'turn_start') return 'Starting';
@@ -4330,7 +4312,7 @@ ${recentImgs.map(({ paths, caption }) => `- ${paths.join(', ')}${caption ? `\n  
   })();
 }
 function ensureTail(s, fromLine, codexFromOffset = null) {
-  if (!s.sessionId || s.tailStop || s._tailWait) return;
+  if (sessionIsTeam(s) || !s.sessionId || s.tailStop || s._tailWait) return;
   if (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId]) {
     const rec = (loadCodex().sessions || {})[s.sessionId] || {};
     const rollout = rec.transcriptPath || findCodexRollout(CODEX_HOME, s.sessionId);
@@ -4390,7 +4372,7 @@ function ensureFirstPromptLanded(s, rec, prompt, attempt = 0) {
 // chats whose sessionId resolves only after the first turn begins.
 setInterval(() => { for (const s of RT.values()) { if (s.subs.size && s.sessionId) checkWaiting(s).catch(() => {}); } }, 1200);
 async function checkWaiting(s) {
-  if (!s.sessionId || !s.subs.size) return;            // only while someone's watching this chat
+  if (sessionIsTeam(s) || !s.sessionId || !s.subs.size) return; // team has no host RC bridge
   const st = rcEngine.sessionState(s.sessionId);
   const waiting = !!(st && st.status === 'waiting');
   if (!waiting) {
@@ -4416,7 +4398,7 @@ async function checkWaiting(s) {
 }
 async function answerWaiting(extKey, sel) {
   const s = rt(extKey);
-  if (!s.sessionId) return;
+  if (sessionIsTeam(s) || !s.sessionId) return;
   try {
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
@@ -4438,8 +4420,14 @@ function killAgentProcess(proc, signal = 'SIGTERM') {
 function enqueue(extKey, msg) {
   const s = rt(extKey);
   msg.qid = randomBytes(4).toString('hex');
-  if (msg.cwd) s.cwd = msg.cwd;
-  if (msg.agent) s.agent = msg.agent;
+  if (sessionIsTeam(s)) {
+    msg.cwd = team.guestCwd(msg.cwd || s.cwd);
+    msg.agent = 'codex';
+    s.cwd = msg.cwd; s.agent = 'codex';
+  } else {
+    if (msg.cwd) s.cwd = msg.cwd;
+    if (msg.agent) s.agent = msg.agent;
+  }
   if (msg.parentId) s.parentId = msg.parentId;
   if (msg.parentTitle) s.parentTitle = msg.parentTitle;
   if (msg.title) s.title = msg.title;
@@ -4810,14 +4798,15 @@ const CODEX_TURN_TIMEOUT_MS = 45 * 60 * 1000;
 // turn is mirrored to desktop + the official app, and uses the Max subscription.
 function runTurn(s, msg) {
   return new Promise((resolve) => {
+    const teamSession = sessionIsTeam(s);
 	    if (msg.mode === 'bash') {
       const emit = (o) => bcast(s, o);
       // Bash mode is owner-only. It runs the raw string with no agent in the loop, so the
       // workspace clamp on `cwd` buys nothing — `cat ~/.ssh/id_ed25519` ignores cwd
       // entirely. A guest who needs a command can ask the agent to run it, which at least
       // goes through the agent's own tooling.
-      if (msg.byGuest) {
-        bcast(s, { type: 'bash_out', text: 'Bash mode is not available to team guests. Ask the agent to run the command instead.\n' });
+      if (teamSession) {
+        bcast(s, { type: 'bash_out', text: 'Bash mode is not available in a team session. Ask the sandboxed Codex agent to run the command instead.\n' });
         bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
         return resolve();
       }
@@ -4828,7 +4817,12 @@ function runTurn(s, msg) {
       p.on('close', (code) => { s.bashProc = null; bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: code, canceled: s.canceled }); resolve(); });
       return;
 	    }
-    if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
+	    if (teamSession && (msg.agent || s.agent) !== 'codex') {
+      bcast(s, { type: 'error', msg: 'Team sessions run only with the sandboxed Codex agent.' });
+      bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
+      return resolve();
+    }
+	    if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
@@ -4900,6 +4894,8 @@ function runTurn(s, msg) {
 	  });
 	}
 function runCodexTurn(s, msg, resolve) {
+  const teamSession = sessionIsTeam(s);
+  if (teamSession) s.cwd = team.guestCwd(s.cwd || msg.cwd);
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
   // Existing/native chats may already have a rollout watcher. Pause it while this Box-owned
   // turn runs; codexEngine is the single live source until the child exits, then finish()
@@ -4965,8 +4961,8 @@ function runCodexTurn(s, msg, resolve) {
       deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
-    if (s.sessionId) ensureTail(s);
-    if (s.sessionId && !s.canceled) triggerAttentionUpdate(s);
+    if (s.sessionId && !teamSession) ensureTail(s);
+    if (s.sessionId && !s.canceled && !teamSession) triggerAttentionUpdate(s);
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
@@ -4981,6 +4977,9 @@ function runCodexTurn(s, msg, resolve) {
     images: msg.images || [],
     settings: (s.settings || {}).codex || DEFAULT_SETTINGS.codex,
     guest: sessionIsGuest(s),
+    team: teamSession,
+    teamWorkspace: teamSession ? team.ensureWorkspace() : '',
+    teamEnv: teamSession ? team.secretsEnv() : {},
     onEvent: (ev) => {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;
@@ -4989,7 +4988,11 @@ function runCodexTurn(s, msg, resolve) {
         // Migrate the provisional entry (and its already-appended user message) onto the real
         // thread id, then drop its working marker. provKey is cleared so finish() treats this as a
         // normal (registered) turn.
-        if (provKey && provKey !== s.sessionId) { deleteRunning(provKey); migrateCodexSession(provKey, s.sessionId); }
+        if (provKey && provKey !== s.sessionId) {
+          const wasShared = team.isShared(provKey);
+          deleteRunning(provKey); migrateCodexSession(provKey, s.sessionId);
+          if (wasShared) { team.setShared(s.sessionId, true, 'owner', s.cwd); team.setShared(provKey, false); }
+        }
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
         ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
@@ -5025,7 +5028,7 @@ function runCodexTurn(s, msg, resolve) {
         // the rollout (codexContext) rather than ev.info, which is the cumulative session
         // total and would inflate the meter to "999%". Fall back to ev.info if the rollout
         // isn't readable yet (e.g. brand-new session before its first token_count flush).
-        if (s.sessionId) s.context = updateCodexContext(s.sessionId, ev.info, codexContext(s.sessionId, (s.context || {}).model || ''));
+        if (s.sessionId && !teamSession) s.context = updateCodexContext(s.sessionId, ev.info, codexContext(s.sessionId, (s.context || {}).model || ''));
         else s.context = contextFromCodexInfo(ev.info, s.context || {});
         persist(s);
         bcast(s, { type: 'context', context: s.context });
@@ -5436,8 +5439,8 @@ wss.on('connection', (ws) => {
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       broadcastPresence(s);
-      if (s.sessionId) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
-      if (s.sessionId && !s.context) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
+      if (s.sessionId && !sessionIsTeam(s)) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
+      if (s.sessionId && !s.context && !sessionIsTeam(s)) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
       ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null, archived: s.sessionId ? loadArchived().has(s.sessionId) : false, favorite: s.sessionId ? loadFavorites().has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
         me: team.authorOf(ws.principal), curAuthor: s.curAuthor || null,
         shared: s.sessionId ? team.isShared(s.sessionId) : false,
@@ -5445,8 +5448,19 @@ wss.on('connection', (ws) => {
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       const s0 = rt(m.key);
-      if (isGuest && !s0.createdBy && !s0.sessionId) s0.createdBy = ws.principal.id;
-      const shared = !!(s0.sessionId && team.isShared(s0.sessionId)) || isGuest;
+      if (isGuest && s0.sessionId && !sessionIsTeam(s0)) {
+        try { ws.send(JSON.stringify({ type: 'error', msg: 'This legacy chat must be imported into the shared workspace before it can run.' })); } catch {}
+        return;
+      }
+      if (isGuest && !s0.createdBy && !s0.sessionId) {
+        s0.createdBy = ws.principal.id;
+        s0.teamSandbox = true;
+        s0.agent = 'codex';
+        s0.cwd = team.guestCwd(m.cwd || s0.cwd);
+        persist(s0);
+      }
+      const teamSession = sessionIsTeam(s0);
+      const shared = teamSession;
       // In a SHARED session the sender's name is folded into the prompt itself, so the
       // agent knows who it's answering and the durable JSONL transcript records
       // authorship for anyone replaying it later (including outside Box). A solo session
@@ -5456,7 +5470,7 @@ wss.on('connection', (ws) => {
       enqueue(m.key, {
         text: shared ? team.attributePrompt(rawText, ws.principal) : rawText,
         displayText: m.displayText != null ? m.displayText : (shared ? rawText : undefined),
-        author, images: m.images || [], mode: m.mode || 'normal', agent: m.agent || 'claude',
+        author, images: m.images || [], mode: m.mode || 'normal', agent: teamSession ? 'codex' : (m.agent || 'claude'),
         // Who sent THIS turn, as opposed to who owns the session — bash mode is refused
         // per-turn, so a guest can't shell out through a chat the owner started.
         byGuest: isGuest,
@@ -5464,7 +5478,7 @@ wss.on('connection', (ws) => {
         // cwd the client asks for; the clamp is here on the server, never in the UI. Since
         // sharing a chat admits its folder, this normally leaves a shared chat exactly where
         // the owner left it — the clamp only bites on a directory nobody shared.
-        cwd: isGuest ? team.guestCwd(m.cwd) : m.cwd,
+        cwd: teamSession ? team.guestCwd(m.cwd || s0.cwd) : m.cwd,
         force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
       });
       if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
@@ -5481,8 +5495,10 @@ wss.on('connection', (ws) => {
       s.settings = normalizeSettings(m.settings || s.settings || {});
       // A guest must not be able to relocate a session out of the team's folders by
       // pushing a settings frame — clamp before the directory check, not after.
-      const nextCwd = isGuest ? team.guestCwd(expandUserPath(m.cwd)) : expandUserPath(m.cwd);
+      const teamSession = sessionIsTeam(s);
+      const nextCwd = teamSession ? team.guestCwd(expandUserPath(m.cwd || s.cwd)) : (isGuest ? team.guestCwd(expandUserPath(m.cwd)) : expandUserPath(m.cwd));
       if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;
+      if (teamSession) s.agent = 'codex';
       persist(s);
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
