@@ -222,6 +222,14 @@ export const publicMember = (m) => m && ({
 
 export const listMembers = () => loadTeam().members.map(publicMember);
 
+// Optional host-level execution identity.  This is deliberately not exposed to clients:
+// it is a local operator mapping, not part of the Team API or an authentication claim.
+export function systemUserForMember(id) {
+  const m = loadTeam().members.find((x) => x.id === String(id || '') && !x.revokedAt);
+  const user = String(m?.systemUser || '');
+  return /^box-[a-z][a-z0-9-]{0,30}$/.test(user) ? user : '';
+}
+
 export function revokeMember(id) {
   const t = loadTeam();
   const m = t.members.find((x) => x.id === id);

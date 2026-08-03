@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Root-owned, sudo-whitelisted launcher for Box Team guest turns.  It accepts only
+# Codex arguments after `--` and builds every Bubblewrap mount itself.
+set -euo pipefail
+
+CONFIG=/etc/box-team-sandbox.conf
+CODEX=/home/factory/.npm-global/bin/codex
+BWRAP=/usr/bin/bwrap
+[[ -r "$CONFIG" ]] && source "$CONFIG"
+: "${WORKSPACE:?missing WORKSPACE in $CONFIG}"
+
+user= workspace= cwd=
+env_args=()
+while (($#)); do
+  case "$1" in
+    --user) user=${2:?}; shift 2 ;;
+    --workspace) workspace=${2:?}; shift 2 ;;
+    --cwd) cwd=${2:?}; shift 2 ;;
+    --env)
+      key=${2:?}; value=${3:?}
+      [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 64
+      env_args+=(--setenv "$key" "$value")
+      shift 3 ;;
+    --) shift; break ;;
+    *) exit 64 ;;
+  esac
+done
+[[ $# -gt 0 && "$user" =~ ^box-[a-z][a-z0-9-]{0,30}$ ]] || exit 64
+id "$user" >/dev/null
+id -nG "$user" | tr ' ' '\n' | grep -qx box-team
+root=$(realpath -e "$WORKSPACE")
+[[ "$workspace" == "$root" ]] || exit 64
+requested=$(realpath -m "$cwd")
+[[ "$requested" == "$root" || "$requested" == "$root"/* ]] || exit 64
+[[ -x "$CODEX" && -x "$BWRAP" ]] || exit 69
+
+exec /usr/sbin/runuser -u "$user" -- "$BWRAP" \
+  --die-with-parent --new-session --unshare-all --share-net --clearenv \
+  --setenv HOME /workspace/.box-runtime --setenv PATH /opt/box-tools/node-global/bin:/usr/local/bin:/usr/bin:/bin \
+  --setenv TMPDIR /tmp --setenv LANG C.UTF-8 "${env_args[@]}" \
+  --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+  --ro-bind /home/factory/.npm-global /opt/box-tools/node-global \
+  --dir /etc --dir /etc/ssl --ro-bind /etc/resolv.conf /etc/resolv.conf \
+  --ro-bind /etc/hosts /etc/hosts --ro-bind /etc/ssl/certs /etc/ssl/certs \
+  --bind "$root" /workspace --dir /home --dir /home/team \
+  --proc /proc --dev /dev --tmpfs /tmp --chdir "/workspace${requested#"$root"}" \
+  -- /opt/box-tools/node-global/bin/codex "$@"

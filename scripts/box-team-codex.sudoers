@@ -1,0 +1,3 @@
+# Only the root-owned fixed Team sandbox launcher may be started by Box.
+Cmnd_Alias BOX_TEAM_CODEX = /usr/local/sbin/box-team-codex *
+factory ALL=(root) NOPASSWD: BOX_TEAM_CODEX
