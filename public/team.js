@@ -575,10 +575,12 @@ async function toggleShareCurrentChat(on) {
   if (!d) return;
   cur.shared = !!d.shared;
   renderPresence();
-  if (d.rootError) return toast(d.rootError, 6000);
   // The server broadcasts `share` to every subscriber (us included) and app.js toasts
   // on that. Only toast here if we're not actually listening.
-  if (!ws || ws.readyState !== 1) toast(d.shared ? 'Shared with your team' : 'No longer shared');
+  if (!ws || ws.readyState !== 1) {
+    const copied = Number(d.artifacts && d.artifacts.copied) || 0;
+    toast(d.shared ? (copied ? `Shared — copied ${copied} attached ${copied === 1 ? 'file' : 'files'} to team space` : 'Shared with your team') : 'No longer shared');
+  }
   if (typeof refreshSessionsSoon === 'function') refreshSessionsSoon(150);
 }
 

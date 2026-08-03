@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { spawn, execSync, execFile } from 'node:child_process';
 import {
   readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, unlinkSync,
-  openSync, readSync, closeSync, renameSync, chmodSync,
+  openSync, readSync, closeSync, renameSync, chmodSync, copyFileSync, realpathSync,
 } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
@@ -514,7 +514,7 @@ function reconcileLiveBridges() {
 // the dtach master + claude child (both carry the session id in argv — curated bridges
 // live at /tmp/cc-rc-<rcName>.dtach, box-local ones at /tmp/cc-box-<id>.dtach), and
 // (3) remove the now-stale sockets. Idempotent + best-effort: missing pieces are fine.
-function killSessionBridge(id) {
+function killSessionBridge(id, { force = false } = {}) {
   if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { killed: 0 };
   let rcName = null;
   try { const rc = readRcRegistry(); if (rc[id]) rcName = rc[id].rcName; } catch {}
@@ -546,8 +546,8 @@ function killSessionBridge(id) {
       if (pid && pid !== process.pid) pids.push(pid);
     }
   } catch {}
-  for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch {} }
-  if (pids.length) setTimeout(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 3000).unref?.();
+  for (const pid of pids) { try { process.kill(pid, force ? 'SIGKILL' : 'SIGTERM'); } catch {} }
+  if (pids.length && !force) setTimeout(() => { for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} } }, 3000).unref?.();
   // Box-local sockets are keyed by the FIRST 8 hex chars of the id (rc-engine rcSockPath:
   // /tmp/cc-box-<id8>.dtach), NOT the full uuid — use the engine's own path so the stale
   // socket is actually removed (the old full-id path never matched, leaving a dead socket
@@ -1097,6 +1097,95 @@ function fullSessionHistory(id) {
     messages: parseJsonlMessages(raw),
     mutable: false,
   };
+}
+
+const MAX_SHARED_ARTIFACT_BYTES = 25 * 1024 * 1024;
+
+function shareConversation(id) {
+  const codex = (loadCodex().sessions || {})[id];
+  if (codex) {
+    return {
+      title: codex.title || 'Codex chat',
+      agent: 'codex',
+      messages: enrichCodexHistory(id, loadCodexMessages(id, codex), { attachments: true, toolResults: true }),
+    };
+  }
+  const history = fullSessionHistory(id);
+  return { title: history.title, agent: history.agent, messages: history.messages || [] };
+}
+
+function attachedArtifactPaths(id, messages) {
+  const paths = [];
+  for (const message of messages || []) {
+    for (const part of message && message.parts || []) {
+      if ((part.t === 'file' || part.t === 'image') && part.path) paths.push(String(part.path));
+    }
+  }
+  // A rollout can have an attachment even when an older stored message has not yet been
+  // enriched with it. These are still explicit user attachments, never a cwd crawl.
+  for (const row of codexRolloutUserAttachments(id)) paths.push(...(row.attachments || []).map(String));
+  return [...new Set(paths)];
+}
+
+function pathInside(path, root) {
+  return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
+}
+
+function sharedArtifactTarget(dir, source, used) {
+  let name = basename(source).replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^\.+/, '');
+  if (!name) name = 'attachment';
+  name = name.slice(0, 120);
+  const extension = extname(name);
+  const stem = extension ? name.slice(0, -extension.length) : name;
+  let candidate = name, suffix = 2;
+  while (used.has(candidate) || existsSync(join(dir, candidate))) candidate = `${stem}-${suffix++}${extension}`;
+  used.add(candidate);
+  return join(dir, candidate);
+}
+
+// Sharing a private chat must not mount or copy its checkout. Instead, make a small,
+// reviewable team export: the rendered conversation plus files a participant explicitly
+// attached to it. realpath + root checks prevent an attachment symlink from smuggling a
+// host secret out of the private space.
+function copySessionArtifactsToTeam(id, sourceCwd) {
+  const conversation = shareConversation(id);
+  const safeId = String(id).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'session';
+  const destination = join(team.ensureWorkspace(), 'sessions', safeId);
+  const attachmentDir = join(destination, 'attachments');
+  mkdirSync(attachmentDir, { recursive: true });
+  writeFileSync(join(destination, 'conversation.md'), conversationMarkdown(conversation));
+
+  const allowedRoots = [UPLOAD_DIR, sourceCwd].map((root) => {
+    try { return root ? realpathSync(root) : null; } catch { return null; }
+  }).filter(Boolean);
+  const copied = [], skipped = [], seenSources = new Set(), names = new Set();
+  for (const candidate of attachedArtifactPaths(id, conversation.messages)) {
+    let source;
+    try { source = realpathSync(candidate); } catch { skipped.push('unavailable'); continue; }
+    if (seenSources.has(source)) continue;
+    seenSources.add(source);
+    if (!allowedRoots.some((root) => pathInside(source, root))) { skipped.push('outside allowed roots'); continue; }
+    let stat;
+    try { stat = statSync(source); } catch { skipped.push('unavailable'); continue; }
+    if (!stat.isFile()) { skipped.push('not a file'); continue; }
+    if (stat.size > MAX_SHARED_ARTIFACT_BYTES) { skipped.push('too large'); continue; }
+    try {
+      const target = sharedArtifactTarget(attachmentDir, source, names);
+      copyFileSync(source, target);
+      copied.push(basename(target));
+    } catch { skipped.push('copy failed'); }
+  }
+  writeFileSync(join(destination, 'README.md'), [
+    '# Shared session copy',
+    '',
+    'Box created this isolated team copy when the private chat was shared.',
+    '- `conversation.md` contains the shared conversation.',
+    '- `attachments/` contains files explicitly attached to the chat that were safe to copy.',
+    '',
+    'The original working directory and checkout remain private; they were not copied or mounted here.',
+    '',
+  ].join('\n'));
+  return { cwd: destination, copied, skipped };
 }
 function codexSessionMentionCount(session, issueId) {
   let n = 0;
@@ -2387,17 +2476,52 @@ app.post('/api/team/workspace', requireOwner, (req, res) => {
 app.post('/api/sessions/:id/share', requireOwner, (req, res) => {
   const id = req.params.id;
   const on = !((req.body || {}).shared === false);
-  const s = RT.get(resolveKey(id));
-  // Sharing never admits a host checkout. Migrate its artifacts into the shared workspace
-  // first, then start a fresh team session there.
-  const cwd = on ? (s && s.cwd) || sessionCwd(id) : '';
-  if (on && !team.withinWorkspace(cwd)) return res.status(409).json({ error: 'Move artifacts into the shared team workspace before sharing this chat.' });
+  const existing = RT.get(resolveKey(id));
+  const s = existing || (on ? rt(id) : null);
+  let cwd = '';
+  let migration = null;
+  if (on) {
+    const sourceCwd = (s && s.cwd) || sessionCwd(id);
+    try {
+      if (team.withinWorkspace(sourceCwd)) cwd = team.guestCwd(sourceCwd);
+      else {
+        migration = copySessionArtifactsToTeam(id, sourceCwd);
+        cwd = migration.cwd;
+      }
+    } catch (error) {
+      console.error(`[team] could not prepare shared copy for ${id}: ${String(error && error.message || error).slice(0, 160)}`);
+      return res.status(500).json({ error: 'Could not prepare an isolated team copy of this chat.' });
+    }
+    // A private process may have the original host directory open. Stop it before the
+    // session becomes team-visible; the next turn starts fresh in the isolated copy.
+    if (s && !team.isShared(id)) {
+      // Clear before cancelCurrent resolves the worker: a queued private prompt must
+      // never be picked up as a team turn during the handoff.
+      s.queue = [];
+      s.inflight = null;
+      cancelCurrent(s.key);
+      killAgentProcess(s.proc, 'SIGKILL');
+      killAgentProcess(s.bashProc, 'SIGKILL');
+      killAgentProcess(s.codexGoalProc, 'SIGKILL');
+      if (s.sessionId) terminateUnmanagedCodexThread(s.sessionId, 'SIGKILL');
+      killSessionBridge(id, { force: true });
+      stopTail(s);
+      s.cwd = cwd;
+      s.agent = 'codex';
+      persist(s);
+    }
+  }
   if (!team.setShared(id, on, 'owner', cwd)) return res.status(400).json({ error: 'Could not share this session.' });
   if (!on) evictGuestsFromSession(id);
-  if (s) bcast(s, { type: 'share', shared: on });
+  if (s) bcast(s, { type: 'share', shared: on, cwd: cwd || null });
   if (on && cwd) console.log(`[team] shared ${id} (${cwd})`);
   invalidateSessionLists();
-  res.json({ ok: true, shared: on, cwd: cwd || null });
+  res.json({
+    ok: true,
+    shared: on,
+    cwd: cwd || null,
+    artifacts: migration ? { copied: migration.copied.length, skipped: migration.skipped.length } : null,
+  });
 });
 
 // Kept as explicit 409s for older clients. Team sessions have one fixed workspace; no
@@ -5011,7 +5135,7 @@ function runCodexTurn(s, msg, resolve) {
       deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
-    if (s.sessionId && !teamSession) ensureTail(s);
+    if (s.sessionId && !sessionIsTeam(s)) ensureTail(s);
     if (s.sessionId && !s.canceled && !teamSession) triggerAttentionUpdate(s);
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
