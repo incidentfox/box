@@ -571,6 +571,12 @@ export function deleteSecret(key) {
 // scoped: storing both API keys must not hand an Anthropic key to a Codex process (or
 // vice versa). Other explicitly-added team variables remain available to either
 // sandboxed runner.
+export const HOST_IMPORTABLE_SECRET_KEYS = Object.freeze([
+  'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
+  'LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET',
+  'RETELL_API_KEY', 'RETELL_AGENT_ID', 'RETELL_FROM_NUMBER', 'RETELL_PHONE',
+]);
+
 export function secretsEnv({ provider = '' } = {}) {
   const { secrets } = loadSecrets();
   const out = {};
