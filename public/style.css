@@ -1333,3 +1333,77 @@ textarea.acctInput { resize: vertical; }
 @keyframes voBreathe { 50% { transform: scale(calc(var(--lvl) * 1.05)); } }
 .voOrbLabel { position: absolute; bottom: -4px; left: 0; right: 0; text-align: center; font-size: 13px; color: var(--muted); pointer-events: none; }
 .voOrbBtn.clickable .voOrbLabel { color: var(--ink); font-weight: 600; }
+
+/* ---------- team / shared sessions ---------- */
+
+/* Author attribution. In a solo chat nothing changes: badges only exist once a
+   message has a known sender, and the classes that flip the bubble layout are only
+   applied then. In a shared chat the split is the whole point — your own prompts stay
+   on the right in the familiar bubble, a teammate's mirror to the left. */
+.msgAuthor { display: flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 650; color: var(--muted); margin: 0 0 5px; }
+.msgAuthorDot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.msgAuthorRole { font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--subtle-2); border-radius: 5px; padding: 1px 4px; }
+.msg.user.fromMe, .msg.user.fromOther { display: flex; flex-direction: column; }
+.msg.user.fromMe .msgAuthor, .msg.user.fromOther .msgAuthor { order: -1; }
+.msg.user.fromOther { align-self: flex-start; background: var(--subtle-2); border: 1px solid var(--line); border-radius: 16px 16px 16px 5px; }
+
+/* Presence strip, directly above the context meter. Hidden entirely in a private
+   solo chat — it should cost nothing when there's no one to show. */
+.presenceBar { flex: none; display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-bottom: 1px solid var(--line); background: var(--subtle); font-size: 11.5px; font-weight: 600; color: var(--muted); overflow-x: auto; white-space: nowrap; }
+.presShared { flex: none; font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 6px; padding: 1px 5px; }
+.presPerson { flex: none; display: inline-flex; align-items: center; gap: 5px; color: var(--ink); }
+.presDot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
+.presMuted { color: var(--muted); font-weight: 500; }
+.presTyping { color: var(--accent); font-weight: 600; font-style: italic; }
+.qchip .qmode.qwho { color: #fff; background: var(--muted); border-radius: 5px; padding: 1px 5px; text-transform: none; letter-spacing: 0; }
+
+/* A guest's app is the same app with most of it removed; this only softens the seams
+   the JS leaves behind. Capability gating itself is server-side — never CSS. */
+body.guestMode .sSelect, body.guestMode .sMore { display: none; }
+.linkbtn { color: var(--accent); font-size: 14px; font-weight: 600; padding: 10px 6px; background: none; border: none; }
+.linkbtn:active { opacity: .6; }
+
+.teamBody { display: flex; flex-direction: column; gap: 14px; padding-top: 14px; }
+.tCard { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 14px 15px 12px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 1px 3px rgba(40,30,20,.05); }
+.tCardHead { display: flex; flex-direction: column; gap: 2px; }
+.tCardTitle { font-size: 16px; font-weight: 700; }
+.tCardSub { font-size: 12.5px; color: var(--muted); }
+.tSubHead { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 8px 0 -2px; }
+.tNote { font-size: 13px; line-height: 1.45; color: var(--muted); }
+
+.tRow { display: flex; align-items: center; gap: 9px; padding: 9px 0; border-top: 1px solid var(--line); min-width: 0; }
+.tCardHead + .tRow, .tSubHead + .tRow, .tRow:first-child { border-top: none; }
+.tRowTap { cursor: pointer; }
+.tRowTap:active { background: var(--subtle); }
+.tRowIc { flex: none; width: 20px; display: grid; place-items: center; color: var(--muted); }
+.tRowIc svg { width: 18px; height: 18px; }
+.tRowIc.live { color: var(--green); }
+.tRowHd { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tRowName { flex: 1; min-width: 0; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tRowMeta { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); overflow: hidden; }
+.tMono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--muted); direction: rtl; text-align: left; }
+.tTag { font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; background: var(--subtle-2); border-radius: 5px; padding: 1px 4px; color: var(--muted); }
+.tDot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); opacity: .35; }
+.tDot.on { opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 22%, transparent); }
+.tPeople { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 4px 0 2px; }
+.tPerson { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+
+.tBtn { flex: none; border-radius: 10px; padding: 8px 12px; font-size: 13px; font-weight: 650; background: var(--subtle-2); color: var(--ink); }
+.tBtn:active { opacity: .65; }
+.tBtn.primary { width: 100%; margin-top: 4px; padding: 12px; font-size: 14.5px; background: var(--accent); color: #fff; border-radius: 12px; }
+.tBtn.ghost { background: none; color: var(--accent); padding: 8px 8px; }
+.tBtn.danger { background: #c0392b; color: #fff; }
+.tBtn.ghost.danger { background: none; color: #c0392b; }
+.tFoot { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 4px; }
+
+.tCode { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 700; letter-spacing: .04em; background: var(--subtle-2); border-radius: 7px; padding: 4px 7px; flex: none; }
+.tCodeBig { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: clamp(20px, 7vw, 28px); font-weight: 700; letter-spacing: .08em; text-align: center; padding: 16px 8px; margin: 4px 0 10px; background: var(--subtle-2); border-radius: 14px; -webkit-user-select: text; user-select: text; }
+
+.tForm { display: flex; flex-direction: column; gap: 12px; margin: 8px 0 4px; }
+.tField { display: flex; flex-direction: column; gap: 5px; }
+.tFieldLabel { font-size: 12.5px; font-weight: 650; color: var(--muted); }
+.tField input { width: 100%; height: 44px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--ink); padding: 0 12px; font-size: 16px; outline: none; }
+.tField input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.tFieldHint { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.tFormErr { color: #c0392b; font-size: 13px; min-height: 0; }
+.tFormErr:empty { display: none; }

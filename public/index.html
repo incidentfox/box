@@ -29,6 +29,7 @@
   <input id="tokenInput" type="password" placeholder="access token" autocomplete="off" />
   <button id="loginBtn" class="primary">Connect</button>
   <p id="loginErr" class="err"></p>
+  <button id="joinTeamLink" class="linkbtn" type="button">Have an invite code? Join a team</button>
 </section>
 
 <!-- SESSIONS -->
@@ -38,6 +39,7 @@
     <button id="sidebarCollapseBtn" class="iconbtn ghost sidebarToggle" title="collapse sidebar" data-icon="sidebar-collapse"></button>
     <div class="spacer"></div>
     <button id="sessSearchBtn" class="iconbtn ghost" title="search chats" data-icon="search"></button>
+    <button id="teamBtn" class="iconbtn ghost" title="team" data-icon="team" style="display:none"></button>
     <button id="settingsBtn" class="iconbtn ghost" title="settings" data-icon="settings"></button>
     <button id="themeBtn" class="iconbtn ghost" title="theme" data-icon="moon"></button>
     <button id="boardBtn" class="iconbtn ghost" title="Linear board" data-icon="board"></button>
@@ -61,6 +63,33 @@
 
 <!-- VOICE ASSISTANT (contents built by voice.js on first open) -->
 <section id="voice" class="screen hidden"></section>
+
+<!-- TEAM — shared sessions, shared workspace, members (built by team.js) -->
+<section id="team" class="screen hidden">
+  <header class="bar">
+    <button id="teamBack" class="iconbtn ghost" data-icon="back"></button>
+    <strong class="ctitle">Team</strong>
+    <div class="spacer"></div>
+    <button id="teamFilesBtn" class="iconbtn ghost" title="shared workspace" data-icon="folder"></button>
+    <button id="teamRefresh" class="iconbtn ghost" title="refresh" data-icon="arrow-down"></button>
+  </header>
+  <div id="teamBody" class="list teamBody"></div>
+</section>
+
+<!-- SHARED WORKSPACE FILE BROWSER (scoped to the team folder on the host box) -->
+<div id="teamFiles" class="explorer hidden">
+  <header class="bar">
+    <button id="tfClose" class="iconbtn ghost" data-icon="back"></button>
+    <strong id="tfPath" class="ctitle">Shared workspace</strong>
+    <div class="spacer"></div>
+    <button id="tfUp" class="iconbtn ghost" title="up" data-icon="arrow-up-dir"></button>
+  </header>
+  <div id="tfList" class="list"></div>
+  <div id="tfReader" class="reader hidden">
+    <div class="readerBar"><button id="tfReaderBack" class="iconbtn ghost" data-icon="back"></button><strong id="tfReaderName"></strong><div class="spacer"></div><button id="tfReaderAt" class="chip small"><span data-icon="at"></span>insert</button></div>
+    <div id="tfReaderBody"></div>
+  </div>
+</div>
 
 <section id="pipelines" class="screen hidden">
   <header class="bar">
@@ -136,6 +165,8 @@
     <button id="attnBtn" class="iconbtn ghost" title="needs attention" style="position:relative"><span id="attnBadge" class="attnBadge hidden"></span></button>
   </header>
 
+  <!-- who else is in this shared chat right now (empty + hidden on a solo box) -->
+  <div id="presenceBar" class="presenceBar hidden"></div>
   <div id="contextMeter" class="contextMeter" title="Context used before compaction"></div>
   <div id="linearBar" class="linearBar hidden"></div>
   <div id="sessionModes" class="sessionModes hidden" aria-label="Active goal and schedules"></div>
@@ -246,6 +277,7 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/team.js"></script>
 <script src="/voice-notify-queue.js"></script>
 <script src="/voice.js"></script>
 </body>
