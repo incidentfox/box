@@ -18,6 +18,7 @@ function fakeSpawn(command, args) {
     if (message.method === 'initialize') queueMicrotask(() => child.stdout.emit('data', '{"id":0,"result":{"codexHome":"/tmp"}}\n'));
     if (message.method === 'thread/resume') queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify({ id: 1, result: { thread: { id: message.params.threadId } } })}\n`));
     if (message.method === 'thread/goal/get') queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify({ id: message.id, result: { goal: { status: 'active' } } })}\n`));
+    if (message.method === 'thread/goal/set') queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify({ id: message.id, result: { goal: { objective: message.params.objective, status: message.params.status } } })}\n`));
   } };
   child.writes = writes;
   children.push(child);
@@ -35,6 +36,15 @@ assert.deepEqual(children[1].writes.map(({ method, id, params }) => ({ method, i
   { method: 'initialized', id: undefined, params: {} },
   { method: 'thread/resume', id: 1, params: { threadId: 'thread-2' } },
   { method: 'thread/goal/get', id: 2, params: { threadId: 'thread-2' } },
+]);
+
+const updatedGoal = await rpc('thread/goal/set', { threadId: 'thread-3', objective: 'Keep working', status: 'active' }, { resumeThreadId: 'thread-3' });
+assert.deepEqual(updatedGoal, { goal: { objective: 'Keep working', status: 'active' } });
+assert.deepEqual(children[2].writes.map(({ method, id, params }) => ({ method, id, params })), [
+  { method: 'initialize', id: 0, params: { clientInfo: { name: 'box', title: 'Box', version: '1' }, capabilities: { experimentalApi: true } } },
+  { method: 'initialized', id: undefined, params: {} },
+  { method: 'thread/resume', id: 1, params: { threadId: 'thread-3' } },
+  { method: 'thread/goal/set', id: 2, params: { threadId: 'thread-3', objective: 'Keep working', status: 'active' } },
 ]);
 
 console.log('codex app-server client ok');
