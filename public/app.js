@@ -796,13 +796,13 @@ function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); n
 
 /* ---------- sessions ---------- */
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)
-let allSessions = [], sessionCounts = { all: 0 }, curFilter = 'all';
+let allSessions = [], sessionCounts = { all: 0, team: 0 }, curFilter = 'all';
 let chatRenderSeq = 0;
 let sessionRefreshTimer = null;
 let lastSessionFetchAt = 0;
 let bulkMode = false;
 const bulkSelected = new Set();
-const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
+const STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['team', 'Team'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
 // subcategories shown as a second chip row when the Automated tab is active
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
@@ -811,13 +811,13 @@ async function openSessions(filter = 'all') {
   // A guest can't enumerate this box's chats (the server refuses), and shouldn't want to —
   // the Team screen is their home screen.
   if (isGuestHere()) return openTeam();
-  // Preserve old bookmarked URLs without reintroducing a parallel team feed.
-  if (filter === 'shared') filter = 'all';
+  // Preserve old bookmarked URLs, now pointing at the dedicated Team tab.
+  if (filter === 'shared') filter = 'team';
   navTo({ view: 'sessions', filter }); show('sessions'); await fetchSessions(filter);
 }
 let lastSessionRenderSig = '';
 async function fetchSessions(filter) {
-  if (filter === 'shared') filter = 'all';
+  if (filter === 'shared') filter = 'team';
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + curFilter)).json();
   lastSessionFetchAt = Date.now();
@@ -848,7 +848,9 @@ function renderTabs() {
   const c = sessionCounts; const wrap = $('tabs'); wrap.innerHTML = '';
   const base = curFilter.split(':')[0];
   for (const [k, label] of STATUS_TABS) {
-    if (k !== 'all' && !c[k] && base !== k) continue;
+    // Team is a destination, not a transient status: keep it available even before
+    // the first shared session exists.
+    if (k !== 'all' && k !== 'team' && !c[k] && base !== k) continue;
     const t = document.createElement('button'); t.className = 'tab' + (base === k ? ' on' : '');
     t.innerHTML = `${label}<span class="tcount">${c[k] || 0}</span>`;
     t.onclick = () => fetchSessions(k);
