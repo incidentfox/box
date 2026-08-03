@@ -97,6 +97,9 @@ for (const item of IMPORTS) {
   state.sessions[item.id] = {
     ...sourceMeta,
     id: item.id,
+    // Keep the durable record unambiguously in the hardened execution class,
+    // even if the shared-session index is ever repaired or rebuilt.
+    teamSandbox: true,
     title: `Imported — ${source.title || item.title}`,
     cwd: destination,
     importedFrom: item.sourceId,
