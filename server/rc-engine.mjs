@@ -653,7 +653,16 @@ export function parseEntry(o) {
         else if (b.type === 'tool_use') out.push({ kind: 'tool', id: b.id, name: b.name, input: b.input, uuid: o.uuid, ts: o.timestamp });
       }
     }
-    if (stop === 'end_turn' || stop === 'stop_sequence') out.push({ kind: 'turn_end', uuid: o.uuid, ts: o.timestamp });
+    // ONE assistant message is written as SEVERAL rows — one per content block — and every
+    // row repeats the message's stop_reason. A final answer that thought first therefore
+    // lands as a `thinking` row saying `end_turn`, then the `text` row holding the answer.
+    // Ending the turn on the thinking row emits `done` BEFORE the answer: the client
+    // finalises the turn while its live text buffer is still empty (reset by the preceding
+    // tool chip), so the answer's block renders blank and the late text opens an orphan
+    // bubble. A thinking-only row is never the last row of its message, so it never ends a
+    // turn. Rows with no content keep the old behaviour — there is no answer still coming.
+    const thinkingOnly = out.length > 0 && out.every((e) => e.kind === 'thinking');
+    if ((stop === 'end_turn' || stop === 'stop_sequence') && !thinkingOnly) out.push({ kind: 'turn_end', uuid: o.uuid, ts: o.timestamp });
   } else if (o.type === 'attachment') {
     out.push({ kind: 'attachment', uuid: o.uuid, ts: o.timestamp });
   } else if (o.type === 'system' && o.subtype === 'api_error') {
