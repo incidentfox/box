@@ -238,7 +238,7 @@ function renderRoute(s) {
         if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote, team: !!s.remote });
         else if (s.new) {
           const teamNew = !!s.team || !!s.remote;
-          openChat({ id: null, title: 'New chat', cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent: teamNew ? 'codex' : configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: teamNew, team: teamNew });
+          openChat({ id: null, title: 'New chat', cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent: teamNew ? (s.agent === 'claude' ? 'claude' : 'codex') : configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: teamNew, team: teamNew });
         }
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
         else openSessions();
@@ -1473,11 +1473,11 @@ $('newBtn').onclick = () => {
   };
   const teamNew = curFilter === 'team' || isGuestHere();
   const def = teamNew ? 'codex' : configuredDefaultAgent();
-  const order = (teamNew ? ['codex'] : [def, 'codex', 'claude', 'gemini', 'agy', 'mac']).filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
+  const order = (teamNew ? ['codex', 'claude'] : [def, 'codex', 'claude', 'gemini', 'agy', 'mac']).filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
   const rows = order.map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
-    desc: teamNew ? 'Shared team workspace · sandboxed' : (agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0]),
+    desc: teamNew ? 'Shared team workspace · OS-sandboxed' : (agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0]),
     fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent, shared: teamNew, team: teamNew }); },
   }));
   openSheet('New chat', rows);

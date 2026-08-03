@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Root-owned, sudo-whitelisted launcher for Box Team guest turns.  It accepts only
-# Codex arguments after `--` and builds every Bubblewrap mount itself.
+# agent arguments after `--` and builds every Bubblewrap mount itself.
 set -euo pipefail
 
 CONFIG=/etc/box-team-sandbox.conf
 CODEX=/home/factory/.npm-global/bin/codex
+CLAUDE=/usr/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude
 BWRAP=/usr/bin/bwrap
 [[ -r "$CONFIG" ]] && source "$CONFIG"
 : "${WORKSPACE:?missing WORKSPACE in $CONFIG}"
 
-user= workspace= cwd=
+user= workspace= cwd= runtime=codex
 env_args=()
 while (($#)); do
   case "$1" in
+    --runtime) runtime=${2:?}; shift 2 ;;
     --user) user=${2:?}; shift 2 ;;
     --workspace) workspace=${2:?}; shift 2 ;;
     --cwd) cwd=${2:?}; shift 2 ;;
@@ -32,7 +34,12 @@ root=$(realpath -e "$WORKSPACE")
 [[ "$workspace" == "$root" ]] || exit 64
 requested=$(realpath -m "$cwd")
 [[ "$requested" == "$root" || "$requested" == "$root"/* ]] || exit 64
-[[ -x "$CODEX" && -x "$BWRAP" ]] || exit 69
+case "$runtime" in
+  codex) runtime_host=$CODEX; runtime_bin=/opt/box-tools/node-global/bin/codex ;;
+  claude) runtime_host=$CLAUDE; runtime_bin=$CLAUDE ;;
+  *) exit 64 ;;
+esac
+[[ -x "$runtime_host" && -x "$BWRAP" ]] || exit 69
 
 exec /usr/sbin/runuser -u "$user" -- "$BWRAP" \
   --die-with-parent --new-session --unshare-all --share-net --clearenv \
@@ -44,4 +51,4 @@ exec /usr/sbin/runuser -u "$user" -- "$BWRAP" \
   --ro-bind /etc/hosts /etc/hosts --ro-bind /etc/ssl/certs /etc/ssl/certs \
   --bind "$root" /workspace --dir /home --dir /home/team \
   --proc /proc --dev /dev --tmpfs /tmp --chdir "/workspace${requested#"$root"}" \
-  -- /opt/box-tools/node-global/bin/codex "$@"
+  -- "$runtime_bin" "$@"

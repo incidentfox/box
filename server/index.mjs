@@ -24,6 +24,7 @@ import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
+import { ClaudeExecEngine } from './claude-exec-engine.mjs';
 import { codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-processes.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
@@ -51,6 +52,7 @@ import * as team from './team.mjs';
 // (three-way sync). Input = injected keystrokes; rendering = the JSONL tail.
 const rcEngine = new RCEngine();
 const codexEngine = new CodexExecEngine();
+const teamClaudeEngine = new ClaudeExecEngine();
 const geminiEngine = new GeminiExecEngine();
 const agyEngine = new AgyExecEngine();
 const macEngine = new MacExecEngine();
@@ -951,6 +953,11 @@ function rememberJsonCache(file, value) {
 const CODEX_FILE = join(STATE_DIR, 'codex-sessions.json');
 const loadCodex = () => loadJsonCached(CODEX_FILE, () => ({ sessions: {} }));
 const saveCodex = (state) => { writeJsonAtomic(CODEX_FILE, state); rememberJsonCache(CODEX_FILE, state); invalidateSessionLists(); };
+// Team Claude has no host-side JSONL: its CLI runs inside the OS sandbox. Keep the
+// replayable Box transcript in a small dedicated store, separate from personal Claude.
+const TEAM_CLAUDE_FILE = join(STATE_DIR, 'team-claude-sessions.json');
+const loadTeamClaude = () => loadJsonCached(TEAM_CLAUDE_FILE, () => ({ sessions: {} }));
+const saveTeamClaude = (state) => { writeJsonAtomic(TEAM_CLAUDE_FILE, state); rememberJsonCache(TEAM_CLAUDE_FILE, state); invalidateSessionLists(); };
 // Codex transcripts live in per-session sidecar files, NOT inline in codex-sessions.json.
 // Inline transcripts grew that file to ~90MB, and saveCodex() re-stringified + rewrote ALL
 // of it on EVERY message append / streaming flush — ~1s of event-loop blockage that froze
@@ -1025,7 +1032,10 @@ function codexMessageTs(m) {
 }
 function codexUserMessagesFromSession(session) {
   const messages = [];
-  for (const m of loadCodexMessages(session && session.id, session)) {
+  const source = session && session.agent === 'codex'
+    ? loadCodexMessages(session.id, session)
+    : ((session && session.messages) || []);
+  for (const m of source) {
     if (!m || m.role !== 'user') continue;
     const text = codexMessageText(m);
     if (!text) continue;
@@ -1047,6 +1057,7 @@ function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
 }
 const SESSION_STORES = [
   { agent: 'codex', load: loadCodex, save: saveCodex },
+  { agent: 'claude', load: loadTeamClaude, save: saveTeamClaude },
   { agent: 'gemini', load: loadGemini, save: saveGemini },
   { agent: 'agy', load: loadAgy, save: saveAgy },
   { agent: 'mac', load: loadMac, save: saveMac },
@@ -1072,7 +1083,7 @@ function fullSessionHistory(id) {
       parentId: rec.parentId || null,
       parentTitle: rec.parentTitle || '',
       context: stored.agent === 'codex' ? contextForSession(id, { agent: 'codex', codex: rec }) : normalizeContext(rec.context || { agent: stored.agent }),
-      messages: rec.messages || [],
+      messages: stored.agent === 'codex' ? loadCodexMessages(id, rec) : (rec.messages || []),
       mutable: true,
     };
   }
@@ -1396,6 +1407,49 @@ function appendCodexMessage(id, role, text, extra = {}) {
   prev.lastUsed = now;
   state.sessions[id] = prev;
   saveCodex(state);
+}
+function ensureTeamClaudeSession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadTeamClaude();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  state.sessions[id] = {
+    ...prev,
+    id,
+    agent: 'claude',
+    teamSandbox: true,
+    title: attrs.title || prev.title || 'Team Claude chat',
+    cwd: attrs.cwd || prev.cwd || team.workspaceRoot(),
+    created: prev.created || now,
+    lastUsed: attrs.lastUsed || now,
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context || prev.context || normalizeContext({ agent: 'claude' }),
+    messages: Array.isArray(prev.messages) ? prev.messages.slice(-160) : [],
+  };
+  saveTeamClaude(state);
+  return state.sessions[id];
+}
+function appendTeamClaudeMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadTeamClaude();
+  const now = Date.now();
+  const prev = state.sessions[id] || {
+    id, agent: 'claude', teamSandbox: true, title: 'Team Claude chat',
+    cwd: team.workspaceRoot(), created: now, settings: normalizeSettings({}), messages: [],
+  };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  const message = { role, parts, ts: extra.ts || now };
+  if (extra.qid) message.qid = extra.qid;
+  if (extra.author) message.author = extra.author;
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'Team Claude chat')) prev.title = plain.slice(0, 80) || 'Team Claude chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.messages = [...(prev.messages || []), message].slice(-160);
+  prev.lastUsed = now;
+  state.sessions[id] = prev;
+  saveTeamClaude(state);
 }
 const codexAttachmentIsImage = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
 function codexUserParts(text, attachments = []) {
@@ -1929,6 +1983,13 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
       settings: s.settings || {}, context: s.context || null,
     });
   });
+  const teamClaudeSessions = Object.values(loadTeamClaude().sessions || {}).map((s) => ({
+    ...s,
+    id: s.id, agent: 'claude', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'Team Claude chat', cwd: s.cwd || team.workspaceRoot(), preview: s.preview || '',
+    parentId: s.parentId || null, parentTitle: s.parentTitle || '',
+    settings: s.settings || {}, context: s.context || null, teamSandbox: true,
+  }));
   const geminiSessions = Object.values(loadGemini().sessions || {}).map((s) => ({
     id: s.id, agent: 'gemini', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'Gemini chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
@@ -1945,7 +2006,7 @@ function listSessions({ limit = 40, filter = 'all', includeTeam = false } = {}) 
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
   }));
   files.sort((a, b) => b.mtime - a.mtime);
-  const items = files.concat(codexSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
+  const items = files.concat(codexSessions, teamClaudeSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
   const codexLiveIds = liveCodexSessionIds(codexSessions, codexProcessIds);
@@ -2555,7 +2616,7 @@ app.post('/api/team/secrets', requireOwner, (req, res) => {
   res.json({ ok: true, secrets: team.listSecrets() });
 });
 // This is intentionally a fixed allow-list rather than a generic environment import.
-// It lets the owner explicitly publish the two provider credentials to Team without
+// It lets the owner explicitly publish approved model and call-operation credentials to Team without
 // ever returning or logging their values. Existing team-managed keys are left intact.
 function hostProviderSecret(key) {
   const direct = String(process.env[key] || '').trim();
@@ -2569,7 +2630,7 @@ function hostProviderSecret(key) {
 app.post('/api/team/secrets/import-host', requireOwner, (req, res) => {
   const existing = new Set(team.listSecrets().map((s) => s.key));
   const imported = [], skipped = [], unavailable = [];
-  for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']) {
+  for (const key of team.HOST_IMPORTABLE_SECRET_KEYS) {
     const value = hostProviderSecret(key);
     if (!value) { unavailable.push(key); continue; }
     if (existing.has(key)) { skipped.push(key); continue; }
@@ -2713,13 +2774,14 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
   if (searches.every((s) => s.error && !s.results.length)) return res.json({ results: [], error: 'search unavailable' });
   try {
     const codexIds = new Set(Object.values(loadCodex().sessions || {}).map((s) => s.id));
+    const teamClaudeIds = new Set(Object.values(loadTeamClaude().sessions || {}).map((s) => s.id));
     const archived = loadArchived();
     const byId = new Map();
     for (const search of searches) {
       for (const r of search.results) {
         if (r.provider !== 'claude' && r.provider !== 'codex') continue;   // box can only open these
         if (exclude.has(r.id) || exclude.has(`${r.provider}:${r.id}`)) continue;
-        const openable = r.provider === 'codex' ? codexIds.has(r.id) : !!findSessionFile(r.id);
+        const openable = r.provider === 'codex' ? codexIds.has(r.id) : (teamClaudeIds.has(r.id) || !!findSessionFile(r.id));
         if (!openable) continue;                                           // skip laptop-only / unindexed hits
         const rank = sessionSearchRank(r, search.variant, queryTokens);
         const prev = byId.get(r.id);
@@ -2765,7 +2827,7 @@ app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  const stored = (loadCodex().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
+  const stored = (loadCodex().sessions || {})[req.params.id] || (loadTeamClaude().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
   if (stored) return res.json({ messages: codexUserMessagesFromSession(stored) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
@@ -2801,6 +2863,14 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     return res.send(conversationMarkdown({ title, agent: 'codex', messages }));
+  }
+  const teamClaude = (loadTeamClaude().sessions || {})[req.params.id];
+  if (teamClaude) {
+    const title = teamClaude.title || 'Team Claude chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'claude', messages: teamClaude.messages || [] }));
   }
   const gemini = (loadGemini().sessions || {})[req.params.id];
   if (gemini) {
@@ -2858,6 +2928,7 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   const id = req.params.id;
   const name = String((req.body && req.body.name) || '').slice(0, 80);
   const isCodex = !!(loadCodex().sessions || {})[id];
+  const isTeamClaude = !!(loadTeamClaude().sessions || {})[id];
   const isGemini = !!(loadGemini().sessions || {})[id];
   const isAgy = !!(loadAgy().sessions || {})[id];
   const isMac = !!(loadMac().sessions || {})[id];
@@ -2868,6 +2939,7 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   // Otherwise the list shows the override while /history, exports, and a live RT
   // session keep the old title.
   const stored = isCodex ? { state: loadCodex(), save: saveCodex }
+    : isTeamClaude ? { state: loadTeamClaude(), save: saveTeamClaude }
     : isGemini ? { state: loadGemini(), save: saveGemini }
       : isAgy ? { state: loadAgy(), save: saveAgy }
         : isMac ? { state: loadMac(), save: saveMac }
@@ -2950,6 +3022,7 @@ app.delete('/api/codex/threads/:id', ...codexControlRoute(async (id) => {
 
 function scheduledSessionAgent(id) {
   if ((loadCodex().sessions || {})[id]) return 'codex';
+  if ((loadTeamClaude().sessions || {})[id]) return 'claude';
   if ((loadGemini().sessions || {})[id]) return 'gemini';
   if ((loadAgy().sessions || {})[id]) return 'agy';
   if ((loadMac().sessions || {})[id]) return 'mac';
@@ -2958,6 +3031,7 @@ function scheduledSessionAgent(id) {
 }
 function scheduledSessionMetadata(id, agent) {
   if (agent === 'codex') return (loadCodex().sessions || {})[id] || {};
+  if (agent === 'claude' && (loadTeamClaude().sessions || {})[id]) return (loadTeamClaude().sessions || {})[id] || {};
   if (agent === 'gemini') return (loadGemini().sessions || {})[id] || {};
   if (agent === 'agy') return (loadAgy().sessions || {})[id] || {};
   if (agent === 'mac') return (loadMac().sessions || {})[id] || {};
@@ -4604,8 +4678,8 @@ function enqueue(extKey, msg) {
   msg.qid = randomBytes(4).toString('hex');
   if (sessionIsTeam(s)) {
     msg.cwd = team.guestCwd(msg.cwd || s.cwd);
-    msg.agent = 'codex';
-    s.cwd = msg.cwd; s.agent = 'codex';
+    msg.agent = ['codex', 'claude'].includes(msg.agent) ? msg.agent : (s.agent === 'claude' ? 'claude' : 'codex');
+    s.cwd = msg.cwd; s.agent = msg.agent;
   } else {
     if (msg.cwd) s.cwd = msg.cwd;
     if (msg.agent) s.agent = msg.agent;
@@ -4988,7 +5062,7 @@ function runTurn(s, msg) {
       // entirely. A guest who needs a command can ask the agent to run it, which at least
       // goes through the agent's own tooling.
       if (teamSession) {
-        bcast(s, { type: 'bash_out', text: 'Bash mode is not available in a team session. Ask the sandboxed Codex agent to run the command instead.\n' });
+        bcast(s, { type: 'bash_out', text: 'Bash mode is not available in a team session. Ask a sandboxed Team agent to run the command instead.\n' });
         bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
         return resolve();
       }
@@ -4999,12 +5073,14 @@ function runTurn(s, msg) {
       p.on('close', (code) => { s.bashProc = null; bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: code, canceled: s.canceled }); resolve(); });
       return;
 	    }
-	    if (teamSession && (msg.agent || s.agent) !== 'codex') {
-      bcast(s, { type: 'error', msg: 'Team sessions run only with the sandboxed Codex agent.' });
+    const requestedAgent = msg.agent || s.agent || 'claude';
+    if (teamSession && !['codex', 'claude'].includes(requestedAgent)) {
+      bcast(s, { type: 'error', msg: 'Team sessions run only with sandboxed Codex or Claude.' });
       bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
       return resolve();
     }
-	    if ((msg.agent || s.agent) === 'codex') return runCodexTurn(s, msg, resolve);
+	    if (requestedAgent === 'codex') return runCodexTurn(s, msg, resolve);
+	    if (teamSession && requestedAgent === 'claude') return runTeamClaudeTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
@@ -5242,6 +5318,78 @@ function runCodexTurn(s, msg, resolve) {
   });
 s.proc.on('close', () => finish());
   s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
+}
+// Team Claude is intentionally separate from the owner’s remote-control Claude path:
+// it always goes through the Unix/bwrap launcher and retains its Team-only transcript.
+function runTeamClaudeTurn(s, msg, resolve) {
+  s.cwd = team.guestCwd(s.cwd || msg.cwd);
+  const isNew = !s.sessionId;
+  const sessionId = s.sessionId || randomUUID();
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const initialTitle = isNew ? (sanitizeTitle(msg.title) || fallbackTitleFromPrompt(msg.text || userText)) : '';
+  if (isNew && initialTitle) s.title = initialTitle;
+  s.sessionId = sessionId;
+  s.agent = 'claude';
+  ALIAS.set(sessionId, s.key); addRunning(sessionId);
+  ensureTeamClaudeSession(sessionId, {
+    cwd: s.cwd, title: s.title || initialTitle || 'Team Claude chat', settings: s.settings,
+    parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', lastUsed: Date.now(),
+  });
+  appendTeamClaudeMessage(sessionId, 'user', userText, { parts: codexUserParts(userText, msg.images || []), qid: msg.qid, author: msg.author });
+  team.setShared(sessionId, true, 'owner', s.cwd);
+  persist(s);
+  if (isNew) bcast(s, { type: 'session', id: sessionId, agent: 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
+
+  let done = false;
+  let lastError = '';
+  const finish = () => {
+    if (done) return; done = true;
+    clearTimeout(s.turnTimer); s.proc = null;
+    deleteRunning(sessionId);
+    if (!s.canceled && s.curParts.length) appendTeamClaudeMessage(sessionId, 'assistant', '', { parts: codexAssistantParts(s.curParts), qid: msg.qid });
+    else if (!s.canceled && lastError) appendTeamClaudeMessage(sessionId, 'assistant', `⚠️ Claude error: ${lastError}`);
+    else if (!s.canceled) appendTeamClaudeMessage(sessionId, 'assistant', '⚠️ Claude exited without a response. Send again to retry.');
+    persist(s);
+    bcast(s, { type: 'done', qid: msg.qid, sessionId, canceled: s.canceled });
+    resolve();
+  };
+  let prompt = msg.text || '';
+  if (Array.isArray(msg.images) && msg.images.length) {
+    const isImg = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
+    prompt = msg.images.map((p) => `[${isImg(p) ? 'Image' : 'File'} attached at ${p} — view it with the Read tool]`).join('\n') + '\n\n' + prompt;
+  }
+  prompt += teamChatContextForAgent(sessionId);
+  s.turnTimer = setTimeout(() => {
+    if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
+    lastError = 'Timed out after 12 minutes';
+    finish();
+  }, TURN_TIMEOUT_MS);
+  try {
+    s.proc = teamClaudeEngine.run({
+      sessionId, isNew, cwd: s.cwd, prompt, settings: (s.settings || {}).claude || DEFAULT_SETTINGS.claude,
+      teamWorkspace: team.ensureWorkspace(), teamEnv: team.secretsEnv({ provider: 'claude' }),
+      teamUser: team.systemUserForMember(s.createdBy),
+      onEvent: (ev) => {
+        if (ev.type === 'text') {
+          const delta = ev.delta || '';
+          pushTextPart(s, delta);
+          bcast(s, { type: 'text', delta });
+        } else if (ev.type === 'tool') {
+          s.curTools.push(ev); s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+          bcast(s, ev);
+        } else if (ev.type === 'error') {
+          lastError = String(ev.message || 'Claude failed').slice(-400); s.lastTurnError = lastError;
+          bcast(s, { type: 'error', msg: lastError });
+        } else if (ev.type === 'turn_end') finish();
+      },
+    });
+    s.proc.on('close', finish);
+    s.proc.on('error', (error) => { lastError = String(error && error.message || error).slice(-400); bcast(s, { type: 'error', msg: lastError }); finish(); });
+  } catch (error) {
+    lastError = String(error && error.message || error).slice(-400);
+    bcast(s, { type: 'error', msg: lastError });
+    finish();
+  }
 }
 // Gemini now runs as a REAL agent via the `gemini` CLI (see gemini-exec-engine.mjs), so a
 // turn streams the same {session,text,tool,tool_result,context} events Codex does — handle
@@ -5642,7 +5790,7 @@ wss.on('connection', (ws) => {
       if (!s0.sessionId && (isGuest || m.team === true)) {
         if (isGuest) s0.createdBy = ws.principal.id;
         s0.teamSandbox = true;
-        s0.agent = 'codex';
+        s0.agent = ['codex', 'claude'].includes(m.agent) ? m.agent : 'codex';
         s0.cwd = team.guestCwd(m.cwd || s0.cwd);
         persist(s0);
       }
@@ -5657,7 +5805,7 @@ wss.on('connection', (ws) => {
       enqueue(m.key, {
         text: shared ? team.attributePrompt(rawText, ws.principal) : rawText,
         displayText: m.displayText != null ? m.displayText : (shared ? rawText : undefined),
-        author, images: m.images || [], mode: m.mode || 'normal', agent: teamSession ? 'codex' : (m.agent || 'claude'),
+        author, images: m.images || [], mode: m.mode || 'normal', agent: teamSession ? (['codex', 'claude'].includes(s0.agent) ? s0.agent : 'codex') : (m.agent || 'claude'),
         // Who sent THIS turn, as opposed to who owns the session — bash mode is refused
         // per-turn, so a guest can't shell out through a chat the owner started.
         byGuest: isGuest,
@@ -5691,9 +5839,10 @@ wss.on('connection', (ws) => {
       const teamSession = sessionIsTeam(s);
       const nextCwd = teamSession ? team.guestCwd(expandUserPath(m.cwd || s.cwd)) : (isGuest ? team.guestCwd(expandUserPath(m.cwd)) : expandUserPath(m.cwd));
       if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;
-      if (teamSession) s.agent = 'codex';
+      if (teamSession && !['codex', 'claude'].includes(s.agent)) s.agent = 'codex';
       persist(s);
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      if (s.sessionId && s.agent === 'claude' && teamSession) ensureTeamClaudeSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'mac') ensureMacSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
