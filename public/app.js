@@ -37,10 +37,6 @@ const isGuestHere = () => !!(CFG && CFG.guest);
 // never rendered in their own chat sheet — the host couldn't share a chat, which is the
 // entire point. Same chicken-and-egg as the Team button; don't gate on member count.
 const hasTeam = () => !!(teamEp() || isGuestHere() || (CFG && CFG.team && CFG.team.enabled));
-// Stricter: is anyone actually here besides me? Used for the always-on Shared/Private chip.
-// hasTeam() is true on a stock solo box (team is enabled by default), and stamping
-// "Private" on every chat of a box with no teammates is noise about a non-question.
-const teamHasPeople = () => !!(teamEp() || isGuestHere() || (CFG && CFG.team && CFG.team.members > 0));
 const chatEp = () => (cur && cur.ep) || LOCAL_EP;
 const epUrl = (ep, path) => ((ep && ep.base) || '') + path;
 function epWsUrl(ep, path, params) {
@@ -3821,10 +3817,9 @@ function renderPresence() {
   const me = myMemberId();
   const viewers = (cur.viewers || []).filter((v) => v.id !== me);
   const typing = (cur.typing || []).filter((t) => t.id !== me);
-  // Once you actually have teammates the chip is ALWAYS shown, even for a private solo
-  // chat. "Is anyone else reading this?" is exactly the question you can't answer from an
-  // absent indicator — silence looked identical to private and to shared-but-nobody-here.
-  if (!cur.shared && !viewers.length && !teamHasPeople()) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  // Workspace selection makes the private state clear. Presence belongs to team chats,
+  // where it can show who is viewing or that nobody else is here.
+  if (!cur.shared) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
   bar.classList.remove('hidden');
   bar.innerHTML = '';
   const chip = document.createElement(canToggleShare() ? 'button' : 'span');
