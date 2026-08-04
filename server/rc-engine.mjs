@@ -88,6 +88,34 @@ const SESSIONS_DIR = path.join(HOME, '.claude', 'sessions');
 // running in the background. Next message reattaches via dtach -A (idempotent).
 const IDLE_MS = 30 * 60 * 1000;
 const RECENT_MS = 90 * 1000;    // a session JSONL written this recently is presumed LIVE elsewhere
+// The homepage checks waiting state every 1.2s for every subscribed session. Scanning every
+// runtime-state file once per session turns that into N full directory walks on busy boxes.
+// Keep a short shared index instead: prompt changes remain visible within one poll, while each
+// poll only reads each state file once.
+const SESSION_STATE_CACHE_MS = 900;
+let sessionStateCacheAt = 0;
+let sessionStateCache = new Map();
+
+function cachedSessionStates() {
+  const now = Date.now();
+  if (now - sessionStateCacheAt < SESSION_STATE_CACHE_MS) return sessionStateCache;
+
+  const states = new Map();
+  for (const sdir of sessionsDirs()) {
+    try {
+      for (const f of fs.readdirSync(sdir)) {
+        if (!f.endsWith('.json')) continue;
+        try {
+          const state = JSON.parse(fs.readFileSync(path.join(sdir, f), 'utf8'));
+          if (state.sessionId) states.set(state.sessionId, state);
+        } catch {}
+      }
+    } catch {}
+  }
+  sessionStateCache = states;
+  sessionStateCacheAt = now;
+  return states;
+}
 
 // --- Account-aware config-dir discovery ------------------------------------
 // The cc-account-broker (installed as /usr/bin/claude) routes a session to a
@@ -525,15 +553,7 @@ export class RCEngine extends EventEmitter {
   // sessionId across ~/.claude/sessions/<pid>.json. Cheap; safe to poll. Returns null if absent.
   sessionState(sessionId) {
     if (!sessionId) return null;
-    for (const sdir of sessionsDirs()) {
-      try {
-        for (const f of fs.readdirSync(sdir)) {
-          if (!f.endsWith('.json')) continue;
-          try { const o = JSON.parse(fs.readFileSync(path.join(sdir, f), 'utf8')); if (o.sessionId === sessionId) return o; } catch {}
-        }
-      } catch {}
-    }
-    return null;
+    return cachedSessionStates().get(sessionId) || null;
   }
 
   isWaiting(sessionId) { const st = this.sessionState(sessionId); return !!(st && st.status === 'waiting'); }
