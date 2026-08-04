@@ -3,7 +3,23 @@ import { createInterface } from 'node:readline';
 import { buildChildEnv } from './child-env.mjs';
 import { buildTeamSandbox, buildUnixTeamSandbox } from './team-sandbox.mjs';
 
-const childEnv = (opts = {}) => buildChildEnv(process.env, opts);
+// Owner Codex turns use the login stored by `codex login` (normally ChatGPT). In a
+// non-interactive `codex exec`, either API-key variable can take precedence over that
+// stored login and silently send usage to metered API billing instead. Strip both from
+// the inherited environment, then unset them again in the shell after CODEX_ENV_FILE is
+// sourced. Team turns intentionally bypass this path: their explicitly-published API key
+// remains isolated in the team sandbox.
+export function buildOwnerCodexEnv(base = process.env) {
+  const env = buildChildEnv(base);
+  delete env.OPENAI_API_KEY;
+  delete env.CODEX_API_KEY;
+  return env;
+}
+
+export function buildOwnerCodexScript(envFile = '') {
+  const sourceEnv = envFile ? `[ -f ${JSON.stringify(envFile)} ] && . ${JSON.stringify(envFile)}; ` : '';
+  return `${sourceEnv}unset OPENAI_API_KEY CODEX_API_KEY; exec codex "$@"`;
+}
 
 function summarizeCommand(command) {
   return String(command || '').replace(/\s+/g, ' ').slice(0, 120);
@@ -107,12 +123,13 @@ export class CodexExecEngine {
   run({ sessionId, cwd, prompt, images = [], settings = {}, guest = false, team = false, teamWorkspace = '', teamEnv = {}, teamUser = '', onEvent }) {
     const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
 
-    // Optionally source an env file before codex (set CODEX_ENV_FILE); otherwise just run codex.
+    // Optionally source an env file before codex (set CODEX_ENV_FILE). Owner turns then
+    // discard metered API credentials so Codex uses the current file-backed login.
     const envFile = process.env.CODEX_ENV_FILE;
-    const script = (envFile ? `[ -f ${JSON.stringify(envFile)} ] && . ${JSON.stringify(envFile)}; ` : '') + 'exec codex "$@"';
+    const script = buildOwnerCodexScript(envFile);
     const launch = team
       ? buildUnixTeamSandbox({ workspaceRoot: teamWorkspace, cwd, args, env: teamEnv, user: teamUser })
-      : { command: 'bash', args: ['-lc', script, 'codex-mobile', ...args], cwd: cwd || process.cwd(), env: childEnv() };
+      : { command: 'bash', args: ['-lc', script, 'codex-mobile', ...args], cwd: cwd || process.cwd(), env: buildOwnerCodexEnv() };
     const child = this.spawnImpl(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,

@@ -4,7 +4,14 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { buildCodexArgs, CodexExecEngine, reasoningHeartbeat, terminateCodexProcess } from './codex-exec-engine.mjs';
+import {
+  buildCodexArgs,
+  buildOwnerCodexEnv,
+  buildOwnerCodexScript,
+  CodexExecEngine,
+  reasoningHeartbeat,
+  terminateCodexProcess,
+} from './codex-exec-engine.mjs';
 
 // Helper: index of the LAST `-i` flag, and the positions of the positionals.
 const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
@@ -116,6 +123,26 @@ const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
   } finally {
     if (saved === undefined) delete process.env.CODEX_SANDBOX; else process.env.CODEX_SANDBOX = saved;
   }
+}
+
+// Owner turns always use the file-backed Codex login. Non-interactive Codex otherwise
+// prefers either API-key variable, including one introduced by CODEX_ENV_FILE after the
+// child environment was built. Other integration credentials remain available.
+{
+  const env = buildOwnerCodexEnv({
+    PATH: '/usr/bin:/bin',
+    OPENAI_API_KEY: 'sk-metered-openai',
+    CODEX_API_KEY: 'sk-metered-codex',
+    AWS_ACCESS_KEY_ID: 'still-needed',
+  });
+  assert.equal('OPENAI_API_KEY' in env, false);
+  assert.equal('CODEX_API_KEY' in env, false);
+  assert.equal(env.AWS_ACCESS_KEY_ID, 'still-needed');
+
+  const script = buildOwnerCodexScript('/run/box/codex.env');
+  assert.ok(script.includes('. "/run/box/codex.env"'), 'optional env file is still sourced');
+  assert.ok(script.indexOf('. "/run/box/codex.env"') < script.indexOf('unset OPENAI_API_KEY CODEX_API_KEY'));
+  assert.ok(script.indexOf('unset OPENAI_API_KEY CODEX_API_KEY') < script.indexOf('exec codex "$@"'));
 }
 
 // Reasoning stays private, but its start/completion envelopes keep the Box activity
