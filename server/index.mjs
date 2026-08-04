@@ -3038,8 +3038,14 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
       : isAgy ? { state: loadAgy(), save: saveAgy }
         : isMac ? { state: loadMac(), save: saveMac }
           : null;
+  const previousStoredSession = stored && stored.state.sessions && stored.state.sessions[id];
+  const previousRuntime = RT.get(resolveKey(id))
+    || [...RT.values()].find((s) => s.sessionId === id)
+    || (existsSync(qpath(id)) ? rt(id) : null);
+  const preserveVobCategory = isVobCallSession({ ...(previousStoredSession || {}), ...(previousRuntime || {}) });
   if (stored && stored.state.sessions && stored.state.sessions[id]) {
     stored.state.sessions[id].title = name;
+    if (preserveVobCategory) stored.state.sessions[id].category = 'vob';
     stored.save(stored.state);
   } else {
     wrote = writeCustomTitle(id, name);
@@ -3052,11 +3058,10 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   // Keep the live/persisted queue state in lockstep too. Its title is sent in
   // WebSocket `session` events; leaving it stale made the chat header revert as
   // soon as an active Codex session emitted another event after a rename.
-  const runtime = RT.get(resolveKey(id))
-    || [...RT.values()].find((s) => s.sessionId === id)
-    || (existsSync(qpath(id)) ? rt(id) : null);
+  const runtime = previousRuntime;
   if (runtime) {
     runtime.title = name;
+    if (preserveVobCategory) runtime.category = 'vob';
     persist(runtime);
     bcast(runtime, {
       type: 'session', id: runtime.sessionId || id, agent: runtime.agent || undefined,
