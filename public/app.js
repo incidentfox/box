@@ -823,6 +823,7 @@ let currentWorkspace = LS.getItem('box_workspace') === 'team' ? 'team' : 'person
 let chatRenderSeq = 0;
 let sessionRefreshTimer = null;
 let lastSessionFetchAt = 0;
+const SESSION_LIST_REFRESH_MS = 10_000;
 let bulkMode = false;
 const bulkSelected = new Set();
 const PERSONAL_STATUS_TABS = [['all', 'All'], ['favorites', 'Favorites'], ['needs_input', 'Needs input'], ['working', 'Working'], ['vob', 'VOB calls'], ['live', 'Live'], ['auto', 'Automated'], ['archived', 'Archived']];
@@ -6102,7 +6103,7 @@ paintIcons();
 applySidebarCollapsed();
 setInterval(() => {
   refreshSessionListTimes();
-  if (!document.hidden && TOKEN && sessionListIsVisible() && Date.now() - lastSessionFetchAt > 55000) refreshSessionsSoon(0);
+  if (!document.hidden && TOKEN && sessionListIsVisible() && Date.now() - lastSessionFetchAt > SESSION_LIST_REFRESH_MS) refreshSessionsSoon(0);
 }, 30000);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;

@@ -2044,9 +2044,21 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   adoptLiveCodexSessions(codexProcessIds);
   const codexBusyIds = new Set();
   const terminalCodexIds = new Set();
-  const codexSessions = Object.values(loadCodex().sessions || {}).map((s) => {
+  const codexRecords = Object.values(loadCodex().sessions || {});
+  const activeCodexRecords = codexRecords.filter((s) => !archived.has(s.id));
+  // Registry writes from terminal Codex do not notify this server.  Read the
+  // newest rollouts for the cards a person can actually reach, rather than only
+  // records this server created.  The mtime+size cache keeps steady-state reads
+  // cheap; active processes and dtach sessions are always included.
+  const recentCodexIds = new Set(activeCodexRecords
+    .slice()
+    .sort((a, b) => (b.lastUsed || b.created || 0) - (a.lastUsed || a.created || 0))
+    .slice(0, Math.max(130, limit * 3))
+    .map((s) => s.id));
+  const codexSessions = codexRecords.map((s) => {
     let rollout = null, liveState = null;
-    if (codexProcessIds.has(s.id) || s.source === 'native') {
+    const hasTerminal = !!(s.dtachSock && existsSync(s.dtachSock));
+    if (codexProcessIds.has(s.id) || hasTerminal || s.source === 'native' || recentCodexIds.has(s.id)) {
       // A resumed thread writes a new rollout while the registry can still point at its
       // original file. The newest matching rollout is the UI source of truth.
       rollout = findCodexRollout(CODEX_HOME, s.id) || s.transcriptPath;
@@ -2354,7 +2366,9 @@ function claudeSessionHistory(id, file, before = null) {
 async function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) {
-    const rolloutFile = codex.transcriptPath || findCodexRollout(CODEX_HOME, id);
+    // `codex exec resume` creates a new rollout.  A registration sidecar may
+    // still name the original file, so prefer the newest matching rollout.
+    const rolloutFile = findCodexRollout(CODEX_HOME, id) || codex.transcriptPath;
     const rollout = await codexRolloutHistory(rolloutFile, { before });
     const messages = rolloutFile ? rollout.messages : loadCodexMessages(id, codex);
     return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: rollout.hasMore, cursor: rollout.cursor, liveCursor: rollout.liveCursor, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }), historyCompaction: before == null ? readCodexCompactionInfo(rolloutFile) : null };

@@ -259,7 +259,10 @@ export function codexRolloutState(file) {
     const st = statSync(file);
     const len = Math.min(st.size, 4 * 1024 * 1024);
     const raw = readRangeSync(file, st.size - len, len);
-    let phase = '', preview = '', ts = 0, busy = true;
+    // A partial tail can start after the last interactive event (large world-state
+    // rows are common).  "Unknown" must not be rendered as "Working": the process
+    // and dtach checks in the caller still surface a connected terminal as live.
+    let phase = '', preview = '', ts = 0, busy = false;
     for (const line of raw.split('\n')) {
       if (!line.includes('"type":"event_msg"')) continue;
       let row; try { row = JSON.parse(line); } catch { continue; }
