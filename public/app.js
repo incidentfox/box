@@ -700,8 +700,9 @@ function lonePathChip(raw) {
 }
 function md(src) {
   const lines = src.replace(/\r\n/g, '\n').split('\n');
-  let html = '', i = 0, list = null;
+  let html = '', i = 0, list = null, nextOrderedListStart = 1;
   const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
+  const resetOrderedList = () => { nextOrderedListStart = 1; };
   // Like esc() but won't double-encode existing HTML entities (&amp; &lt; &#123; etc.)
   const safeEsc = (t) => t.replace(/&(?![#a-zA-Z]\w*;)/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const inline = (t) => {
@@ -749,9 +750,9 @@ function md(src) {
     // fenced code block
     if (/^```/.test(ln)) { closeList(); const lang = ln.slice(3).trim(); const buf = []; i++; while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]); i++; html += `<pre><code${lang ? ` class="language-${esc(lang)}"` : ''}>${esc(buf.join('\n'))}</code></pre>`; continue; }
     // horizontal rule
-    if (/^[ ]{0,3}([-*_][ ]{0,2}){3,}$/.test(ln.trim()) && ln.trim().length >= 3) { closeList(); html += '<hr>'; i++; continue; }
+    if (/^[ ]{0,3}([-*_][ ]{0,2}){3,}$/.test(ln.trim()) && ln.trim().length >= 3) { closeList(); resetOrderedList(); html += '<hr>'; i++; continue; }
     // headings
-    const h = ln.match(/^(#{1,3})\s+(.*)/); if (h) { closeList(); const l = h[1].length; html += `<h${l}>${inline(h[2])}</h${l}>`; i++; continue; }
+    const h = ln.match(/^(#{1,3})\s+(.*)/); if (h) { closeList(); resetOrderedList(); const l = h[1].length; html += `<h${l}>${inline(h[2])}</h${l}>`; i++; continue; }
     // tables — header + separator row
     if (isTableRow(ln) && i + 1 < lines.length && isSepRow(lines[i + 1])) {
       closeList();
@@ -761,9 +762,26 @@ function md(src) {
       while (i < lines.length && isTableRow(lines[i])) { html += '<tr>' + parseCells(lines[i]).map((c) => `<td>${inline(c)}</td>`).join('') + '</tr>'; i++; }
       html += '</tbody></table></div>'; continue;
     }
-    // list items — keep list open across blank lines if the next non-blank is the same type
+    // Continue top-level ordered steps across explanatory prose or bullet details. Agents
+    // often restart each major step at "1.", but users should see 1, 2, 3; headings/dividers
+    // intentionally begin a new sequence.
     const li = ln.match(/^[ \t]*([-*]|\d+\.)\s+(.*)/);
-    if (li) { const t = /\d/.test(li[1]) ? 'ol' : 'ul'; if (list !== t) { closeList(); html += `<${t}>`; list = t; } html += `<li>${inline(li[2])}</li>`; i++; continue; }
+    if (li) {
+      const t = /\d/.test(li[1]) ? 'ol' : 'ul';
+      if (list !== t) {
+        closeList();
+        if (t === 'ol') {
+          const suppliedStart = Number.parseInt(li[1], 10);
+          const start = suppliedStart === 1 ? nextOrderedListStart : suppliedStart;
+          html += `<ol${start > 1 ? ` start="${start}"` : ''}>`;
+          nextOrderedListStart = start;
+        } else html += '<ul>';
+        list = t;
+      }
+      html += `<li>${inline(li[2])}</li>`;
+      if (t === 'ol') nextOrderedListStart++;
+      i++; continue;
+    }
     if (/^\s*$/.test(ln)) {
       if (list) {
         let j = i + 1; while (j < lines.length && /^\s*$/.test(lines[j])) j++;

@@ -2018,10 +2018,11 @@ function adoptLiveCodexSessions(liveThreadIds) {
   if (changed) saveCodex(state);
 }
 
-function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds()) {
+function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds(), terminalIds = new Set()) {
   const ids = new Set(processIds);
   for (const s of sessions || []) {
     if (!s || !s.id) continue;
+    if (terminalIds.has(s.id)) { ids.delete(s.id); continue; }
     if (s.dtachSock) {
       try { if (existsSync(s.dtachSock)) ids.add(s.id); } catch {}
     }
@@ -2041,14 +2042,18 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   const codexProcessIds = runningCodexThreadIds();
   adoptLiveCodexSessions(codexProcessIds);
   const codexBusyIds = new Set();
+  const terminalCodexIds = new Set();
   const codexSessions = Object.values(loadCodex().sessions || {}).map((s) => {
     let rollout = null, liveState = null;
     if (codexProcessIds.has(s.id) || s.source === 'native') {
-      rollout = s.transcriptPath || findCodexRollout(CODEX_HOME, s.id);
+      // A resumed thread writes a new rollout while the registry can still point at its
+      // original file. The newest matching rollout is the UI source of truth.
+      rollout = findCodexRollout(CODEX_HOME, s.id) || s.transcriptPath;
       // Each filter has its own short-lived list cache. Reuse the 4 MB tail parse
       // across those rebuilds while the rollout's mtime and size are unchanged.
       liveState = cachedCodexRolloutState(rollout);
       if (codexProcessIds.has(s.id) && liveState.busy) codexBusyIds.add(s.id);
+      if (liveState && !liveState.busy) terminalCodexIds.add(s.id);
     }
     return ({
       ...s,
@@ -2084,7 +2089,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   const items = files.concat(codexSessions, teamClaudeSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
-  const codexLiveIds = liveCodexSessionIds(codexSessions, codexProcessIds);
+  const codexLiveIds = liveCodexSessionIds(codexSessions, codexProcessIds, terminalCodexIds);
   // Live = Claude remote-control bridges plus Codex sessions with an active exec process,
   // a registered terminal dtach socket, or another running local agent turn.
   const liveIds = new Set([...rcIds, ...LIVE_BRIDGES.keys(), ...codexLiveIds, ...RUNNING]);
@@ -4534,7 +4539,11 @@ function onTailEvent(s, ev) {
     bcast(s, { type: 'notice', text: ev.text });
   } else if (ev.kind === 'turn_end') {
     if (s.onTurnEnd) s.onTurnEnd();
-    else if (s.agent === 'codex') bcast(s, { type: 'done', sessionId: s.sessionId, external: true });
+    else if (s.agent === 'codex') {
+      s.running = false; s.inflight = null; s.lastActivityAt = 0; s.activityLabel = '';
+      if (s.sessionId) deleteRunning(s.sessionId);
+      bcast(s, { type: 'done', sessionId: s.sessionId, external: true });
+    }
     s.turnCount = (s.turnCount || 0) + 1;
     if (s.sessionId) {
       s.context = contextForSession(s.sessionId, { agent: s.agent || 'claude' });
@@ -4666,7 +4675,7 @@ function ensureTail(s, fromLine, codexFromOffset = null) {
   if (sessionIsTeam(s) || !s.sessionId || s.tailStop || s._tailWait) return;
   if (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId]) {
     const rec = (loadCodex().sessions || {})[s.sessionId] || {};
-    const rollout = rec.transcriptPath || findCodexRollout(CODEX_HOME, s.sessionId);
+    const rollout = findCodexRollout(CODEX_HOME, s.sessionId) || rec.transcriptPath;
     if (rollout) s.tailStop = tailCodexRollout(rollout, (ev) => onTailEvent(s, ev), { fromOffset: codexFromOffset });
     return;
   }
@@ -4892,12 +4901,21 @@ setInterval(() => runScheduleTick().catch(() => {}), 30_000).unref?.();
 // its prompt was sent — so reopening it after 20 minutes reads "last activity 20m ago" as if it
 // had stalled. The rollout file's mtime is the honest answer; refresh from it on (re)subscribe.
 function refreshCodexActivity(s) {
-  if (!s || !s.running || !s.sessionId) return;
+  if (!s || !s.sessionId) return;
   const rec = (loadCodex().sessions || {})[s.sessionId];
   if (!rec && s.agent !== 'codex') return;
   try {
-    const file = (rec && rec.transcriptPath) || findCodexRollout(CODEX_HOME, s.sessionId);
+    const file = findCodexRollout(CODEX_HOME, s.sessionId) || (rec && rec.transcriptPath);
     if (!file) return;
+    const state = cachedCodexRolloutState(file);
+    // A terminal native rollout can outlive its terminal/dtach marker. Present it as idle
+    // when a phone reconnects; the process-level concurrency check remains separate.
+    if (!state.busy && !s.proc) {
+      s.running = false; s.inflight = null; s.lastActivityAt = 0; s.activityLabel = '';
+      deleteRunning(s.sessionId);
+      return;
+    }
+    if (!s.running) return;
     const mtime = Math.round(statSync(file).mtimeMs);
     if (mtime > (s.lastActivityAt || 0)) s.lastActivityAt = mtime;
   } catch {}

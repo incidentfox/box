@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -60,10 +60,16 @@ try {
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }) + '\n');
   assert.equal(codexRolloutState(file).phase, 'final_answer');
   assert.equal(codexRolloutState(file).busy, false);
+  // Completion bookkeeping can append much later than the final answer. File mtime must
+  // not turn a terminal session back into a stale "working" card.
+  appendFileSync(file, JSON.stringify({ type: 'response_item', payload: { type: 'task_complete' } }) + '\n');
+  utimesSync(file, new Date(), new Date(Date.now() + 10_000));
+  assert.equal(codexRolloutState(file).busy, false);
 
   const streamed = [];
   const stop = tailCodexRollout(file, (event) => streamed.push(event));
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'one live message' } }) + '\n');
+  assert.equal(codexRolloutState(file).busy, true);
   for (let i = 0; i < 25 && !streamed.length; i++) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(streamed.filter((event) => event.kind === 'user').length, 1);
   stop();
