@@ -259,18 +259,28 @@ export function codexRolloutState(file) {
     const st = statSync(file);
     const len = Math.min(st.size, 4 * 1024 * 1024);
     const raw = readRangeSync(file, st.size - len, len);
-    let phase = '', preview = '', ts = 0;
+    let phase = '', preview = '', ts = 0, busy = true;
     for (const line of raw.split('\n')) {
-      if (!line.includes('"type":"agent_message"')) continue;
+      if (!line.includes('"type":"event_msg"')) continue;
       let row; try { row = JSON.parse(line); } catch { continue; }
       const p = row.payload || {};
-      if (row.type !== 'event_msg' || p.type !== 'agent_message') continue;
+      if (row.type !== 'event_msg') continue;
+      if (p.type === 'user_message') {
+        const message = String(p.message || '').trim();
+        // Persisted compaction/context rows are not a new interactive turn.
+        if (message && !message.startsWith('<') && !message.startsWith('Caveat:')) {
+          phase = ''; preview = ''; ts = Date.parse(row.timestamp || '') || ts; busy = true;
+        }
+        continue;
+      }
+      if (p.type !== 'agent_message') continue;
       phase = p.phase || '';
       preview = String(p.message || '').replace(/\s+/g, ' ').trim().slice(0, 160);
       ts = Date.parse(row.timestamp || '') || ts;
+      busy = phase !== 'final_answer';
     }
-    // A final answer is idle only when no later context/tool append has begun a new turn.
-    const busy = phase !== 'final_answer' || (ts > 0 && st.mtimeMs - ts > 2500);
+    // Terminal task/goal records often append after final_answer. They are not a new turn;
+    // only a real user message or a later non-final assistant phase can make this busy again.
     return { phase, busy, preview, ts, mtimeMs: st.mtimeMs };
   } catch { return { phase: '', busy: false, preview: '', ts: 0, mtimeMs: 0 }; }
 }
