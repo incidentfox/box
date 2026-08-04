@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isVobCallSession, mainPageSessionRank, sessionAllowsAutoContinue } from './vob-session-category.mjs';
+import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
+
+test('normalizes supported VOB category aliases', () => {
+  assert.equal(normalizeSessionCategory('VOB'), 'vob');
+  assert.equal(normalizeSessionCategory('vob-call'), 'vob');
+  assert.equal(normalizeSessionCategory('vob_calls'), 'vob');
+  assert.equal(normalizeSessionCategory('main'), '');
+});
 
 test('classifies an explicit VOB category', () => {
   assert.equal(isVobCallSession({ category: 'vob' }), true);

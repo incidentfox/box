@@ -44,7 +44,7 @@ import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
-import { isVobCallSession, mainPageSessionRank, sessionAllowsAutoContinue } from './vob-session-category.mjs';
+import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 import * as team from './team.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -1447,6 +1447,7 @@ function ensureCodexSession(id, attrs = {}) {
     source: attrs.source || prev.source || '',
     transcriptPath: attrs.transcriptPath || prev.transcriptPath || '',
     dtachSock: attrs.dtachSock || prev.dtachSock || '',
+    category: attrs.category != null ? (normalizeSessionCategory(attrs.category) || '') : (prev.category || ''),
   };
   saveCodex(state);
   return state.sessions[id];
@@ -3042,7 +3043,9 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   const previousRuntime = RT.get(resolveKey(id))
     || [...RT.values()].find((s) => s.sessionId === id)
     || (existsSync(qpath(id)) ? rt(id) : null);
-  const preserveVobCategory = isVobCallSession({ ...(previousStoredSession || {}), ...(previousRuntime || {}) });
+  const requestedCategory = normalizeSessionCategory(req.body && req.body.category);
+  const preserveVobCategory = requestedCategory === 'vob'
+    || isVobCallSession({ ...(previousStoredSession || {}), ...(previousRuntime || {}) });
   if (stored && stored.state.sessions && stored.state.sessions[id]) {
     stored.state.sessions[id].title = name;
     if (preserveVobCategory) stored.state.sessions[id].category = 'vob';
@@ -4376,7 +4379,7 @@ function rt(extKey) {
     const manualTitle = isUuid(key) ? loadNames()[key] : '';
     RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (codex && codex.cwd) || null, agent: p.agent || (codex ? 'codex' : null),
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (codex && codex.title) || '',
-      settings: normalizeSettings(p.settings || (codex && codex.settings) || {}),
+      settings: normalizeSettings(p.settings || (codex && codex.settings) || {}), category: normalizeSessionCategory(p.category || (codex && codex.category)) || null,
       context: p.context || null, createdBy: p.createdBy || null, teamSandbox: !!p.teamSandbox,
       queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), typing: new Map(), curAuthor: null, proc: null, codexGoalProc: null, canceled: false });
   }
@@ -4387,7 +4390,7 @@ function persist(s) {
   // partway through the first turn, and it lands via five different engine paths — so
   // claim it here, on the one call every path already makes afterwards.
   if (s.createdBy && s.sessionId) { try { team.claimSession(s.sessionId, s.createdBy); } catch {} }
-  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, queue: s.queue, inflight: s.inflight || null })); } catch {} }
+  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', category: normalizeSessionCategory(s.category) || null, settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, queue: s.queue, inflight: s.inflight || null })); } catch {} }
 function activityLabelForEvent(o, previous = '') {
   if (!o || !o.type) return '';
   if (o.type === 'turn_start') return 'Starting';
@@ -4796,6 +4799,7 @@ function enqueue(extKey, msg) {
   if (msg.parentId) s.parentId = msg.parentId;
   if (msg.parentTitle) s.parentTitle = msg.parentTitle;
   if (msg.title) s.title = msg.title;
+  if (normalizeSessionCategory(msg.category)) s.category = 'vob';
   s.queue.push(msg); persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
   runWorker(s);
@@ -5006,6 +5010,7 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
     title,
     parentId: body.parentId || null,
     parentTitle: body.parentTitle || '',
+    category: normalizeSessionCategory(body.category) || undefined,
     force: !!body.force,
   });
   res.json({ ok: true, key, qid, agent, cwd, title });
@@ -5298,7 +5303,7 @@ function runCodexTurn(s, msg, resolve) {
   // a resume already has s.sessionId, so it's untouched.
   if (!s.sessionId) {
     s.provKey = s.key;
-    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category });
     appendCodexMessage(s.provKey, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered });
     addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
@@ -5375,7 +5380,7 @@ function runCodexTurn(s, msg, resolve) {
         if (teamSession) team.setShared(s.sessionId, true, 'owner', s.cwd);
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null });
+        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category });
         if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered }); // provisional path already appended it
         persist(s);
         if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'codex' }); } catch {} }
@@ -5936,6 +5941,7 @@ wss.on('connection', (ws) => {
         // the owner left it — the clamp only bites on a directory nobody shared.
         cwd: teamSession ? team.guestCwd(m.cwd || s0.cwd) : m.cwd,
         force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
+        category: normalizeSessionCategory(m.category) || undefined,
       });
       if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
     } else if (m.type === 'team_chat') {
