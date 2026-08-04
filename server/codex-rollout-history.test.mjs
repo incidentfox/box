@@ -60,6 +60,12 @@ try {
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }) + '\n');
   assert.equal(codexRolloutState(file).phase, 'final_answer');
   assert.equal(codexRolloutState(file).busy, false);
+
+  // A bounded tail can contain only a huge non-conversation record.  That is
+  // inconclusive, not evidence that an old terminal is still doing work.
+  const noTurnFile = join(root, 'rollout-no-turn.jsonl');
+  writeFileSync(noTurnFile, JSON.stringify({ type: 'world_state', payload: 'x'.repeat(5 * 1024 * 1024) }) + '\n');
+  assert.equal(codexRolloutState(noTurnFile).busy, false);
   // Completion bookkeeping can append much later than the final answer. File mtime must
   // not turn a terminal session back into a stale "working" card.
   appendFileSync(file, JSON.stringify({ type: 'response_item', payload: { type: 'task_complete' } }) + '\n');
