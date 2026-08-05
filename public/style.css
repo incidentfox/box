@@ -72,6 +72,7 @@ input, textarea, .selectable,
 .blocked .takeover { margin-top: 9px; padding: 8px 16px; font-size: 14px; font-weight: 600; background: var(--accent); color: #fff; border-radius: 11px; }
 
 .screen { height: var(--app-h); display: flex; flex-direction: column; }
+#chat { position: relative; }
 
 /* Linear board (kanban) */
 .boardMeta { font-size: 12px; color: var(--muted); font-weight: 600; margin-left: 8px; }
@@ -1436,12 +1437,21 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .tFormErr:empty { display: none; }
 
 /* ---------- VOB call observability ---------- */
-.vobConsole { flex: none; margin: 0 12px 12px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); overflow: hidden; }
+.vobBar { flex: none; display: flex; align-items: center; gap: 10px; min-height: 49px; padding: 7px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--subtle) 72%, var(--bg)); }
+.vobBarCopy { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.vobBarCopy > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.vobBarCopy strong { font-size: 12px; }
+.vobBarCopy span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.vobBarDot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 13%, transparent); }
+.vobOpenBtn, .vobClose { flex: none; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 9px; background: var(--accent); color: #fff; padding: 7px 10px; font-size: 11.5px; font-weight: 700; white-space: nowrap; }
+.vobOpenBtn { margin-left: auto; }
+.vobOpenBtn.active, .vobClose { border-color: var(--line); background: var(--subtle-2); color: var(--ink); }
+.vobConsole { position: absolute; z-index: 25; top: calc(58px + var(--safe-t)); right: 0; bottom: 0; left: 0; display: flex; flex-direction: column; margin: 0; border: 1px solid var(--line); border-radius: 16px 16px 0 0; background: var(--bg); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; box-shadow: 0 -8px 28px var(--shadow); padding-bottom: calc(16px + var(--safe-b)); }
 .vobConsole.hidden { display: none; }
-.vobHead { display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px; background: var(--subtle); }
+.vobHead { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--subtle); }
 .vobHead h2 { margin: 2px 0 4px; font-size: 16px; }
 .vobEyebrow, .vobSubhead, .vobSectionTitle { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
-.vobHeadActions { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.vobHeadActions { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-wrap: wrap; }
 .vobLink { color: var(--accent); font-size: 12px; font-weight: 650; }
 .vobMeta, .vobMuted, .vobEmpty { color: var(--muted); font-size: 11.5px; }
 .vobLiveDot.on { color: var(--green); }
@@ -1477,6 +1487,6 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .vobTranscriptText { white-space: pre-wrap; word-break: break-word; }
 @media (max-width: 700px) {
   .vobHead { flex-direction: column; }
-  .vobHeadActions { align-items: flex-start; }
+  .vobHeadActions { align-items: flex-start; flex-direction: row; }
   .vobTable { min-width: 500px; }
 }

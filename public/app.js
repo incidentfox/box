@@ -93,7 +93,7 @@ const agentModelLabel = (agent, rawModel) => {
   return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
 };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
-let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null;
+let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null, vobConsoleOpen = false;
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -2511,6 +2511,7 @@ async function openChat(s) {
   applyChatCapabilities();
   renderContextMeter();
   $('messages').innerHTML = ''; live = null; liveUser = null; running = false; waitingState = null;  // drop any stale waiting-prompt state from the chat we just left, else submit() stays blocked here
+  hideVobConsole();
   if ($('attnPanel')) closeAttention();   // never open the attention page on top of a freshly-opened chat
   show('chat');
   setNewChatIntro(!s.id && !(s.carry && s.carry.length));
@@ -2571,12 +2572,35 @@ async function openChat(s) {
    independent from the chat websocket: operator artifacts arrive on disk and are
    polled so live calls, transcripts, ledger answers, and recordings converge even
    when the agent is idle. */
+function syncVobConsoleButton() {
+  const button = $('vobOpenBtn');
+  const root = $('vobConsole');
+  if (!button) return;
+  button.textContent = vobConsoleOpen ? 'Back to chat' : 'Open VOB console';
+  button.classList.toggle('active', vobConsoleOpen);
+  button.setAttribute('aria-expanded', String(vobConsoleOpen));
+  if (root) root.classList.toggle('hidden', !vobConsoleOpen);
+}
+function toggleVobConsole(force) {
+  if (!vobSnapshot || !vobSnapshot.linked) return;
+  vobConsoleOpen = force == null ? !vobConsoleOpen : !!force;
+  if (vobConsoleOpen) vobRenderSnapshot(vobSnapshot);
+  else {
+    const root = $('vobConsole');
+    if (root) { root.classList.add('hidden'); root.innerHTML = ''; }
+  }
+  syncVobConsoleButton();
+}
 function hideVobConsole() {
   if (vobRefreshTimer) { clearTimeout(vobRefreshTimer); vobRefreshTimer = null; }
   vobRefreshSeq += 1;
   vobSnapshot = null;
+  vobConsoleOpen = false;
+  const bar = $('vobBar');
+  if (bar) bar.classList.add('hidden');
   const root = $('vobConsole');
   if (root) { root.classList.add('hidden'); root.innerHTML = ''; }
+  syncVobConsoleButton();
 }
 function vobClock(sec) {
   const n = Math.max(0, Number(sec) || 0);
@@ -2605,7 +2629,7 @@ function vobAudioUrl(callId) {
 function vobRenderSnapshot(vob) {
   const root = $('vobConsole');
   if (!root) return;
-  root.classList.remove('hidden');
+  const previousScrollTop = root.scrollTop;
   const attempts = Array.isArray(vob.attempts) ? vob.attempts : [];
   const ledger = Array.isArray(vob.ledger) ? vob.ledger : [];
   const facts = Array.isArray(vob.facts) ? vob.facts : [];
@@ -2620,7 +2644,9 @@ function vobRenderSnapshot(vob) {
     const transcript = (attempt.transcript || []).map((row, index) => `<button type="button" class="vobTranscriptRow" data-vob-seek="${Number(row.startSec) || 0}" data-vob-call="${esc(callId)}" data-vob-transcript-index="${index}"><time>${vobClock(row.startSec)}</time><span class="vobTranscriptRole">${esc(row.role || 'unknown')}</span><span class="vobTranscriptText">${esc(row.text)}</span></button>`).join('');
     return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
   }).join('') : '<div class="vobEmpty">No call attempts recorded yet.</div>';
-  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions">${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<div class="vobNote">${esc(vob.note)}</div>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">fields to ask and attempt status</span></div><div class="vobTableWrap"><table class="vobTable"><thead><tr><th>Call</th><th>Type</th><th>Fields</th><th>Status</th></tr></thead><tbody>${ledgerRows}</tbody></table></div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobTableWrap"><table class="vobTable"><thead><tr><th>Field</th><th>Answer</th><th>State</th><th>Source</th></tr></thead><tbody>${factRows}</tbody></table></div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions"><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<div class="vobNote">${esc(vob.note)}</div>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">fields to ask and attempt status</span></div><div class="vobTableWrap"><table class="vobTable"><thead><tr><th>Call</th><th>Type</th><th>Fields</th><th>Status</th></tr></thead><tbody>${ledgerRows}</tbody></table></div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobTableWrap"><table class="vobTable"><thead><tr><th>Field</th><th>Answer</th><th>State</th><th>Source</th></tr></thead><tbody>${factRows}</tbody></table></div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  root.scrollTop = previousScrollTop;
+  root.querySelector('[data-vob-close]')?.addEventListener('click', () => toggleVobConsole(false));
   root.querySelectorAll('[data-vob-seek]').forEach((button) => button.addEventListener('click', () => {
     const audio = [...root.querySelectorAll('audio[data-vob-audio]')].find((candidate) => candidate.dataset.vobAudio === button.dataset.vobCall);
     if (!audio) return;
@@ -2656,17 +2682,23 @@ async function refreshVobConsole() {
     if (response.status === 404) { hideVobConsole(); return; }
     const data = await response.json();
     if (seq !== vobRefreshSeq) return;
-    if (!response.ok || !data.linked) { root.classList.remove('hidden'); root.innerHTML = '<div class="vobEmpty vobUnlinked">This Codex session is not linked to a VOB operator case yet.</div>'; return; }
+    if (!response.ok || !data.linked) { hideVobConsole(); return; }
     vobSnapshot = data;
-    vobRenderSnapshot(data);
+    const bar = $('vobBar');
+    if (bar) bar.classList.remove('hidden');
+    const meta = $('vobBarMeta');
+    if (meta) meta.textContent = `${data.payerName || 'Verification of benefits'} · ${vobStatusLabel(data.status, data.live)}`;
+    syncVobConsoleButton();
+    if (vobConsoleOpen) vobRenderSnapshot(data);
     // Keep a low-rate watch even before the first call starts or after it ends:
     // the operator can launch a call from the same session, and late ledger /
     // transcript artifacts should appear without reopening the chat.
     vobRefreshTimer = setTimeout(refreshVobConsole, data.live ? 2500 : 5000);
   } catch {
-    if (seq === vobRefreshSeq) { root.classList.remove('hidden'); root.innerHTML = '<div class="vobEmpty vobUnlinked">VOB observability is temporarily unavailable.</div>'; }
+    if (seq === vobRefreshSeq) hideVobConsole();
   }
 }
+if ($('vobOpenBtn')) $('vobOpenBtn').addEventListener('click', () => toggleVobConsole());
 async function renderLinearBar(inc, sessionId) {
   const bar = $('linearBar'); if (!bar) return;
   if (!inc) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
