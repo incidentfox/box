@@ -47,6 +47,9 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     assert.equal(snapshot.linked, true);
     assert.equal(snapshot.payerName, 'Fixture Payer');
     assert.equal(snapshot.ledger[0].attemptStatus, 'recorded');
+    assert.equal(snapshot.ledger[0].fields[0].key, 'deductible');
+    assert.equal(snapshot.ledger[0].fields[0].status, 'confirmed');
+    assert.equal(snapshot.ledger[0].fields[0].value, '$500');
     assert.equal(snapshot.facts[0].value, '$500');
     assert.equal(snapshot.attempts[0].transcript[0].text, 'Rep said hello');
     assert.equal(snapshot.attempts[0].transcript[0].startSec, 15);
