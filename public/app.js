@@ -2633,13 +2633,26 @@ function vobSnapshotKey(vob) {
   const { refreshedAt, ...content } = vob;
   return JSON.stringify(content);
 }
-function vobFieldBlock(fields) {
-  const values = Array.isArray(fields) ? fields.map((field) => String(field || '').trim()).filter(Boolean) : [];
-  if (!values.length) return '<span class="vobMuted">No fields listed</span>';
-  const chip = (field) => `<span class="vobFieldChip">${esc(field)}</span>`;
-  const preview = values.slice(0, 4).map(chip).join('');
-  const extra = values.length > 4 ? `<details class="vobFieldDetails"><summary>+${values.length - 4} more fields</summary><div class="vobFieldList">${values.slice(4).map(chip).join('')}</div></details>` : '';
-  return `<div class="vobFieldBlock"><div class="vobFieldChips">${preview}</div>${extra}</div>`;
+function vobFieldStatusLabel(status) {
+  return String(status || 'pending').replace(/_/g, ' ');
+}
+function vobFieldBlock(fields, fallbackFields = []) {
+  const rawRows = Array.isArray(fields) && fields.length ? fields : (Array.isArray(fallbackFields) ? fallbackFields : []);
+  const rows = rawRows.map((field) => {
+    if (field && typeof field === 'object') {
+      return {
+        key: String(field.key || '').trim(),
+        status: String(field.status || 'pending'),
+        value: field.value == null ? null : String(field.value),
+      };
+    }
+    return { key: String(field || '').trim(), status: 'pending', value: null };
+  }).filter((row) => row.key);
+  if (!rows.length) return '<span class="vobMuted">No fields listed</span>';
+  const rowHtml = (row) => `<div class="vobFieldRow"><code class="vobFieldKey">${esc(row.key)}</code><span class="vobFieldValue">${esc(row.value == null || row.value === '' ? 'Not captured yet' : row.value)}</span><span class="vobFieldStatus">${esc(vobFieldStatusLabel(row.status))}</span></div>`;
+  const preview = rows.slice(0, 4).map(rowHtml).join('');
+  const extra = rows.length > 4 ? `<details class="vobFieldDetails"><summary>+${rows.length - 4} more fields</summary><div class="vobFieldList">${rows.slice(4).map(rowHtml).join('')}</div></details>` : '';
+  return `<div class="vobFieldBlock"><div class="vobFieldRows">${preview}</div>${extra}</div>`;
 }
 function vobRenderSnapshot(vob) {
   const root = $('vobConsole');
@@ -2659,7 +2672,7 @@ function vobRenderSnapshot(vob) {
   const facts = Array.isArray(vob.facts) ? vob.facts : [];
   const status = vobStatusLabel(vob.status, vob.live);
   const slack = vob.slackUrl ? `<a class="vobLink" href="${esc(vob.slackUrl)}" target="_blank" rel="noopener">Open Slack thread ↗</a>` : '<span class="vobMuted">Slack thread not recorded</span>';
-  const ledgerCards = ledger.length ? ledger.map((row) => `<article class="vobLedgerCard"><div class="vobLedgerHead"><div><code>${esc(vobShortId(row.callId))}</code><span class="vobMeta">${esc(row.kind || 'call')} · #${esc(row.sequence || '—')}</span></div><span class="vobPill ${row.attemptStatus === 'live' ? 'live' : ''}">${esc(row.attemptStatus || 'pending')}</span></div>${vobFieldBlock(row.focusFields)}</article>`).join('') : '<div class="vobEmpty">No ledger calls recorded yet.</div>';
+  const ledgerCards = ledger.length ? ledger.map((row) => `<article class="vobLedgerCard"><div class="vobLedgerHead"><div><code>${esc(vobShortId(row.callId))}</code><span class="vobMeta">${esc(row.kind || 'call')} · #${esc(row.sequence || '—')}</span></div><span class="vobPill ${row.attemptStatus === 'live' ? 'live' : ''}">${esc(row.attemptStatus || 'pending')}</span></div>${vobFieldBlock(row.fields, row.focusFields)}</article>`).join('') : '<div class="vobEmpty">No ledger calls recorded yet.</div>';
   const factCards = facts.length ? facts.map((fact) => `<article class="vobFactCard"><div class="vobFactKey">${esc(fact.key)}</div><div class="vobFactValue">${esc(fact.value == null ? '—' : fact.value)}</div><div class="vobFactMeta">${esc(fact.status || 'unknown')} · source ${esc((fact.sourceCallIds || []).map(vobShortId).join(', ') || '—')}</div></article>`).join('') : '<div class="vobEmpty">No answers recorded yet.</div>';
   const attemptHtml = attempts.length ? attempts.map((attempt) => {
     const callId = String(attempt.callId || '');
@@ -2668,7 +2681,7 @@ function vobRenderSnapshot(vob) {
     const transcript = (attempt.transcript || []).map((row, index) => `<button type="button" class="vobTranscriptRow" data-vob-seek="${Number(row.startSec) || 0}" data-vob-call="${esc(callId)}" data-vob-transcript-index="${index}"><time>${vobClock(row.startSec)}</time><span class="vobTranscriptRole">${esc(row.role || 'unknown')}</span><span class="vobTranscriptPhase ${vobPhaseClass(row.phase)}">${esc(vobPhaseLabel(row.phase))}</span><span class="vobTranscriptText">${esc(row.text)}</span></button>`).join('');
     return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
   }).join('') : '<div class="vobEmpty">No call attempts recorded yet.</div>';
-  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions"><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">fields to ask and attempt status</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions"><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">requested fields and current values</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
   vobRenderKey = renderKey;
   root.scrollTop = previousScrollTop;
   root.querySelector('[data-vob-close]')?.addEventListener('click', () => toggleVobConsole(false));

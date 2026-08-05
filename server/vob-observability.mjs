@@ -278,12 +278,28 @@ function answerFacts(result) {
   const facts = result && result.aggregateEvidence && Array.isArray(result.aggregateEvidence.facts)
     ? result.aggregateEvidence.facts : [];
   return facts.slice(0, 300).map((fact) => ({
-    key: String(fact.key || '').slice(0, 200),
+    key: String(fact.key || '').trim().slice(0, 200),
     status: String(fact.status || 'unknown').slice(0, 80),
     value: typeof fact.value === 'string' ? fact.value.slice(0, MAX_TEXT_LENGTH) : fact.value == null ? null : String(fact.value).slice(0, MAX_TEXT_LENGTH),
     sourceCallIds: Array.isArray(fact.sourceCallIds) ? fact.sourceCallIds.map(String).slice(0, 20) : fact.sourceCallId ? [String(fact.sourceCallId)] : [],
     evidenceCount: Array.isArray(fact.evidence) ? fact.evidence.length : 0,
   }));
+}
+
+function ledgerFieldRows(call, factsByKey) {
+  const fields = Array.isArray(call.focusFields)
+    ? call.focusFields.map((field) => String(field || '').trim().slice(0, 160)).filter(Boolean).slice(0, 80)
+    : [];
+  return fields.map((key) => {
+    const fact = factsByKey.get(key);
+    return {
+      key,
+      status: fact?.status || 'pending',
+      value: fact?.value ?? null,
+      sourceCallIds: fact?.sourceCallIds || [],
+      evidenceCount: fact?.evidenceCount || 0,
+    };
+  });
 }
 
 export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB_ROOT } = {}) {
@@ -298,6 +314,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
   const calls = Array.isArray(ledger.calls) ? ledger.calls : [];
   const attempts = calls.map((call) => buildAttempt(caseDir, call)).filter(Boolean);
   const factRows = answerFacts(result);
+  const factsByKey = new Map(factRows.map((fact) => [fact.key, fact]));
   const live = attempts.some((attempt) => attempt.live);
   return {
     linked: true,
@@ -314,6 +331,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
       sequence: call.sequence || index + 1,
       kind: String(call.kind || '').slice(0, 120),
       focusFields: Array.isArray(call.focusFields) ? call.focusFields.map((field) => String(field).slice(0, 160)).slice(0, 80) : [],
+      fields: ledgerFieldRows(call, factsByKey),
       attemptStatus: attempts[index]?.status || 'pending',
     })),
     facts: factRows,

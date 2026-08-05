@@ -1472,8 +1472,11 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .vobLedgerHead { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; min-width: 0; margin-bottom: 7px; }
 .vobLedgerHead > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .vobFieldBlock { min-width: 0; }
-.vobFieldChips, .vobFieldList { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
-.vobFieldChip { max-width: 100%; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font-size: 10.5px; line-height: 1.25; overflow-wrap: anywhere; }
+.vobFieldRows, .vobFieldList { display: grid; gap: 4px; min-width: 0; }
+.vobFieldRow { display: grid; grid-template-columns: minmax(130px, .9fr) minmax(0, 1.4fr) auto; gap: 8px; align-items: start; min-width: 0; padding: 6px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); font-size: 10.5px; line-height: 1.3; }
+.vobFieldKey, .vobFieldValue { min-width: 0; overflow-wrap: anywhere; }
+.vobFieldValue { white-space: pre-wrap; color: var(--ink); }
+.vobFieldStatus { align-self: start; max-width: 110px; padding: 2px 5px; border-radius: 5px; background: var(--subtle-2); color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; overflow-wrap: anywhere; }
 .vobFieldDetails { margin-top: 5px; }
 .vobFieldDetails summary { color: var(--accent); font-size: 11px; cursor: pointer; }
 .vobFieldList { margin-top: 5px; }
@@ -1510,5 +1513,7 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 @media (max-width: 700px) {
   .vobHead { flex-direction: column; }
   .vobHeadActions { align-items: flex-start; flex-direction: row; }
+  .vobFieldRow { grid-template-columns: minmax(0, 1fr) auto; }
+  .vobFieldValue { grid-column: 1 / -1; }
   .vobTranscriptRow { grid-template-columns: 38px 54px 74px minmax(0, 1fr); gap: 5px; padding-left: 6px; padding-right: 6px; }
 }
