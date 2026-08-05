@@ -45,6 +45,7 @@ import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
+import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import * as team from './team.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -2916,6 +2917,33 @@ app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
     res.json(h);
   } catch (e) {
     res.status(500).json({ error: String(e && e.message || e) });
+  }
+});
+// Owner-only VOB observability. The artifacts contain payer-call evidence and may
+// include PHI, so this surface intentionally does not enter the guest allowlist.
+app.get('/api/sessions/:id/vob', requireOwner, (req, res) => {
+  try {
+    const session = (loadCodex().sessions || {})[req.params.id] || null;
+    const snapshot = buildVobSnapshot({ sessionId: req.params.id, session });
+    if (!snapshot.linked) return res.status(snapshot.ambiguous ? 409 : 404).json(snapshot);
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.json(snapshot);
+  } catch (error) {
+    return res.status(500).json({ error: String(error?.message || error).slice(0, 300) });
+  }
+});
+app.get('/api/sessions/:id/vob/attempts/:callId/audio', requireOwner, (req, res) => {
+  try {
+    const session = (loadCodex().sessions || {})[req.params.id] || null;
+    const audio = resolveVobAudio({ sessionId: req.params.id, session, callId: req.params.callId });
+    if (!audio) return res.status(404).json({ error: 'recording not found' });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Accept-Ranges', 'bytes');
+    return res.sendFile(audio.path, { acceptRanges: true, cacheControl: false }, (error) => {
+      if (error && !res.headersSent) res.status(error.statusCode === 404 ? 404 : 500).json({ error: 'recording unavailable' });
+    });
+  } catch {
+    return res.status(404).json({ error: 'recording not found' });
   }
 });
 app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
