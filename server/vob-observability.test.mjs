@@ -14,7 +14,8 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
   const runtime = join(caseDir, 'runtime', 'attempt-1', 'livekit');
   const eventsDir = join(runtime, 'events');
   const recordingsDir = join(runtime, 'recordings');
-  const callId = 'call-abc';
+  const callId = 'livekit_call-abc';
+  const artifactId = 'call-abc';
   try {
     mkdirSync(eventsDir, { recursive: true });
     mkdirSync(recordingsDir, { recursive: true });
@@ -29,7 +30,7 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     writeFileSync(join(caseDir, 'operator-result.private.json'), JSON.stringify({
       status: 'in_progress', aggregateEvidence: { facts: [{ key: 'deductible', status: 'confirmed', value: '$500', sourceCallId: callId }] },
     }));
-    writeFileSync(join(join(eventsDir, `${callId}.private.jsonl`)), [
+    writeFileSync(join(join(eventsDir, `${artifactId}.private.jsonl`)), [
       event('2026-08-05T10:00:00.000Z', 'mixed_recording_configured'),
       event('2026-08-05T10:00:02.000Z', 'controller_phase', { phase: 'ivr' }),
       event('2026-08-05T10:00:04.000Z', 'dtmf_sent', { digit: '1' }),
@@ -39,7 +40,7 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
       event('2026-08-05T10:00:15.000Z', 'conversation_item_added', { role: 'assistant', text: 'Rep said hello' }),
       event('2026-08-05T10:00:20.000Z', 'sip_end_action_terminated'),
     ].join('\n') + '\n');
-    writeFileSync(join(recordingsDir, `${callId}.mixed.private.ogg`), 'fixture');
+    writeFileSync(join(recordingsDir, `${artifactId}.mixed.private.ogg`), 'fixture');
 
     const session = { id: 'box-session-1', cwd: caseDir };
     const snapshot = buildVobSnapshot({ sessionId: session.id, session, root });
@@ -52,7 +53,7 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     assert.deepEqual(snapshot.attempts[0].segments.map((segment) => segment.label), ['unknown', 'ivr', 'hold', 'unknown', 'human']);
     assert.equal(snapshot.attempts[0].segments[1].startSec, 2);
     assert.equal(snapshot.attempts[0].segments[2].endSec, 12);
-    assert.equal(resolveVobAudio({ sessionId: session.id, session, callId, root }).path, join(recordingsDir, `${callId}.mixed.private.ogg`));
+    assert.equal(resolveVobAudio({ sessionId: session.id, session, callId, root }).path, join(recordingsDir, `${artifactId}.mixed.private.ogg`));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -114,12 +114,16 @@ function walkFiles(dir, depth = 0) {
 function attemptFiles(caseDir, callId, runtimeHint = '') {
   const runtimeRoot = join(caseDir, 'runtime');
   const files = walkFiles(runtimeRoot).filter((path) => inside(path, caseDir));
-  const needle = String(callId || '');
+  const rawNeedle = String(callId || '');
+  // LiveKit ledger IDs are prefixed (`livekit_<recording-hash>`), while the
+  // private artifact filenames intentionally contain only the opaque hash.
+  // Accept both forms without weakening the case-root boundary checks below.
+  const needles = [...new Set([rawNeedle, rawNeedle.replace(/^livekit_/, '')].filter(Boolean))];
   const hinted = runtimeHint && inside(resolve(caseDir, runtimeHint), caseDir)
     ? walkFiles(resolve(caseDir, runtimeHint))
     : [];
   const all = [...new Set([...hinted, ...files])];
-  const matching = all.filter((path) => basename(path).startsWith(`${needle}.`) || basename(path).startsWith(`${needle}-`));
+  const matching = all.filter((path) => needles.some((needle) => basename(path).startsWith(`${needle}.`) || basename(path).startsWith(`${needle}-`)));
   const events = matching.filter((path) => path.endsWith('.jsonl'));
   const recordings = matching.filter((path) => /recordings/.test(path) && /\.(wav|ogg|mp3|m4a)$/i.test(path));
   return { events, recordings };
