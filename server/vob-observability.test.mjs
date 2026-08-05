@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
+import { buildVobSnapshot, classifyEvents, resolveVobAudio } from './vob-observability.mjs';
 
 const event = (at, type, extra = {}) => JSON.stringify({ at, type, ...extra });
 
@@ -57,4 +57,15 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('speech cues correct a stale human phase for hold prompts', () => {
+  const baseAt = Date.parse('2026-08-05T10:00:00.000Z');
+  const data = classifyEvents([
+    { at: '2026-08-05T10:00:01.000Z', type: 'live_agent_activated' },
+    { at: '2026-08-05T10:00:02.000Z', type: 'conversation_item_added', role: 'assistant', text: 'Please hold while I pull that up.' },
+    { at: '2026-08-05T10:00:08.000Z', type: 'conversation_item_added', role: 'assistant', text: 'I can help with that.' },
+  ], baseAt);
+  assert.deepEqual(data.transcript.map((row) => row.phase), ['hold', 'human']);
+  assert.deepEqual(data.segments.map((segment) => segment.label), ['human', 'hold', 'human']);
 });

@@ -93,7 +93,7 @@ const agentModelLabel = (agent, rawModel) => {
   return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
 };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
-let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null, vobConsoleOpen = false;
+let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null, vobConsoleOpen = false, vobRenderKey = '';
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -2586,6 +2586,7 @@ function toggleVobConsole(force) {
   vobConsoleOpen = force == null ? !vobConsoleOpen : !!force;
   if (vobConsoleOpen) vobRenderSnapshot(vobSnapshot);
   else {
+    vobRenderKey = '';
     const root = $('vobConsole');
     if (root) { root.classList.add('hidden'); root.innerHTML = ''; }
   }
@@ -2595,6 +2596,7 @@ function hideVobConsole() {
   if (vobRefreshTimer) { clearTimeout(vobRefreshTimer); vobRefreshTimer = null; }
   vobRefreshSeq += 1;
   vobSnapshot = null;
+  vobRenderKey = '';
   vobConsoleOpen = false;
   const bar = $('vobBar');
   if (bar) bar.classList.add('hidden');
@@ -2626,34 +2628,77 @@ function vobAudioUrl(callId) {
   // server's existing short-lived query-token compatibility path for media.
   return `${epUrl(ep, path)}?token=${encodeURIComponent(ep.token || '')}`;
 }
+function vobSnapshotKey(vob) {
+  if (!vob) return '';
+  const { refreshedAt, ...content } = vob;
+  return JSON.stringify(content);
+}
+function vobFieldBlock(fields) {
+  const values = Array.isArray(fields) ? fields.map((field) => String(field || '').trim()).filter(Boolean) : [];
+  if (!values.length) return '<span class="vobMuted">No fields listed</span>';
+  const chip = (field) => `<span class="vobFieldChip">${esc(field)}</span>`;
+  const preview = values.slice(0, 4).map(chip).join('');
+  const extra = values.length > 4 ? `<details class="vobFieldDetails"><summary>+${values.length - 4} more fields</summary><div class="vobFieldList">${values.slice(4).map(chip).join('')}</div></details>` : '';
+  return `<div class="vobFieldBlock"><div class="vobFieldChips">${preview}</div>${extra}</div>`;
+}
 function vobRenderSnapshot(vob) {
   const root = $('vobConsole');
   if (!root) return;
+  const renderKey = vobSnapshotKey(vob);
+  if (renderKey === vobRenderKey && root.childElementCount) return;
   const previousScrollTop = root.scrollTop;
+  const audioState = new Map([...root.querySelectorAll('audio[data-vob-audio]')].map((audio) => [audio.dataset.vobAudio, {
+    currentTime: audio.currentTime,
+    paused: audio.paused,
+    volume: audio.volume,
+    muted: audio.muted,
+    playbackRate: audio.playbackRate,
+  }]));
   const attempts = Array.isArray(vob.attempts) ? vob.attempts : [];
   const ledger = Array.isArray(vob.ledger) ? vob.ledger : [];
   const facts = Array.isArray(vob.facts) ? vob.facts : [];
   const status = vobStatusLabel(vob.status, vob.live);
   const slack = vob.slackUrl ? `<a class="vobLink" href="${esc(vob.slackUrl)}" target="_blank" rel="noopener">Open Slack thread ↗</a>` : '<span class="vobMuted">Slack thread not recorded</span>';
-  const ledgerRows = ledger.length ? ledger.map((row) => `<tr><td><code>${esc(vobShortId(row.callId))}</code></td><td>${esc(row.kind || 'call')} · #${esc(row.sequence || '—')}</td><td>${esc((row.focusFields || []).join(', ') || '—')}</td><td><span class="vobPill ${row.attemptStatus === 'live' ? 'live' : ''}">${esc(row.attemptStatus || 'pending')}</span></td></tr>`).join('') : '<tr><td colspan="4" class="vobEmpty">No ledger calls recorded yet.</td></tr>';
-  const factRows = facts.length ? facts.map((fact) => `<tr><td>${esc(fact.key)}</td><td>${esc(fact.value == null ? '—' : fact.value)}</td><td>${esc(fact.status || 'unknown')}</td><td>${esc((fact.sourceCallIds || []).map(vobShortId).join(', ') || '—')}</td></tr>`).join('') : '<tr><td colspan="4" class="vobEmpty">No answers recorded yet.</td></tr>';
+  const ledgerCards = ledger.length ? ledger.map((row) => `<article class="vobLedgerCard"><div class="vobLedgerHead"><div><code>${esc(vobShortId(row.callId))}</code><span class="vobMeta">${esc(row.kind || 'call')} · #${esc(row.sequence || '—')}</span></div><span class="vobPill ${row.attemptStatus === 'live' ? 'live' : ''}">${esc(row.attemptStatus || 'pending')}</span></div>${vobFieldBlock(row.focusFields)}</article>`).join('') : '<div class="vobEmpty">No ledger calls recorded yet.</div>';
+  const factCards = facts.length ? facts.map((fact) => `<article class="vobFactCard"><div class="vobFactKey">${esc(fact.key)}</div><div class="vobFactValue">${esc(fact.value == null ? '—' : fact.value)}</div><div class="vobFactMeta">${esc(fact.status || 'unknown')} · source ${esc((fact.sourceCallIds || []).map(vobShortId).join(', ') || '—')}</div></article>`).join('') : '<div class="vobEmpty">No answers recorded yet.</div>';
   const attemptHtml = attempts.length ? attempts.map((attempt) => {
     const callId = String(attempt.callId || '');
-    const audio = attempt.audio ? `<audio class="vobAudio" controls preload="metadata" data-vob-audio="${esc(callId)}" src="${esc(vobAudioUrl(callId))}"></audio>` : '<div class="vobEmpty">No recording artifact yet.</div>';
+    const audio = attempt.audio ? `<audio class="vobAudio" controls preload="metadata" data-vob-audio="${esc(callId)}" src="${esc(vobAudioUrl(callId))}"></audio><div class="vobAudioError hidden" data-vob-audio-error="${esc(callId)}" role="status">Recording could not be loaded. Try again from the audio controls.</div>` : '<div class="vobEmpty">No recording artifact yet.</div>';
     const segments = (attempt.segments || []).map((segment) => `<button type="button" class="vobSegment ${vobPhaseClass(segment.label)}" data-vob-seek="${Number(segment.startSec) || 0}" data-vob-end="${Number(segment.endSec) || 0}" data-vob-call="${esc(callId)}"><span>${esc(vobPhaseLabel(segment.label))}</span><small>${vobClock(segment.startSec)}–${vobClock(segment.endSec)}</small></button>`).join('');
-    const transcript = (attempt.transcript || []).map((row, index) => `<button type="button" class="vobTranscriptRow" data-vob-seek="${Number(row.startSec) || 0}" data-vob-call="${esc(callId)}" data-vob-transcript-index="${index}"><time>${vobClock(row.startSec)}</time><span class="vobTranscriptRole">${esc(row.role || 'unknown')}</span><span class="vobTranscriptText">${esc(row.text)}</span></button>`).join('');
+    const transcript = (attempt.transcript || []).map((row, index) => `<button type="button" class="vobTranscriptRow" data-vob-seek="${Number(row.startSec) || 0}" data-vob-call="${esc(callId)}" data-vob-transcript-index="${index}"><time>${vobClock(row.startSec)}</time><span class="vobTranscriptRole">${esc(row.role || 'unknown')}</span><span class="vobTranscriptPhase ${vobPhaseClass(row.phase)}">${esc(vobPhaseLabel(row.phase))}</span><span class="vobTranscriptText">${esc(row.text)}</span></button>`).join('');
     return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
   }).join('') : '<div class="vobEmpty">No call attempts recorded yet.</div>';
-  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions"><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<div class="vobNote">${esc(vob.note)}</div>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">fields to ask and attempt status</span></div><div class="vobTableWrap"><table class="vobTable"><thead><tr><th>Call</th><th>Type</th><th>Fields</th><th>Status</th></tr></thead><tbody>${ledgerRows}</tbody></table></div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobTableWrap"><table class="vobTable"><thead><tr><th>Field</th><th>Answer</th><th>State</th><th>Source</th></tr></thead><tbody>${factRows}</tbody></table></div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions"><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">fields to ask and attempt status</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  vobRenderKey = renderKey;
   root.scrollTop = previousScrollTop;
   root.querySelector('[data-vob-close]')?.addEventListener('click', () => toggleVobConsole(false));
   root.querySelectorAll('[data-vob-seek]').forEach((button) => button.addEventListener('click', () => {
     const audio = [...root.querySelectorAll('audio[data-vob-audio]')].find((candidate) => candidate.dataset.vobAudio === button.dataset.vobCall);
     if (!audio) return;
-    audio.currentTime = Math.max(0, Number(button.dataset.vobSeek) || 0);
-    audio.play().catch(() => {});
+    const seek = () => {
+      const target = Math.max(0, Number(button.dataset.vobSeek) || 0);
+      try { audio.currentTime = Number.isFinite(audio.duration) ? Math.min(target, audio.duration) : target; } catch {}
+      audio.play().catch(() => {});
+    };
+    if (audio.readyState >= 1) seek();
+    else audio.addEventListener('loadedmetadata', seek, { once: true });
   }));
   root.querySelectorAll('audio[data-vob-audio]').forEach((audio) => {
+    const error = [...root.querySelectorAll('[data-vob-audio-error]')].find((candidate) => candidate.dataset.vobAudioError === audio.dataset.vobAudio);
+    audio.addEventListener('error', () => error?.classList.remove('hidden'));
+    audio.addEventListener('loadedmetadata', () => error?.classList.add('hidden'));
+    const prior = audioState.get(audio.dataset.vobAudio);
+    if (prior) {
+      audio.volume = prior.volume;
+      audio.muted = prior.muted;
+      audio.playbackRate = prior.playbackRate;
+      const restore = () => {
+        try { audio.currentTime = Number.isFinite(audio.duration) ? Math.min(prior.currentTime, audio.duration) : prior.currentTime; } catch {}
+        if (!prior.paused) audio.play().catch(() => {});
+      };
+      if (audio.readyState >= 1) restore();
+      else audio.addEventListener('loadedmetadata', restore, { once: true });
+    }
     audio.addEventListener('timeupdate', () => {
       const attempt = audio.closest('[data-vob-attempt]');
       if (!attempt) return;
@@ -2689,7 +2734,7 @@ async function refreshVobConsole() {
     const meta = $('vobBarMeta');
     if (meta) meta.textContent = `${data.payerName || 'Verification of benefits'} · ${vobStatusLabel(data.status, data.live)}`;
     syncVobConsoleButton();
-    if (vobConsoleOpen) vobRenderSnapshot(data);
+    if (vobConsoleOpen && vobSnapshotKey(data) !== vobRenderKey) vobRenderSnapshot(data);
     // Keep a low-rate watch even before the first call starts or after it ends:
     // the operator can launch a call from the same session, and late ledger /
     // transcript artifacts should appear without reopening the chat.

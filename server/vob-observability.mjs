@@ -138,6 +138,18 @@ function textOf(value) {
   return String(value || '').trim().slice(0, MAX_TEXT_LENGTH);
 }
 
+// The event stream is authoritative when it has an explicit controller phase,
+// but speech often arrives a beat after the controller event.  Treat the
+// unmistakable queue/IVR phrases as a local correction for that short window.
+// This prevents a generated "Please hold" prompt from inheriting a preceding
+// `live_agent_activated` label while the caller is still in hold music.
+function transcriptPhaseLabel(text) {
+  const normalized = String(text || '').toLowerCase();
+  if (/\b(?:please|kindly)\s+(?:hold|wait)|\bremain on the line\b|\bcall is important\b|\ball representatives? are (?:currently )?assisting\b|\bhold music\b|\bqueue\b/.test(normalized)) return 'hold';
+  if (/\b(?:press|dial|enter|select)\s+(?:\d|the|an? )|\bautomated (?:system|menu)\b|\bmenu option\b|\bextension\b/.test(normalized)) return 'ivr';
+  return null;
+}
+
 function eventExplicitLabel(event) {
   const type = String(event.type || '').toLowerCase();
   const phase = String(event.phase || '').toLowerCase();
@@ -150,7 +162,7 @@ function eventExplicitLabel(event) {
   return null;
 }
 
-function classifyEvents(events, baseAt) {
+export function classifyEvents(events, baseAt) {
   let current = 'unknown';
   const transcript = [];
   const labeled = [];
@@ -159,19 +171,26 @@ function classifyEvents(events, baseAt) {
     if (at == null) continue;
     const explicit = eventExplicitLabel(event);
     let label = explicit;
+    let nextCurrent = explicit || current;
     if (event.type === 'conversation_item_added') {
-      label = current === 'human' ? 'human' : current === 'ivr' ? 'ivr' : 'unknown';
       const text = textOf(event.text);
+      const speechLabel = transcriptPhaseLabel(text);
+      label = speechLabel || (current === 'human' ? 'human' : current === 'ivr' ? 'ivr' : 'unknown');
+      // A rep can say "Please hold" after answering.  Label that utterance as
+      // hold, but keep the controller in human so the next rep utterance does
+      // not inherit hold forever.
+      if (speechLabel !== 'hold' || current !== 'human') nextCurrent = label;
       if (text) transcript.push({
         at: event.at,
         startSec: Math.max(0, (at - baseAt) / 1000),
         role: String(event.role || 'unknown'),
         text,
+        phase: label,
         interrupted: !!event.interrupted,
       });
     }
     if (!label) label = current;
-    current = label;
+    current = nextCurrent;
     labeled.push({ at, label, type: String(event.type || '') });
   }
 
@@ -201,6 +220,20 @@ function eventSort(a, b) {
   return (eventTime(a) || 0) - (eventTime(b) || 0);
 }
 
+function recordingPriority(path) {
+  const name = basename(path).toLowerCase();
+  if (name.endsWith('.mixed.private.ogg')) return 0;
+  if (name.endsWith('.payer.private.wav')) return 1;
+  return 2;
+}
+
+function selectRecording(paths) {
+  return paths.map((path) => {
+    try { return { path, size: statSync(path).size }; } catch { return null; }
+  }).filter((item) => item && item.size > 0)
+    .sort((a, b) => recordingPriority(a.path) - recordingPriority(b.path) || b.size - a.size)[0]?.path || null;
+}
+
 function buildAttempt(caseDir, call) {
   const callId = String(call.callId || call.id || '').trim();
   if (!callId) return null;
@@ -212,7 +245,7 @@ function buildAttempt(caseDir, call) {
   const terminal = events.some((event) => TERMINAL_EVENTS.has(String(event.type || '')));
   const latestAt = times.length ? Math.max(...times) : 0;
   const active = latestAt > 0 && !terminal && (Date.now() - latestAt < 30_000);
-  const recording = files.recordings[0] || null;
+  const recording = selectRecording(files.recordings);
   let recordedAt = null;
   try { recordedAt = recording ? statSync(recording).mtime.toISOString() : null; } catch {}
   return {
@@ -293,9 +326,7 @@ export function resolveVobAudio({ sessionId, session = null, callId, root = DEFA
   const match = findVobCase({ sessionId, session, root });
   if (!match || match.ambiguous || !/^[A-Za-z0-9._-]+$/.test(String(callId || ''))) return null;
   const files = attemptFiles(match.caseDir, callId);
-  const path = files.recordings.find((candidate) => candidate.endsWith('.mixed.private.ogg'))
-    || files.recordings.find((candidate) => candidate.endsWith('.payer.private.wav'))
-    || files.recordings[0];
+  const path = selectRecording(files.recordings);
   if (!path || !inside(path, match.caseDir)) return null;
   const contentType = path.endsWith('.wav') ? 'audio/wav' : path.endsWith('.ogg') ? 'audio/ogg' : 'application/octet-stream';
   return { path, contentType };
