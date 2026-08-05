@@ -5626,6 +5626,7 @@ async function renderAccountsList() {
     if (!a.primary && a.usable) btn('Make primary', () => acctAction('/api/accounts/primary', { id: a.id }, 'Primary set'));
     if (a.cooling) btn('Clear cooldown', () => acctAction('/api/accounts/clear', { id: a.id }, 'Cooldown cleared'));
     else if (a.usable) btn('Rest 90m', () => acctAction('/api/accounts/cooldown', { id: a.id, minutes: 90 }, 'Resting account'));
+    if (a.type === 'oauth') btn('Re-auth', () => renderReAuth(a.id, a.label || a.id, a.email));
     if (a.id !== 'mine' && !a.primary) btn('Remove', () => { if (confirm(`Remove account "${a.label || a.id}"? (its credentials dir is left on disk)`)) acctAction('/api/accounts/remove', { id: a.id }, 'Removed'); }, 'danger');
     body.appendChild(card);
   }
@@ -5765,6 +5766,57 @@ async function switchChatAccount(accountId, label) {
     if (j.error) return toast(j.error);
     toast(`Moved to ${label} — your next message continues there`);
   } catch { toast('Switch failed'); }
+}
+
+function renderReAuth(accountId, label, email) {
+  const body = $('accountsBody');
+  body.innerHTML = `<div class="acctForm">
+    <div class="acctSectionHdr">Re-authenticate "${esc(label)}"</div>
+    <div class="acctNote">Your token for this account has expired. Get a fresh login link below — use a private window if you're signed in as a different account in your browser.</div>
+    <button id="raStart" class="btn primary">Get login link</button>
+    <div id="raStep2" class="hidden">
+      <div class="acctNote">1. Open the link and sign in as <b>${esc(email || label)}</b>.<br>2. Copy the code it gives you and paste it below.</div>
+      <a id="raLink" class="acctLink" target="_blank" rel="noopener">Open Claude login ↗</a>
+      <div class="acctLbl">Paste the code (looks like <code>code#state</code>)</div>
+      <button id="raPaste" class="btn primary">📋 Paste code from clipboard</button>
+      <textarea id="raCode" class="acctInput acctCodeView" rows="3" readonly placeholder="pasted code shows here"></textarea>
+      <button id="raComplete" class="btn primary">Complete re-auth</button>
+    </div>
+    <button id="raBack" class="chip small acctBack">← Back to accounts</button></div>`;
+  $('raBack').onclick = renderAccountsList;
+  const pasteCode = async () => {
+    const el = $('raCode');
+    try {
+      const t = await navigator.clipboard.readText();
+      if (!t || !t.trim()) return toast('Clipboard is empty — copy the code first');
+      el.removeAttribute('readonly'); el.value = t.trim(); el.setAttribute('readonly', '');
+      toast('Pasted ✓');
+    } catch { el.removeAttribute('readonly'); el.focus(); toast('Long-press the field and tap Paste'); }
+  };
+  $('raPaste').onclick = pasteCode;
+  let flowId = null;
+  $('raStart').onclick = async () => {
+    const b = $('raStart'); b.disabled = true; b.textContent = 'Getting link…';
+    try {
+      const j = await (await api('/api/accounts/reauth/start', { method: 'POST', body: JSON.stringify({ id: accountId }) })).json();
+      if (j.error) return toast(j.error);
+      flowId = j.flowId; $('raLink').href = j.url; $('raStep2').classList.remove('hidden');
+      toast('Open the link, then paste the code back');
+    } catch { toast('Failed to start re-auth'); }
+    finally { b.disabled = false; b.textContent = 'Get login link'; }
+  };
+  $('raComplete').onclick = async () => {
+    const code = $('raCode').value.trim(); if (!code) return toast('Paste the code first');
+    if (!flowId) return toast('Start the re-auth first');
+    const b = $('raComplete'); b.disabled = true; b.textContent = 'Finishing…';
+    try {
+      const j = await (await api('/api/accounts/reauth/complete', { method: 'POST', body: JSON.stringify({ flowId, code }) })).json();
+      if (j.error) return toast(j.error);
+      toast(`Re-authenticated${j.email ? ' as ' + j.email : ''}`);
+      renderAccountsList();
+    } catch { toast('Re-auth failed'); }
+    finally { b.disabled = false; b.textContent = 'Complete re-auth'; }
+  };
 }
 
 function renderAddAccount() {
