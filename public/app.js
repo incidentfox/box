@@ -58,7 +58,7 @@ function onTeamAccessLost() {
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'medium', sandbox: 'off', serviceTier: '', personality: '' },
+  codex: { model: 'gpt-5.6-luna', reasoningEffort: 'xhigh', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
@@ -3667,7 +3667,7 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-terra' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'claude-opus-5');
+  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-luna' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'claude-opus-5');
   const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
