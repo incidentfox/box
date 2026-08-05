@@ -3238,6 +3238,8 @@ app.post('/api/accounts/remove', ...acctRoute((req) => accounts.removeAccount((r
 app.post('/api/accounts/primary', ...acctRoute((req) => accounts.setPrimary((req.body || {}).id)));
 app.post('/api/accounts/cooldown', ...acctRoute((req) => accounts.cooldown((req.body || {}).id, (req.body || {}).minutes)));
 app.post('/api/accounts/clear', ...acctRoute((req) => accounts.clearCooldown((req.body || {}).id)));
+app.post('/api/accounts/reauth/start', ...acctRoute((req) => accounts.reAuthStart((req.body || {}).id)));
+app.post('/api/accounts/reauth/complete', ...acctRoute((req) => accounts.reAuthComplete(req.body || {})));
 
 // --- Codex (OpenAI) + Gemini (Google) login: subscription OR API key, from the phone ---
 app.get('/api/providers', ...acctRoute(async () => ({ providers: providerLogin.providerStatus(), meta: providerLogin.providerMeta })));

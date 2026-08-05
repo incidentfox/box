@@ -126,6 +126,41 @@ export async function saveApiKey({ id, label, apiKey }) {
 // do NOT use sanitizeId (it's for NEW names and rejects the reserved "mine").
 const existingId = (id) => { const s = String(id || '').trim(); if (!/^[a-z0-9_-]+$/i.test(s)) throw new Error('bad account id'); return s; };
 
+// Re-authenticate an EXISTING account (including "mine"). Same PKCE OAuth flow as
+// startOAuth but looks up the real configDir from the broker rather than deriving it.
+export async function reAuthStart(id) {
+  const accountId = existingId(id);
+  const { accounts } = await listAccounts();
+  const acct = (accounts || []).find(a => a.id === accountId);
+  if (!acct) throw new Error(`Unknown account: ${accountId}`);
+  const { verifier, challenge } = genPkce();
+  const state = genState();
+  const url = buildAuthUrl({ challenge, state, loginHint: acct.email || null });
+  const flowId = crypto.randomBytes(12).toString('hex');
+  const p = prunePending(loadPending());
+  p[flowId] = { id: accountId, label: acct.label || accountId, dir: acct.configDir, verifier, state, ts: Date.now(), reauth: true };
+  savePending(p);
+  return { flowId, url };
+}
+
+export async function reAuthComplete({ flowId, code }) {
+  const p = prunePending(loadPending());
+  const f = p[flowId];
+  if (!f) throw new Error('Login session expired — start the login again.');
+  if (!f.reauth) throw new Error('Not a re-auth flow — use the complete-oauth endpoint instead.');
+  const parsed = parsePasted(code, f.state);
+  if (!parsed?.code) throw new Error('No authorization code found in what you pasted.');
+  const tok = await exchangeCode({ code: parsed.code, state: parsed.state, verifier: f.verifier });
+  const profile = await fetchProfile(tok.access_token);
+  const subscriptionType = subscriptionFromProfile(profile);
+  const email = profile?.account?.email || tok.account?.email_address || null;
+  fs.writeFileSync(path.join(f.dir, '.credentials.json'), JSON.stringify(credentialsJson(tok, subscriptionType)), { mode: 0o600 });
+  // Re-register is idempotent — updates label/email in the broker config without changing anything else.
+  await broker(['register', f.id, '--dir', f.dir, '--label', f.label, '--type', 'oauth', ...(email ? ['--email', email] : [])]);
+  delete p[flowId]; savePending(p);
+  return { ok: true, id: f.id, email, subscriptionType };
+}
+
 export async function removeAccount(id) { await broker(['remove', existingId(id)]); return { ok: true }; }
 export async function setPrimary(id) { await broker(['primary', existingId(id)]); return { ok: true }; }
 export async function cooldown(id, minutes) { await broker(['cooldown', existingId(id), '--minutes', String(minutes || 90), '--reason', 'manual']); return { ok: true }; }
