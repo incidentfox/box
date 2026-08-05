@@ -28,6 +28,13 @@ STATE_DIR="$HOME/.cc-mobile"; mkdir -p "$STATE_DIR"
 SRV_LOG="$STATE_DIR/server.log"
 TUN_LOG="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/url.txt"
+# On systemd hosts, keep each server generation in its own transient unit.  The
+# keeper intentionally survives server cutovers, and Box sessions intentionally
+# outlive the HTTP process; putting the server in a fresh cgroup prevents a
+# restart from inheriting every old session/worker process from box-app.service.
+# Non-systemd installs retain the portable nohup path below.
+SERVER_UNIT_PREFIX="${BOX_SERVER_UNIT_PREFIX:-box-app-server}"
+SERVER_UNIT_FILE="$STATE_DIR/server-unit"
 
 # Single-instance guard (cron tick + manual launch dedupe).
 # flock is Linux-only (util-linux); fall back to a PID-file lock on macOS/BSD.
@@ -65,6 +72,11 @@ server_pids() {
   done
 }
 server_up() { [ -n "$(server_pids | head -n 1)" ]; }
+systemd_user_available() {
+  command -v systemd-run >/dev/null 2>&1 \
+    && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1
+}
 ensure_node_pty() {
   if node -e 'require("node-pty")' >/dev/null 2>&1; then
     return 0
@@ -82,6 +94,24 @@ ensure_node_pty() {
 }
 start_server() {
   ensure_node_pty || return 1
+
+  if systemd_user_available; then
+    local unit="${SERVER_UNIT_PREFIX}-$(date +%s)-$$.service"
+    printf '%s\n' "$unit" >"$SERVER_UNIT_FILE"
+    echo "$(date -u +%FT%TZ) starting isolated server unit $unit" >>"$SRV_LOG"
+    if systemd-run --user --collect --unit="$unit" --working-directory="$APP_DIR" \
+      --property=Type=exec \
+      --property=KillMode=process \
+      --property=OOMPolicy=continue \
+      --property=Restart=no \
+      --property=StandardOutput=append:"$SRV_LOG" \
+      --property=StandardError=append:"$SRV_LOG" \
+      node server/index.mjs >>"$SRV_LOG" 2>&1; then
+      return 0
+    fi
+    echo "$(date -u +%FT%TZ) isolated server unit failed; falling back to direct launch" >>"$SRV_LOG"
+  fi
+
   nohup node server/index.mjs >>"$SRV_LOG" 2>&1 9>&- &
 }
 
