@@ -119,13 +119,34 @@
     return Number.isFinite(parsed) ? (parsed > 100000 ? parsed / 1000 : parsed) : ((performance.now() - state.startedAt) / 1000);
   }
 
+  function humanTranscriptText(value) {
+    const text = String(value == null ? '' : value).replace(/\r/g, '').trim();
+    if (!text) return '';
+    const candidates = [text];
+    const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fenced) candidates.unshift(fenced[1].trim());
+    else {
+      const unfenced = text.replace(/^```(?:json)?\s*|\s*```$/gi, '').trim();
+      if (unfenced !== text) candidates.unshift(unfenced);
+    }
+    for (const candidate of candidates) {
+      try {
+        const payload = JSON.parse(candidate);
+        if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'say')) {
+          return String(payload.say == null ? '' : payload.say).trim();
+        }
+      } catch {}
+    }
+    return text;
+  }
+
   function upsertTranscript(segments, participant, room) {
     const list = document.querySelector('[data-vob-test-transcript]');
     if (!list) return;
     for (const segment of (Array.isArray(segments) ? segments : [])) {
       const id = String(segment?.id || `${participant?.identity || 'agent'}-${segmentTime(segment)}-${segment?.text || ''}`);
       const local = !!room?.localParticipant && participant?.identity === room.localParticipant.identity;
-      const rowData = { id, text: String(segment?.text || '').trim(), final: segment?.final !== false, local, start: Math.max(0, segmentTime(segment)) };
+      const rowData = { id, text: humanTranscriptText(segment?.text), final: segment?.final !== false, local, start: Math.max(0, segmentTime(segment)) };
       if (!rowData.text) continue;
       state.segments.set(id, rowData);
       let row = [...list.children].find((candidate) => candidate.dataset?.vobSegment === id);

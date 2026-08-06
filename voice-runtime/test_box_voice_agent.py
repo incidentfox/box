@@ -18,6 +18,7 @@ from box_voice_agent import (
     speakable_text,
     text_from_message,
     turn_handling_options,
+    vob_spoken_text,
     vob_production_stt_options,
     VOB_TRANSCRIPT_TOPIC,
     voice_bool,
@@ -76,6 +77,17 @@ def test_adaptive_barge_in_requires_explicit_runtime_flag():
 def test_speakable_text_removes_markdown_ellipses_and_joined_chunks():
     raw = "## Status\n- First point...Next point. [Details](https://example.test/a)\n```sh\nrm -rf /\n```"
     assert speakable_text(raw) == "Status First point. Next point. Details I put the code details in the session."
+
+
+def test_vob_spoken_text_unwraps_fenced_json_without_leaking_control_fields():
+    raw = "```json\n{\"say\":\"Eligibility and benefits?\",\"action\":\"speak\",\"proposed_complete\":false}\n```"
+    assert vob_spoken_text(raw) == "Eligibility and benefits?"
+    assert vob_spoken_text('{"say":"Ready.","action":"speak"}') == "Ready."
+    assert vob_spoken_text("prefix {\"say\": \"Transferred.\", \"action\": \"speak\"} suffix") == "Transferred."
+
+
+def test_vob_spoken_text_falls_back_to_plain_text():
+    assert vob_spoken_text("Hello there.") == "Hello there."
 
 
 def test_final_text_is_not_spoken_twice_after_matching_progress():
