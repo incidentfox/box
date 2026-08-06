@@ -35,6 +35,7 @@ import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
+import { createVobTestConfig, normalizeVobTestSettings, vobTestCatalog } from './vob-test-mode.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -853,11 +854,14 @@ export function agentFinishedLine({ agent = 'claude', speakAs = 'that work', tai
 
 export function registerVoiceAssistant(app, ctx) {
   const {
-    requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
+    requireAuth, requireOwner, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
     defaultCwd, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
     macAvailable, loadCodexMessages, codexHome, codexMessagePath, transcribe,
-    runAdapterTurn, adapterSessionInfo, voiceSttEnabled,
+    runAdapterTurn, adapterSessionInfo, voiceSttEnabled, vobSnapshotForSession, vobTestConfigStore,
   } = ctx;
+  // A few isolated route tests register this module with only the authenticated
+  // guard. Production supplies the stricter owner guard for VOB controls.
+  const ownerGuard = typeof requireOwner === 'function' ? requireOwner : requireAuth;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
   const MODEL = cfg('VOICE_ASSISTANT_MODEL', 'gpt-realtime-2.1');
@@ -2757,6 +2761,52 @@ ${voiceAutonomyPolicy()}
     } catch (e) {
       res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
     }
+  });
+
+  // Owner-only VOB role-play rooms. The case snapshot and selected settings stay in
+  // the server's short-lived config store; the agent receives only an opaque test id
+  // in LiveKit job metadata and loads the prompt from this authenticated endpoint.
+  app.get('/api/vob/test/options', ownerGuard, (_req, res) => {
+    res.json(vobTestCatalog());
+  });
+  app.post('/api/sessions/:id/vob/test/token', ownerGuard, async (req, res) => {
+    if (MODE !== 'adapter' || ADAPTER_TRANSPORT !== 'livekit' || !livekitConfigured(LIVEKIT)) {
+      return res.status(409).json({ error: 'LiveKit adapter mode is not configured' });
+    }
+    try {
+      const sessionId = String(req.params.id || '').trim();
+      const snapshot = typeof vobSnapshotForSession === 'function'
+        ? await Promise.resolve(vobSnapshotForSession(sessionId))
+        : null;
+      if (!snapshot || !snapshot.linked) {
+        return res.status(snapshot && snapshot.ambiguous ? 409 : 404).json(snapshot || { error: 'VOB case not found' });
+      }
+      if (!vobTestConfigStore || typeof vobTestConfigStore.put !== 'function') {
+        return res.status(503).json({ error: 'VOB test mode is not available' });
+      }
+      const testId = `vob-test-${randomBytes(12).toString('hex')}`;
+      const settings = normalizeVobTestSettings(req.body || {});
+      const config = createVobTestConfig({ testId, sessionId, snapshot, settings });
+      vobTestConfigStore.put(config);
+      const join = await createLivekitVoiceJoin({
+        config: LIVEKIT,
+        vsid: testId,
+        roomPrefix: 'box-vob-test',
+        source: 'box-vob-test',
+        participantName: 'VOB test operator',
+        metadata: { mode: 'vob-test', testId, sessionId },
+      });
+      return res.json({ ...join, testId, sessionId, mode: 'vob-test', settings, agent: LIVEKIT.agentName, transport: 'livekit' });
+    } catch (e) {
+      return res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
+    }
+  });
+  app.get('/api/voice/vob-test/config/:testId', requireAuth, (req, res) => {
+    const config = vobTestConfigStore && typeof vobTestConfigStore.get === 'function'
+      ? vobTestConfigStore.get(req.params.testId)
+      : null;
+    if (!config) return res.status(404).json({ error: 'VOB test config expired or not found' });
+    return res.json(config);
   });
   async function synthesizeAdapterSpeech(text) {
     const r = await fetch('https://api.openai.com/v1/audio/speech', {

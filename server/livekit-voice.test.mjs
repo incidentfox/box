@@ -15,6 +15,7 @@ const options = livekitRoomOptions({ config, vsid: 'call-123', metadata: { agent
 assert.equal(options.maxParticipants, 2);
 assert.equal(options.agents.length, 1);
 assert.equal(options.agents[0].agentName, 'box-codex-voice');
+assert.deepEqual(JSON.parse(options.metadata), { source: 'box-voice', vsid: 'call-123', agent: 'codex' });
 const join = await createLivekitVoiceJoin({ config, vsid: 'call-123', metadata: { agent: 'codex' } });
 assert.equal(join.room, 'box-voice-call-123');
 assert.equal(join.roomSid, '');

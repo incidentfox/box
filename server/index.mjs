@@ -46,6 +46,7 @@ import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
+import { createVobTestConfigStore } from './vob-test-mode.mjs';
 import * as team from './team.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -57,6 +58,7 @@ const teamClaudeEngine = new ClaudeExecEngine();
 const geminiEngine = new GeminiExecEngine();
 const agyEngine = new AgyExecEngine();
 const macEngine = new MacExecEngine();
+const vobTestConfigStore = createVobTestConfigStore();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -3690,7 +3692,7 @@ if (overlay.onReady) { try { overlay.onReady({ HOME, DEFAULT_CWD }); } catch (e)
 // model makes executes HERE with the box's own powers (sessions, Linear, research, brain…).
 try {
   registerVoiceAssistant(app, {
-    requireAuth, cfg, HOME, STATE_DIR, PORT, authToken: AUTH_TOKEN, ownerName: OWNER_NAME,
+    requireAuth, requireOwner, cfg, HOME, STATE_DIR, PORT, authToken: AUTH_TOKEN, ownerName: OWNER_NAME,
     defaultCwd: () => DEFAULT_CWD, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
     macAvailable, loadCodexMessages, codexHome: CODEX_HOME, codexMessagePath: codexMsgFile,
     transcribe: transcribeBuffer, // for voice-memory re-transcription (recover a garbled clip)
@@ -3702,6 +3704,11 @@ try {
       const s = rt(sessionId || key);
       return { sessionId: s.sessionId || '', agent: s.agent || '', busy: !!s.running || s.queue.length > 0 };
     },
+    vobSnapshotForSession: (sessionId) => {
+      const session = (loadCodex().sessions || {})[sessionId] || null;
+      return buildVobSnapshot({ sessionId, session });
+    },
+    vobTestConfigStore,
   });
 } catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
