@@ -2438,7 +2438,9 @@ async function openPipeDetail(path, title) {
 }
 
 /* ---------- chat ---------- */
-const INITIAL_HISTORY_RENDER_LIMIT = 120;
+// Keep first paint cheap for long-running chats. The rest of the already-fetched
+// history stays in `localEarlier` and appears normally when the user scrolls up.
+const INITIAL_HISTORY_RENDER_LIMIT = 40;
 const EARLIER_HISTORY_BATCH = 120;
 let wsLastMsg = 0, wsWatchdog = null;
 let historyAbortController = null;
