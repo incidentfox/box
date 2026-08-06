@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -129,7 +130,10 @@ def wire_vob_transcripts(session: AgentSession, room: rtc.Room) -> None:
         item = getattr(event, "item", None)
         if str(getattr(item, "role", "assistant") or "assistant") != "assistant":
             return
-        emit("assistant", text_from_message(item), True, getattr(item, "id", ""), getattr(event, "created_at", None))
+        # The production VOB prompt uses a JSON envelope so the caller can
+        # carry structured completion state. That envelope is an internal
+        # control protocol, not caller-facing transcript text.
+        emit("assistant", vob_spoken_text(text_from_message(item)), True, getattr(item, "id", ""), getattr(event, "created_at", None))
 
     session.on("user_input_transcribed", on_user)
     session.on("conversation_item_added", on_item)
@@ -165,6 +169,68 @@ def speakable_text(value: Any) -> str:
     text = re.sub(r"([.!?])(?=[A-Z])", r"\1 ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def vob_spoken_text(value: Any) -> str:
+    """Extract the caller-facing ``say`` field from a VOB JSON response.
+
+    Real VOB calls use a strict JSON response because the operator consumes the
+    action and completion fields. The role-play room uses that same prompt, but
+    its media pipeline must only send the human-facing ``say`` value to TTS and
+    transcripts. Be tolerant of fenced JSON and a small amount of provider
+    prefix/suffix noise so one malformed stream cannot make the voice read a
+    control payload verbatim.
+    """
+    text = str(value or "").replace("\r", "").strip()
+    if not text:
+        return ""
+
+    candidates: list[str] = [text]
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+    else:
+        # Some providers stream the opening fence before the first chunk and
+        # omit it from the final chunk. Keep the complete response parseable.
+        unfenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        if unfenced != text:
+            candidates.insert(0, unfenced)
+
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and "say" in payload:
+            return speakable_text(payload.get("say"))
+
+    # A model/provider may add a short preamble around an otherwise valid JSON
+    # object. Decode from each opening brace without accepting arbitrary JSON
+    # fields as speech.
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "say" in payload:
+            return speakable_text(payload.get("say"))
+
+    return speakable_text(text)
+
+
+async def collect_text(stream: AsyncIterable[Any]) -> str:
+    parts: list[str] = []
+    async for chunk in stream:
+        # TimedString is a str subclass, so this preserves its visible text
+        # while intentionally discarding alignment metadata after JSON unwrap.
+        parts.append(str(chunk))
+    return "".join(parts)
+
+
+async def one_text(text: str) -> AsyncIterator[str]:
+    if text:
+        yield text
 
 
 def final_text_to_speak(answer: Any, spoken_progress: Any) -> str:
@@ -395,6 +461,16 @@ class VobProductionAgent(Agent):
 
     def __init__(self, instructions: str) -> None:
         super().__init__(instructions=instructions)
+
+    async def tts_node(self, text: AsyncIterable[str], model_settings: Any) -> Any:
+        """Speak only the JSON envelope's human-facing ``say`` field."""
+        spoken = vob_spoken_text(await collect_text(text))
+        return Agent.default.tts_node(self, one_text(spoken), model_settings)
+
+    async def transcription_node(self, text: AsyncIterable[Any], model_settings: Any) -> AsyncIterable[str]:
+        """Mirror the same human-facing text in LiveKit/UI transcripts."""
+        spoken = vob_spoken_text(await collect_text(text))
+        return one_text(spoken)
 
 
 server = AgentServer()
