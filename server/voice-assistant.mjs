@@ -34,7 +34,7 @@ import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from '.
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
-import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
+import { createLivekitVoiceJoin, createLivekitVoiceMonitorJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
 import { createVobTestConfig, normalizeVobTestSettings, vobTestCatalog } from './vob-test-mode.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -2797,6 +2797,43 @@ ${voiceAutonomyPolicy()}
         metadata: { mode: 'vob-test', testId, sessionId },
       });
       return res.json({ ...join, testId, sessionId, mode: 'vob-test', settings, agent: LIVEKIT.agentName, transport: 'livekit' });
+    } catch (e) {
+      return res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
+    }
+  });
+  // Read-only owner monitor for an already-running production VOB room. This
+  // token can subscribe to audio/data but cannot publish or dispatch another
+  // agent, so opening the monitor cannot change the payer call.
+  app.get('/api/sessions/:id/vob/live-token', ownerGuard, async (req, res) => {
+    if (MODE !== 'adapter' || ADAPTER_TRANSPORT !== 'livekit' || !livekitConfigured(LIVEKIT)) {
+      return res.status(409).json({ error: 'LiveKit adapter mode is not configured' });
+    }
+    try {
+      const sessionId = String(req.params.id || '').trim();
+      const snapshot = typeof vobSnapshotForSession === 'function'
+        ? await Promise.resolve(vobSnapshotForSession(sessionId))
+        : null;
+      if (!snapshot || !snapshot.linked) {
+        return res.status(snapshot && snapshot.ambiguous ? 409 : 404).json(snapshot || { error: 'VOB case not found' });
+      }
+      const requestedCallId = String(req.query.callId || '').trim();
+      const attempts = Array.isArray(snapshot.attempts) ? snapshot.attempts : [];
+      const active = attempts.filter((attempt) => attempt && attempt.live);
+      const attempt = requestedCallId
+        ? active.find((candidate) => String(candidate.callId || '') === requestedCallId)
+        : active.length === 1 ? active[0] : null;
+      if (!attempt) {
+        return res.status(requestedCallId ? 409 : 400).json({
+          error: requestedCallId ? 'That VOB call is no longer active' : 'Choose one active VOB call to monitor',
+          activeCallIds: active.map((candidate) => String(candidate.callId || '')).filter(Boolean),
+        });
+      }
+      const join = await createLivekitVoiceMonitorJoin({
+        config: LIVEKIT,
+        vsid: attempt.vsid || attempt.callId,
+        roomName: attempt.roomName || '',
+      });
+      return res.json({ ...join, callId: attempt.callId, mode: 'vob-monitor', transport: 'livekit' });
     } catch (e) {
       return res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
     }

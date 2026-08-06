@@ -13,11 +13,13 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
   const caseDir = join(root, 'case-fixture');
   const runtime = join(caseDir, 'runtime', 'attempt-1', 'livekit');
   const eventsDir = join(runtime, 'events');
+  const launchesDir = join(runtime, 'launches');
   const recordingsDir = join(runtime, 'recordings');
   const callId = 'livekit_call-abc';
   const artifactId = 'call-abc';
   try {
     mkdirSync(eventsDir, { recursive: true });
+    mkdirSync(launchesDir, { recursive: true });
     mkdirSync(recordingsDir, { recursive: true });
     writeFileSync(join(caseDir, 'operator-context.private.json'), JSON.stringify({
       schemaVersion: 1, sessionId: 'box-session-1', requestId: 'request-1', payerName: 'Fixture Payer',
@@ -25,7 +27,10 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     writeFileSync(join(caseDir, 'operator-owner.private.json'), JSON.stringify({ sessionId: 'box-session-1' }));
     writeFileSync(join(caseDir, 'operator-launch.private.json'), JSON.stringify({ sessionId: 'box-session-1' }));
     writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({
-      requestId: 'request-1', calls: [{ callId, sequence: 1, kind: 'benefits', focusFields: ['deductible'], runtime: 'runtime/attempt-1' }],
+      requestId: 'request-1', calls: [{
+        callId, sequence: 1, kind: 'benefits', focusFields: ['deductible'], runtime: 'runtime/attempt-1',
+        liveKitRoot: 'runtime/attempt-1/livekit', roomPrefix: 'fixture-room-',
+      }],
     }));
     writeFileSync(join(caseDir, 'operator-result.private.json'), JSON.stringify({
       status: 'in_progress', aggregateEvidence: { facts: [{ key: 'deductible', status: 'confirmed', value: '$500', sourceCallId: callId }] },
@@ -40,6 +45,9 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
       event('2026-08-05T10:00:15.000Z', 'conversation_item_added', { role: 'assistant', text: 'Rep said hello' }),
       event('2026-08-05T10:00:20.000Z', 'sip_end_action_terminated'),
     ].join('\n') + '\n');
+    writeFileSync(join(launchesDir, `${artifactId}.private.json`), JSON.stringify({
+      roomName: 'fixture-livekit-room', token: artifactId,
+    }));
     writeFileSync(join(recordingsDir, `${artifactId}.mixed.private.ogg`), 'fixture');
 
     const session = { id: 'box-session-1', cwd: caseDir };
@@ -53,6 +61,7 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     assert.equal(snapshot.facts[0].value, '$500');
     assert.equal(snapshot.attempts[0].transcript[0].text, 'Rep said hello');
     assert.equal(snapshot.attempts[0].transcript[0].startSec, 15);
+    assert.equal(snapshot.attempts[0].roomName, 'fixture-livekit-room');
     assert.deepEqual(snapshot.attempts[0].segments.map((segment) => segment.label), ['unknown', 'ivr', 'hold', 'unknown', 'human']);
     assert.equal(snapshot.attempts[0].segments[1].startSec, 2);
     assert.equal(snapshot.attempts[0].segments[2].endSec, 12);

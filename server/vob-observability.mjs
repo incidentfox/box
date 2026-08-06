@@ -312,9 +312,56 @@ function selectRecording(paths) {
     .sort((a, b) => recordingPriority(a.path) - recordingPriority(b.path) || b.size - a.size)[0]?.path || null;
 }
 
+function livekitCallToken(callId) {
+  const token = String(callId || '').trim().replace(/^livekit_/, '');
+  return /^[A-Za-z0-9._-]{1,80}$/.test(token) ? token : '';
+}
+
+function safeLivekitRoot(caseDir, value) {
+  const candidate = resolve(caseDir, String(value || ''));
+  if (!value) return null;
+  // Production launch receipts may be in the shared rise4-vob tree rather than
+  // inside the selected operator case.  Keep that read-only lookup bounded to
+  // the known artifact parent; never accept an arbitrary path from an artifact.
+  const allowedRoots = [
+    resolve(caseDir),
+    dirname(resolve(caseDir)),
+    dirname(dirname(resolve(caseDir))),
+    dirname(resolve(DEFAULT_VOB_ROOT)),
+  ];
+  return allowedRoots.some((root) => inside(candidate, root)) ? candidate : null;
+}
+
+function launchReceiptForCall(caseDir, call) {
+  const token = livekitCallToken(call?.callId || call?.id);
+  if (!token) return null;
+  const root = safeLivekitRoot(caseDir, firstCallString(call, ['liveKitRoot', 'livekitRoot']))
+    || safeLivekitRoot(caseDir, firstCallString(call, ['runtime']));
+  if (!root) return null;
+  return jsonFile(join(root, 'launches', `${token}.private.json`));
+}
+
+function roomForCall(caseDir, call) {
+  const explicit = firstCallString(call, ['roomName', 'liveKitRoom', 'livekitRoom', 'room']);
+  if (explicit) return { roomName: explicit, source: 'call' };
+
+  const receipt = launchReceiptForCall(caseDir, call);
+  const receiptRoom = firstCallString(receipt, ['roomName', 'room']);
+  if (receiptRoom) return { roomName: receiptRoom, source: 'launch-receipt' };
+
+  const prefix = firstCallString(call, ['roomPrefix', 'liveKitRoomPrefix', 'livekitRoomPrefix']);
+  const token = livekitCallToken(call?.callId || call?.id);
+  if (prefix && token) return { roomName: `${prefix}${token}`.slice(0, 180), source: 'room-prefix' };
+  return { roomName: '', source: null };
+}
+
 function buildAttempt(caseDir, call) {
   const callId = String(call.callId || call.id || '').trim();
   if (!callId) return null;
+  const room = roomForCall(caseDir, call);
+  const roomName = room.roomName;
+  const vsid = firstCallString(call, ['vsid', 'voiceSessionId', 'sessionId'])
+    || (roomName.startsWith('box-voice-') ? roomName.slice('box-voice-'.length) : '');
   const files = attemptFiles(caseDir, callId, call.runtime || call.liveKitRoot || '');
   const events = files.events.flatMap(jsonlFile).sort(eventSort);
   const times = events.map(eventTime).filter((value) => value != null);
@@ -328,6 +375,8 @@ function buildAttempt(caseDir, call) {
   try { recordedAt = recording ? statSync(recording).mtime.toISOString() : null; } catch {}
   return {
     callId,
+    roomName,
+    vsid,
     sequence: call.sequence || null,
     kind: call.kind || null,
     focusFields: fieldKeys(call),
@@ -339,6 +388,15 @@ function buildAttempt(caseDir, call) {
     segments: transcriptData.segments,
     eventCount: events.length,
   };
+}
+
+function firstCallString(call, keys) {
+  if (!call || typeof call !== 'object') return '';
+  for (const key of keys) {
+    const value = String(call[key] || '').trim();
+    if (value) return value.slice(0, 180);
+  }
+  return '';
 }
 
 function fieldKeys(call) {
