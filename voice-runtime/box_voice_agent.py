@@ -78,7 +78,7 @@ async def fetch_vob_test_config(runtime: "RuntimeConfig", test_id: str) -> dict[
 async def publish_vob_event(room: rtc.Room, payload: dict[str, Any]) -> None:
     """Send small live status/transcript events alongside the audio track."""
     try:
-        await room.local_participant.publish_data(
+        room.local_participant.publish_data(
             json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             reliable=True,
             topic=VOB_TRANSCRIPT_TOPIC,
