@@ -1517,3 +1517,49 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
   .vobFieldValue { grid-column: 1 / -1; }
   .vobTranscriptRow { grid-template-columns: 38px 54px 74px minmax(0, 1fr); gap: 5px; padding-left: 6px; padding-right: 6px; }
 }
+
+/* VOB owner-only role-play room */
+.vobTestStart { flex: none; border: 1px solid color-mix(in srgb, var(--green) 55%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--green) 16%, var(--subtle-2)); color: var(--ink); padding: 7px 10px; font-size: 11.5px; font-weight: 750; white-space: nowrap; }
+.vobTestModal { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: max(16px, var(--safe-t)) max(16px, var(--safe-r)) max(16px, var(--safe-b)) max(16px, var(--safe-l)); background: color-mix(in srgb, #000 58%, transparent); }
+.vobTestPanel { display: flex; flex-direction: column; width: min(760px, 100%); max-height: calc(100dvh - 32px); overflow: auto; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--ink); box-shadow: 0 16px 50px rgba(0,0,0,.35); }
+.vobTestHeader, .vobTestCallHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 17px 18px 14px; border-bottom: 1px solid var(--line); background: var(--subtle); }
+.vobTestHeader h2 { margin: 3px 0 5px; font-size: 18px; }
+.vobTestHeader p { max-width: 610px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.vobTestIcon { flex: none; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 8px; background: var(--subtle-2); color: var(--ink); font-size: 21px; line-height: 1; }
+.vobTestPanel form { padding: 16px 18px 18px; }
+.vobTestGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.vobTestGrid label, .vobTestPrompt { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.vobTestGrid select, .vobTestPrompt textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); padding: 9px 10px; font: inherit; font-size: 12px; }
+.vobTestGrid select { min-height: 36px; }
+.vobTestPrompt { margin-top: 13px; }
+.vobTestPrompt textarea { min-height: 82px; resize: vertical; line-height: 1.35; }
+.vobTestNotice { margin-top: 13px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--accent) 8%, var(--subtle)); color: var(--muted); font-size: 11px; line-height: 1.4; }
+.vobTestNotice strong { color: var(--ink); }
+.vobTestActions, .vobTestCallFoot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 15px; }
+.vobTestStatus { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; }
+.vobTestStatus.live { color: var(--green); }
+.vobTestPrimary { border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: 9px; background: var(--accent); color: #fff; padding: 8px 12px; font-size: 11.5px; font-weight: 750; }
+.vobTestPrimary:disabled { opacity: .55; }
+.vobTestCall { min-height: 0; }
+.vobTestCallHead { align-items: center; padding-top: 13px; padding-bottom: 12px; }
+.vobTestCallHead > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.vobTestTranscript { min-height: 180px; max-height: min(430px, 48dvh); overflow: auto; padding: 8px 12px; background: var(--card); }
+.vobTestTranscriptRow { display: grid; grid-template-columns: 44px 48px minmax(0, 1fr); gap: 8px; align-items: start; padding: 8px 7px; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.35; }
+.vobTestTranscriptRow:last-child { border-bottom: 0; }
+.vobTestTranscriptRow time { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
+.vobTestSpeaker { color: var(--accent); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.vobTestTranscriptRow.caller .vobTestSpeaker { color: var(--green); }
+.vobTestTranscriptRow.interim { opacity: .63; }
+.vobTestText { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.vobTestEmpty { padding: 30px 10px; color: var(--muted); text-align: center; font-size: 12px; }
+.vobTestCallFoot { justify-content: flex-start; padding: 10px 14px 14px; margin-top: 0; border-top: 1px solid var(--line); }
+.vobTestTimer { flex: none; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+.vobTestHint { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; }
+@media (max-width: 700px) {
+  .vobTestGrid { grid-template-columns: 1fr; }
+  .vobTestActions { flex-wrap: wrap; }
+  .vobTestActions .vobTestStatus { flex-basis: 100%; }
+  .vobTestCallFoot { align-items: flex-start; flex-wrap: wrap; }
+  .vobTestHint { flex-basis: calc(100% - 60px); }
+  .vobTestCallFoot .vobClose { margin-left: auto; }
+}

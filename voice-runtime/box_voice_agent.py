@@ -21,6 +21,7 @@ AGENT_NAME = "box-codex-voice"
 ROOM_PREFIX = "box-voice-"
 DEFAULT_CARTESIA_VOICE = "a5136bf9-224c-4d76-b823-52bd5efcffcc"  # Jameson, en-US
 DEFAULT_CARTESIA_MODEL = "sonic-3.5"
+VOB_TEST_SOURCE = "box-vob-test"
 
 
 def safe_vsid(value: str) -> str:
@@ -31,6 +32,41 @@ def vsid_from_room(room_name: str) -> str:
     if not str(room_name).startswith(ROOM_PREFIX):
         return ""
     return safe_vsid(str(room_name)[len(ROOM_PREFIX) :])
+
+
+def job_metadata(ctx: JobContext) -> dict[str, Any]:
+    """Decode the small, opaque metadata attached to an explicit room dispatch."""
+    try:
+        value = json.loads(str(getattr(ctx.job, "metadata", "") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def vob_test_id_from_context(ctx: JobContext, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or job_metadata(ctx)
+    if str(metadata.get("mode", "")).strip() == "vob-test":
+        return safe_vsid(metadata.get("testId", ""))
+    try:
+        room_metadata = json.loads(str(getattr(ctx.room, "metadata", "") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        room_metadata = {}
+    if isinstance(room_metadata, dict) and str(room_metadata.get("source", "")).strip() == VOB_TEST_SOURCE:
+        return safe_vsid(room_metadata.get("testId", ""))
+    return ""
+
+
+async def fetch_vob_test_config(runtime: "RuntimeConfig", test_id: str) -> dict[str, Any]:
+    if not test_id:
+        raise RuntimeError("VOB test room is missing its test id")
+    headers = {"Authorization": f"Bearer {runtime.auth_token}"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{runtime.backend_url}/api/voice/vob-test/config/{test_id}", headers=headers)
+        response.raise_for_status()
+        body = response.json()
+    if not isinstance(body, dict) or not body.get("instructions"):
+        raise RuntimeError("VOB test configuration is empty or expired")
+    return body
 
 
 def text_from_message(message: Any) -> str:
@@ -276,6 +312,13 @@ class BoxCodexVoiceAgent(Agent):
         await self._say(answer)
 
 
+class VobProductionAgent(Agent):
+    """The production VOB caller contract, isolated in an owner test room."""
+
+    def __init__(self, instructions: str) -> None:
+        super().__init__(instructions=instructions)
+
+
 server = AgentServer()
 
 
@@ -293,12 +336,35 @@ async def entrypoint(ctx: JobContext) -> None:
     runtime = RuntimeConfig.from_env()
     if not runtime.auth_token:
         raise RuntimeError("CC_AUTH_TOKEN is required for the local Box voice bridge")
+    metadata = job_metadata(ctx)
+    vob_test_id = vob_test_id_from_context(ctx, metadata)
+    if vob_test_id:
+        config = await fetch_vob_test_config(runtime, vob_test_id)
+        settings = config.get("settings") if isinstance(config.get("settings"), dict) else {}
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for the VOB test room")
+        vob_tts = openai.TTS(
+            api_key=api_key,
+            model="gpt-4o-mini-tts",
+            voice=str(settings.get("voice") or "marin"),
+        )
+        vob_llm = openai.LLM(model=str(settings.get("model") or "gpt-4.1-mini"), api_key=api_key)
+        session = AgentSession(
+            stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
+            llm=vob_llm,
+            tts=vob_tts,
+            vad=ctx.proc.userdata["vad"],
+            turn_handling=turn_handling_options(allow_interruptions=True),
+        )
+        await session.start(agent=VobProductionAgent(str(config["instructions"])), room=ctx.room)
+        await ctx.connect()
+        await session.generate_reply()
+        return
+
     vsid = vsid_from_room(ctx.room.name)
     if not vsid:
-        try:
-            vsid = safe_vsid(json.loads(ctx.job.metadata or "{}").get("vsid", ""))
-        except json.JSONDecodeError:
-            pass
+        vsid = safe_vsid(metadata.get("vsid", ""))
     if not vsid:
         raise RuntimeError("voice room is missing its session id")
 
