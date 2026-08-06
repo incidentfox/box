@@ -1,3 +1,6 @@
+import asyncio
+import json
+
 from box_voice_agent import (
     BoxCodexVoiceAgent,
     DEFAULT_CARTESIA_MODEL,
@@ -10,11 +13,13 @@ from box_voice_agent import (
     deepgram_options,
     final_text_to_speak,
     is_manual_turn_commit,
+    publish_vob_event,
     safe_vsid,
     speakable_text,
     text_from_message,
     turn_handling_options,
     vob_production_stt_options,
+    VOB_TRANSCRIPT_TOPIC,
     voice_bool,
     vsid_from_room,
 )
@@ -90,6 +95,25 @@ def test_manual_turn_commit_requires_the_caller_and_control_topic():
     assert not is_manual_turn_commit(payload, "box.voice.control", "agent-session")
     assert not is_manual_turn_commit(payload, "wrong.topic", "caller-session")
     assert not is_manual_turn_commit(b"commit", "box.voice.control", "caller-session")
+
+
+def test_vob_event_publishes_data_without_awaiting_sync_livekit_api():
+    published = []
+
+    class FakeParticipant:
+        def publish_data(self, payload, *, reliable, topic):
+            published.append((payload, reliable, topic))
+
+    class FakeRoom:
+        local_participant = FakeParticipant()
+
+    asyncio.run(publish_vob_event(FakeRoom(), {"type": "status", "status": "agent_ready"}))
+
+    assert len(published) == 1
+    payload, reliable, topic = published[0]
+    assert json.loads(payload) == {"type": "status", "status": "agent_ready"}
+    assert reliable is True
+    assert topic == VOB_TRANSCRIPT_TOPIC
 
 
 def test_interruption_stops_the_live_speech_handle():
