@@ -517,7 +517,10 @@ async def entrypoint(ctx: JobContext) -> None:
         await session.start(agent=VobProductionAgent(str(config["instructions"])), room=ctx.room)
         await ctx.connect()
         await publish_vob_event(ctx.room, {"type": "status", "status": "agent_ready"})
-        await session.generate_reply()
+        # The owner is standing in for the representative. Let them deliver the
+        # greeting first, just as the production caller would hear it after IVR
+        # and hold audio hand off to a live human. This keeps the test in the
+        # human phase instead of inventing an IVR-style opening turn.
         return
 
     vsid = vsid_from_room(ctx.room.name)

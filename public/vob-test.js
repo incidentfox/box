@@ -41,21 +41,22 @@
     const defaults = catalog.defaults || {};
     return `<div class="vobTestModal" data-vob-test-modal role="dialog" aria-modal="true" aria-labelledby="vobTestTitle">
       <div class="vobTestPanel">
-        <div class="vobTestHeader"><div><div class="vobEyebrow">VOB agent test mode</div><h2 id="vobTestTitle">Role-play this payer call</h2><p>The agent joins a private test room as the verification caller. You are the insurance representative and can answer the questions out loud.</p></div><button type="button" class="vobTestIcon" data-vob-test-close aria-label="Close">×</button></div>
+        <div class="vobTestHeader"><div><div class="vobEyebrow">Production VOB caller</div><h2 id="vobTestTitle">Test the live representative phase</h2><p>The production VOB caller joins a private room after IVR and hold are complete. You are the insurance representative and can answer the questions out loud.</p></div><button type="button" class="vobTestIcon" data-vob-test-close aria-label="Close">×</button></div>
         <form data-vob-test-form>
           <div class="vobTestGrid">
             <label>Production prompt<select name="promptPreset">${optionsHtml(catalog.prompts, defaults.promptPreset, true)}</select></label>
             <label>Production LiveKit model<select name="model">${optionsHtml(catalog.models, defaults.model, true)}</select></label>
             <label>Production Cartesia voice<select name="voice">${optionsHtml(catalog.voices, defaults.voice, true)}</select></label>
           </div>
-          <div class="vobTestNotice"><strong>Production media contract.</strong> This room uses the same Gemma 4 31B IT model, Deepgram Flux transcription, and Cartesia Sonic 3.5 voice as a real payer call. The exact production caller prompt and this case’s current ledger are loaded as call context.</div>
+          <div class="vobTestNotice"><strong>Production caller.</strong> This is the same VOB caller contract, Gemma 4 31B IT model, Deepgram Flux transcription, and Cartesia Sonic 3.5 voice used for a real payer call. The case’s current ledger is loaded as call context.</div>
+          <div class="vobTestNotice"><strong>Human representative phase.</strong> IVR routing and hold music are skipped. The caller starts as if a live payer representative has just answered, so you can evaluate introductions, evidence questions, and follow-up behavior.</div>
           <div class="vobTestNotice"><strong>Safe test room.</strong> This does not place or modify a payer call. The agent receives a read-only snapshot of this case and the room expires automatically.</div>
-          <div class="vobTestActions"><span class="vobTestStatus" data-vob-test-status>Ready to start</span><button type="button" class="vobClose" data-vob-test-close>Cancel</button><button type="submit" class="vobTestPrimary">Start role-play</button></div>
+          <div class="vobTestActions"><span class="vobTestStatus" data-vob-test-status>Ready to start</span><button type="button" class="vobClose" data-vob-test-close>Cancel</button><button type="submit" class="vobTestPrimary">Start human-phase test</button></div>
         </form>
         <section class="vobTestCall hidden" data-vob-test-call>
-          <div class="vobTestCallHead"><div><strong>Live role-play</strong><span class="vobTestStatus" data-vob-test-live-status>Connecting…</span></div><button type="button" class="vobClose" data-vob-test-end>End test</button></div>
-          <div class="vobTestTranscript" data-vob-test-transcript aria-live="polite"><div class="vobTestEmpty">The agent greeting will appear here.</div></div>
-          <div class="vobTestCallFoot"><span class="vobTestTimer" data-vob-test-timer>0:00</span><span class="vobTestHint">You are role-playing the insurance representative.</span><button type="button" class="vobClose" data-vob-test-mute>Mute mic</button></div>
+          <div class="vobTestCallHead"><div><strong>Live production caller</strong><span class="vobTestStatus" data-vob-test-live-status>Connecting…</span></div><button type="button" class="vobClose" data-vob-test-end>End test</button></div>
+          <div class="vobTestTranscript" data-vob-test-transcript aria-live="polite"><div class="vobTestEmpty">Say hello as the insurance representative to begin.</div></div>
+          <div class="vobTestCallFoot"><span class="vobTestTimer" data-vob-test-timer>0:00</span><span class="vobTestHint">You are the live insurance representative.</span><button type="button" class="vobClose" data-vob-test-mute>Mute mic</button></div>
         </section>
       </div>
     </div>`;

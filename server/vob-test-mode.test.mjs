@@ -8,6 +8,7 @@ import {
   VOB_LIVEKIT_PRODUCTION_MODEL,
   VOB_LIVEKIT_PRODUCTION_STT_MODEL,
   VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
+  VOB_HUMAN_PHASE_CONTEXT,
   buildVobTestInstructions,
   createVobTestConfig,
   createVobTestConfigStore,
@@ -30,6 +31,7 @@ assert.deepEqual(catalog.productionRuntime, {
   ttsModel: VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
   voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
 });
+assert.equal(catalog.initialCallState, 'connected_to_live_representative');
 assert.deepEqual(catalog.models.map((model) => model.id), [VOB_LIVEKIT_PRODUCTION_MODEL]);
 assert.deepEqual(catalog.voices.map((voice) => voice.id), [VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE]);
 
@@ -70,6 +72,9 @@ assert.match(config.instructions, /Taylor/);
 assert.match(config.instructions, /\$25/);
 assert.match(config.instructions, /CALL DATA/);
 assert.match(config.instructions, /EVIDENCE LEDGER/);
+assert.match(config.instructions, new RegExp(VOB_HUMAN_PHASE_CONTEXT.split('\\n')[0]));
+assert.match(config.instructions, /IVR routing and hold\/queue audio as already completed/);
+assert.match(config.instructions, /same provider-side caller at the start of the live-representative phase/);
 assert.doesNotMatch(config.instructions, /simulation|test mode|role-playing/i);
 assert.doesNotMatch(config.instructions, /Additional operator instruction/);
 
