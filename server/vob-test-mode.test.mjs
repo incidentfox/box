@@ -15,6 +15,7 @@ import {
   normalizeVobTestSettings,
   vobTestCatalog,
 } from './vob-test-mode.mjs';
+import { VOB_PIPELINE_VERSION } from './vob-pipeline.mjs';
 
 const catalog = vobTestCatalog();
 assert.equal(catalog.defaults.promptPreset, 'production_guarded');
@@ -35,6 +36,10 @@ assert.deepEqual(catalog.productionRuntime, {
 assert.equal(catalog.initialCallState, 'connected_to_live_representative');
 assert.deepEqual(catalog.models.map((model) => model.id), [VOB_LIVEKIT_PRODUCTION_MODEL]);
 assert.deepEqual(catalog.voices.map((voice) => voice.id), [VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE]);
+assert.equal(catalog.pipeline.version, VOB_PIPELINE_VERSION);
+assert.equal(catalog.pipeline.extractor.output.name, 'rise4_vob_evidence');
+assert.equal(catalog.pipeline.validator.prompt, null);
+assert.match(catalog.pipeline.extractor.promptTemplate, /REQUIREMENTS/);
 
 const settings = normalizeVobTestSettings({
   promptPreset: 'balanced',
@@ -86,6 +91,7 @@ assert.match(config.instructions, /EVIDENCE LEDGER/);
 assert.match(config.instructions, new RegExp(VOB_HUMAN_PHASE_CONTEXT.split('\\n')[0]));
 assert.match(config.instructions, /IVR routing and hold\/queue audio as already completed/);
 assert.match(config.instructions, /same provider-side caller at the start of the live-representative phase/);
+assert.deepEqual(config.pipeline, catalog.pipeline);
 assert.doesNotMatch(config.instructions, /simulation|test mode|role-playing/i);
 assert.doesNotMatch(config.instructions, /Additional operator instruction/);
 

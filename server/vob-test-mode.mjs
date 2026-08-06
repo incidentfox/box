@@ -5,6 +5,7 @@ import {
   VOB_PRODUCTION_PROMPT_VERSION,
   buildVobProductionInstructions,
 } from './vob-production-prompt.mjs';
+import { buildVobPipeline } from './vob-pipeline.mjs';
 
 // Keep the owner test room on the same media/runtime contract as the real
 // Rise4 payer call.  The prompt compiler above uses Luna to assemble the
@@ -137,6 +138,7 @@ export function vobTestCatalog() {
       ttsModel: VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
       voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
     },
+    pipeline: buildVobPipeline(),
     initialCallState: 'connected_to_live_representative',
     defaults: { ...DEFAULTS },
   };
@@ -152,6 +154,7 @@ export function createVobTestConfig({ testId, sessionId, snapshot, settings, ttl
     settings: normalized,
     productionPrompt: catalog.productionPrompt,
     productionRuntime: catalog.productionRuntime,
+    pipeline: catalog.pipeline,
     promptEditor: {
       version: catalog.productionPrompt.version,
       source: catalog.productionPrompt.source,

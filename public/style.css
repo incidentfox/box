@@ -1639,6 +1639,33 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .vobTestSettings select, .vobTestSettings textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); padding: 7px 8px; font: inherit; font-size: 11px; }
 .vobTestSettings textarea { min-height: 64px; resize: vertical; line-height: 1.3; }
 .vobTestSettings button { justify-self: start; }
+.vobPipelineSection { display: grid; gap: 10px; }
+.vobPipelineIntro { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.vobPipelineIntro span { min-width: 0; overflow-wrap: anywhere; }
+.vobPipelineIntro b { color: var(--ink); }
+.vobPipelineGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.vobPipelineCard { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--subtle); }
+.vobPipelineCard > summary { display: flex; align-items: center; justify-content: space-between; gap: 9px; cursor: pointer; list-style: none; padding: 10px; }
+.vobPipelineCard > summary::-webkit-details-marker { display: none; }
+.vobPipelineCard > summary::after { content: '▾'; flex: none; color: var(--muted); font-size: 12px; }
+.vobPipelineCard:not([open]) > summary::after { content: '▸'; }
+.vobPipelineCard > summary > span { display: grid; gap: 3px; min-width: 0; }
+.vobPipelineCard > summary strong { overflow-wrap: anywhere; font-size: 12px; }
+.vobPipelineCard > summary small { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.vobPipelineCardBody { display: grid; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+.vobPipelineBadge { flex: none; padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; font-size: 9px; font-style: normal; font-weight: 800; letter-spacing: .04em; }
+.vobPipelineBadge.llm { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent); }
+.vobPipelineBadge.deterministic { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); color: var(--green); }
+.vobPipelineMeta { display: flex; flex-wrap: wrap; gap: 5px; color: var(--muted); font-size: 10px; line-height: 1.3; }
+.vobPipelineMeta span { min-width: 0; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--card); overflow-wrap: anywhere; }
+.vobPipelineMeta b { color: var(--ink); }
+.vobPipelineExplain { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.vobPipelineCodeLabel { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.vobPipelineCode { max-height: 240px; margin: 0; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.vobPipelineRules { display: grid; gap: 5px; margin: 0; padding: 0 0 0 17px; color: var(--ink); font-size: 11px; line-height: 1.35; }
+.vobPipelineNoPrompt { padding: 7px 8px; border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: 7px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+.vobPipelineStatuses { display: flex; flex-wrap: wrap; gap: 5px; }
+.vobPipelineStatuses span { padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--card); color: var(--muted); font-size: 10px; }
 @media (max-width: 700px) {
   .vobTestGrid { grid-template-columns: 1fr; }
   .vobTestActions { flex-wrap: wrap; }
@@ -1649,4 +1676,5 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
   .vobLiveMonitorBody, .vobTestCallBody { grid-template-columns: 1fr; }
   .vobLiveMonitorTranscript, .vobTestCallBody .vobTestTranscript { height: 40dvh; min-height: 180px; }
   .vobLiveMonitorData, .vobTestInspector { max-height: 34dvh; border-top: 1px solid var(--line); border-left: 0; }
+  .vobPipelineGrid { grid-template-columns: 1fr; }
 }
