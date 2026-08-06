@@ -4,6 +4,10 @@ import {
   VOB_PRODUCTION_PROMPT_VERSION,
 } from './vob-production-prompt.mjs';
 import {
+  VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
+  VOB_LIVEKIT_PRODUCTION_MODEL,
+  VOB_LIVEKIT_PRODUCTION_STT_MODEL,
+  VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
   buildVobTestInstructions,
   createVobTestConfig,
   createVobTestConfigStore,
@@ -15,8 +19,19 @@ const catalog = vobTestCatalog();
 assert.equal(catalog.defaults.promptPreset, 'production_guarded');
 assert.equal(catalog.productionPrompt.version, VOB_PRODUCTION_PROMPT_VERSION);
 assert.equal(catalog.productionPrompt.source, VOB_PRODUCTION_PROMPT_SOURCE);
-assert.ok(catalog.models.some((model) => model.id === 'gpt-4.1-mini'));
-assert.ok(catalog.voices.some((voice) => voice.id === 'marin'));
+assert.equal(catalog.defaults.model, VOB_LIVEKIT_PRODUCTION_MODEL);
+assert.equal(catalog.defaults.voice, VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE);
+assert.deepEqual(catalog.productionRuntime, {
+  llmProvider: 'livekit-inference',
+  model: VOB_LIVEKIT_PRODUCTION_MODEL,
+  sttProvider: 'livekit-inference',
+  sttModel: VOB_LIVEKIT_PRODUCTION_STT_MODEL,
+  ttsProvider: 'livekit-inference',
+  ttsModel: VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
+  voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
+});
+assert.deepEqual(catalog.models.map((model) => model.id), [VOB_LIVEKIT_PRODUCTION_MODEL]);
+assert.deepEqual(catalog.voices.map((voice) => voice.id), [VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE]);
 
 const settings = normalizeVobTestSettings({
   promptPreset: 'balanced',
@@ -26,10 +41,10 @@ const settings = normalizeVobTestSettings({
 });
 assert.deepEqual(settings, {
   promptPreset: 'production_guarded',
-  model: 'gpt-4.1',
-  voice: 'ash',
+  model: VOB_LIVEKIT_PRODUCTION_MODEL,
+  voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
 });
-assert.equal(normalizeVobTestSettings({ model: 'not-a-model', voice: 'nope' }).model, 'gpt-4.1-mini');
+assert.equal(normalizeVobTestSettings({ model: 'not-a-model', voice: 'nope' }).model, VOB_LIVEKIT_PRODUCTION_MODEL);
 
 const config = createVobTestConfig({
   testId: 'vob-test-1',
@@ -60,7 +75,7 @@ assert.doesNotMatch(config.instructions, /Additional operator instruction/);
 
 const store = createVobTestConfigStore({ ttlMs: 60_000 });
 store.put(config);
-assert.equal(store.get('vob-test-1').settings.voice, 'ash');
+assert.equal(store.get('vob-test-1').settings.voice, VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE);
 assert.equal(store.size(), 1);
 store.delete('vob-test-1');
 assert.equal(store.get('vob-test-1'), null);

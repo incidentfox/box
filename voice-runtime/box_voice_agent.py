@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, TurnHandlingOptions, cli, tts
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, TurnHandlingOptions, cli, inference, tts
 from livekit.plugins import cartesia, deepgram, openai, silero
 
 AGENT_NAME = "box-codex-voice"
@@ -22,6 +22,10 @@ ROOM_PREFIX = "box-voice-"
 DEFAULT_CARTESIA_VOICE = "a5136bf9-224c-4d76-b823-52bd5efcffcc"  # Jameson, en-US
 DEFAULT_CARTESIA_MODEL = "sonic-3.5"
 VOB_TEST_SOURCE = "box-vob-test"
+VOB_PRODUCTION_LLM_MODEL = "google/gemma-4-31b-it"
+VOB_PRODUCTION_STT_MODEL = "deepgram/flux-general-en"
+VOB_PRODUCTION_TTS_MODEL = "cartesia/sonic-3.5"
+VOB_PRODUCTION_CARTESIA_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
 
 
 def safe_vsid(value: str) -> str:
@@ -147,6 +151,11 @@ def deepgram_options() -> dict[str, Any]:
         "endpointing_ms": 0,
         "utterance_end_ms": 1000,
     }
+
+
+def vob_production_stt_options() -> dict[str, Any]:
+    """The test room's STT must match the deployed Rise4 LiveKit caller."""
+    return {"model": VOB_PRODUCTION_STT_MODEL, "language": "en"}
 
 
 def turn_handling_options(*, allow_interruptions: bool = False) -> TurnHandlingOptions:
@@ -340,18 +349,20 @@ async def entrypoint(ctx: JobContext) -> None:
     vob_test_id = vob_test_id_from_context(ctx, metadata)
     if vob_test_id:
         config = await fetch_vob_test_config(runtime, vob_test_id)
-        settings = config.get("settings") if isinstance(config.get("settings"), dict) else {}
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for the VOB test room")
-        vob_tts = openai.TTS(
-            api_key=api_key,
-            model="gpt-4o-mini-tts",
-            voice=str(settings.get("voice") or "marin"),
+        # The settings are retained in the config for an auditable UI snapshot,
+        # but the worker pins the room to production media. This prevents a
+        # stale/client-forged dropdown value from silently testing a different
+        # agent than the one that calls payers.
+        vob_llm = inference.LLM(model=VOB_PRODUCTION_LLM_MODEL)
+        vob_stt = inference.STT(**vob_production_stt_options())
+        vob_tts = inference.TTS(
+            model=VOB_PRODUCTION_TTS_MODEL,
+            voice=VOB_PRODUCTION_CARTESIA_VOICE,
+            language="en",
+            sample_rate=24000,
         )
-        vob_llm = openai.LLM(model=str(settings.get("model") or "gpt-4.1-mini"), api_key=api_key)
         session = AgentSession(
-            stt=deepgram.STT(api_key=os.getenv("DEEPGRAM_API_KEY"), **deepgram_options()),
+            stt=vob_stt,
             llm=vob_llm,
             tts=vob_tts,
             vad=ctx.proc.userdata["vad"],
