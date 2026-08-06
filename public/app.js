@@ -60,6 +60,7 @@ function onTeamAccessLost() {
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.6-luna', reasoningEffort: 'xhigh', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
+  deepseek: { model: 'deepseek-chat', reasoningEffort: '' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'claude-opus-5', effort: 'xhigh' },
@@ -68,11 +69,12 @@ const AGENT_META = {
   claude: { label: 'Claude', icon: '⌘' },
   codex: { label: 'Codex', icon: '◆' },
   gemini: { label: 'Gemini', icon: '✦' },
+  deepseek: { label: 'DeepSeek', icon: '🐋' },
   agy: { label: 'Antigravity', icon: '△' },
   mac: { label: 'Computer Use', icon: '🖥️' },
 };
 const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) => [k, v.label]));
-const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, agy: 1000000, mac: 258400 };
+const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, deepseek: 65536, agy: 1000000, mac: 258400 };
 function defaultContextWindow(agent) {
   const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
   if ((agent === 'codex' || agent === 'mac') && (!model || model.startsWith('gpt-5.6'))) return 1050000;
@@ -80,19 +82,20 @@ function defaultContextWindow(agent) {
 }
 const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
 const agentIcon = (agent) => (AGENT_META[agent] && AGENT_META[agent].icon) || '⌘';
-const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy' || agent === 'mac') ? agent : 'claude';
-const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : agent === 'mac' ? 'mac' : 'claude');
+const agentType = (agent) => (agent === 'codex' || agent === 'gemini' || agent === 'agy' || agent === 'mac' || agent === 'deepseek') ? agent : 'claude';
+const agentBranch = (agent) => (agent === 'codex' ? 'codex' : agent === 'gemini' ? 'gemini' : agent === 'agy' ? 'agy' : agent === 'mac' ? 'mac' : agent === 'deepseek' ? 'deepseek' : 'claude');
 const agentModelLabel = (agent, rawModel) => {
   const raw = String(rawModel || '');
   if (!raw) return '';
-  const found = ((agent === 'codex' || agent === 'mac') ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
+  const found = ((agent === 'codex' || agent === 'mac') ? CODEX_MODELS : agent === 'gemini' ? GEMINI_MODELS : agent === 'deepseek' ? DEEPSEEK_MODELS : agent === 'agy' ? AGY_MODELS : CLAUDE_MODELS).find((m) => m.id === raw);
   if (found) return found.label;
   if (agent === 'agy') return raw ? raw.replace(/-/g, ' ') : 'Antigravity default';
+  if (agent === 'deepseek') return raw.replace(/^deepseek-/, 'DeepSeek ').replace(/-/g, ' ');
   if (agent === 'gemini') return raw.replace(/^gemini-/, 'Gemini ').replace(/-/g, ' ');
   if (agent === 'codex' || agent === 'mac') return raw.replace(/^gpt-/, 'GPT-').replace(/-/g, ' ');
   return raw.replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable).*/, (m, p) => p.charAt(0).toUpperCase() + p.slice(1));
 };
-let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
+let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, deepseek: { ...DEFAULT_SETTINGS.deepseek }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null, vobConsoleOpen = false, vobRenderKey = '';
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
@@ -1432,7 +1435,7 @@ function openDefaultWorkspaceSheet() {
 }
 function openDefaultAgentSheet() {
   const curDefault = configuredDefaultAgent();
-  const rows = ['claude', 'codex', 'gemini', 'agy', 'mac'].filter(agentEnabled).map((agent) => ({
+  const rows = ['claude', 'codex', 'gemini', 'deepseek', 'agy', 'mac'].filter(agentEnabled).map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
     desc: agent === curDefault ? 'Current default for new chats' : 'Use for new chats',
@@ -1519,12 +1522,13 @@ $('newBtn').onclick = () => {
     codex: ['Run Codex on the box', 'New Codex chat'],
     claude: ['Remote-control Claude Code', 'New Claude chat'],
     gemini: ['Run Gemini on the box', 'New Gemini chat'],
+    deepseek: ['Run DeepSeek on the box', 'New DeepSeek chat'],
     agy: ['Use the local agy CLI / AI Pro route', 'New Antigravity chat'],
     mac: ['Drive your Mac (Computer Use)', 'New Computer Use chat'],
   };
   const teamNew = activeWorkspace() === 'team';
   const def = teamNew ? 'codex' : configuredDefaultAgent();
-  const order = (teamNew ? ['codex', 'claude'] : [def, 'codex', 'claude', 'gemini', 'agy', 'mac']).filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
+  const order = (teamNew ? ['codex', 'claude'] : [def, 'codex', 'claude', 'gemini', 'deepseek', 'agy', 'mac']).filter((a, i, arr) => arr.indexOf(a) === i && agentEnabled(a));
   const rows = order.map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
@@ -1604,6 +1608,7 @@ function sessResultRow(s) {
   row.innerHTML =
     `<div class="sresTop"><span class="sresTitle"></span>`
     + `${agent === 'codex' ? '<span class="agentTag codex">Codex</span>' : ''}`
+    + `${agent === 'deepseek' ? '<span class="agentTag deepseek">DeepSeek</span>' : ''}`
     + `${s.archived ? '<span class="agentTag arch">Archived</span>' : ''}`
     + `<span class="sresAge"></span></div>`
     + `<div class="sresMeta"></div>`
@@ -2185,6 +2190,7 @@ function delegateIssue(d) {
   rows.push({ ic: agentIcon('claude'), label: 'New Claude agent', desc: 'Fresh Claude Code session', fn: () => spawnIssueAgent(d, 'claude') });
   rows.push({ ic: agentIcon('codex'), label: 'New Codex agent', desc: 'Fresh Codex session on the box', fn: () => spawnIssueAgent(d, 'codex') });
   if (agentEnabled('gemini')) rows.push({ ic: agentIcon('gemini'), label: 'New Gemini agent', desc: 'Fresh Gemini session on the box', fn: () => spawnIssueAgent(d, 'gemini') });
+  if (agentEnabled('deepseek')) rows.push({ ic: agentIcon('deepseek'), label: 'New DeepSeek agent', desc: 'Fresh DeepSeek session on the box', fn: () => spawnIssueAgent(d, 'deepseek') });
   if (agentEnabled('agy')) rows.push({ ic: agentIcon('agy'), label: 'New Antigravity agent', desc: 'Fresh agy session on the box', fn: () => spawnIssueAgent(d, 'agy') });
   openSheet(`Delegate ${d.identifier}`, rows);
 }
@@ -3613,6 +3619,7 @@ function normalizeSettings(settings) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
+    deepseek: { ...DEFAULT_SETTINGS.deepseek, ...((settings && settings.deepseek) || {}) },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
@@ -3884,13 +3891,14 @@ $('agentChip').onclick = () => {
     { ic: agentIcon('codex'), label: 'Codex', sel: cur.agent === 'codex', desc: 'Run Codex on the box', fn: () => setAgent('codex') },
   ];
   if (agentEnabled('gemini') || cur.agent === 'gemini') rows.push({ ic: agentIcon('gemini'), label: 'Gemini', sel: cur.agent === 'gemini', desc: 'Run Gemini on the box', fn: () => setAgent('gemini') });
+  if (agentEnabled('deepseek') || cur.agent === 'deepseek') rows.push({ ic: agentIcon('deepseek'), label: 'DeepSeek', sel: cur.agent === 'deepseek', desc: 'Run DeepSeek on the box', fn: () => setAgent('deepseek') });
   if (agentEnabled('agy') || cur.agent === 'agy') rows.push({ ic: agentIcon('agy'), label: 'Antigravity', sel: cur.agent === 'agy', desc: 'Use local agy / AI Pro', fn: () => setAgent('agy') });
   if (agentEnabled('mac') || cur.agent === 'mac') rows.push({ ic: agentIcon('mac'), label: 'Computer Use', sel: cur.agent === 'mac', desc: 'Drive your Mac (Codex Computer Use)', fn: () => setAgent('mac') });
   // Tapping the CURRENT agent always opens its model switcher (works in a new chat too, not just
   // once the thread has an id). Tapping a DIFFERENT agent switches to it — continuing the transcript
   // when one exists, otherwise just selecting it for the new chat (its original fn).
   for (const row of rows) {
-    const target = row.label === 'Antigravity' ? 'agy' : row.label === 'Computer Use' ? 'mac' : row.label.toLowerCase();
+    const target = row.label === 'Antigravity' ? 'agy' : row.label === 'Computer Use' ? 'mac' : row.label === 'DeepSeek' ? 'deepseek' : row.label.toLowerCase();
     if (cur.agent === target) { row.desc = 'Current agent · tap to switch model'; row.fn = () => openModelSheet(); }
     else if (cur.id) { row.desc = `Continue this transcript in ${row.label}`; row.fn = () => continueWithAgent(target); }
   }
@@ -4517,6 +4525,10 @@ const GEMINI_MODELS = [
   { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', desc: 'Fast and low cost' },
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', desc: 'Stronger reasoning' },
 ];
+const DEEPSEEK_MODELS = [
+  { id: 'deepseek-chat', label: 'DeepSeek Chat' },
+  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
+];
 const AGY_MODELS = [
   { id: '', label: 'Antigravity default', desc: 'Use the signed-in agy default model' },
   { id: 'Gemini 3.5 Flash (Low)', label: 'Gemini 3.5 Flash Low', desc: 'Fastest Gemini route through agy' },
@@ -4571,6 +4583,12 @@ function openModelSheet() {
     rows.push({ ic: '', label: 'Model', desc: 'Used on the next Gemini turn in this Box chat', fn: () => openModelSheet() });
     for (const m of GEMINI_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.gemini.model = m.id; sendSettings(); toast(`Gemini model: ${m.label}`); openModelSheet(); }));
     openSheet('Gemini model', rows);
+    return;
+  }
+  if (agent === 'deepseek') {
+    rows.push({ ic: '', label: 'Model', desc: 'Used on the next DeepSeek turn in this Box chat', fn: () => openModelSheet() });
+    for (const m of DEEPSEEK_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.deepseek.model = m.id; sendSettings(); toast(`DeepSeek model: ${m.label}`); openModelSheet(); }));
+    openSheet('DeepSeek model', rows);
     return;
   }
   if (agent === 'agy') {

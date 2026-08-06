@@ -38,6 +38,7 @@ import {
 import { sttEngineOrder, stripNonSpeechTags } from './stt-engine.mjs';
 import { findCodexRollout, readCodexCompactionInfo, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
+import { DeepSeekExecEngine } from './deepseek-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
 import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
 import { renderMeetingContextForIssue } from './meeting-context.mjs';
@@ -56,6 +57,7 @@ const rcEngine = new RCEngine();
 const codexEngine = new CodexExecEngine();
 const teamClaudeEngine = new ClaudeExecEngine();
 const geminiEngine = new GeminiExecEngine();
+const deepseekEngine = new DeepSeekExecEngine();
 const agyEngine = new AgyExecEngine();
 const macEngine = new MacExecEngine();
 const vobTestConfigStore = createVobTestConfigStore();
@@ -162,7 +164,7 @@ const PORT = Number(cfg('PORT', 7321));
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
 const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
 const APP_SETTINGS_FILE = join(STATE_DIR, 'app-settings.json');
-const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy', 'mac']);
+const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy', 'mac', 'deepseek']);
 const VALID_CODEX_SANDBOX = new Set(['off', 'read-only', 'workspace-write']);
 const expandUserPath = (p) => {
   const s = String(p || '').trim();
@@ -1075,6 +1077,9 @@ function saveCodexMessages(id, msgs) {
 const GEMINI_FILE = join(STATE_DIR, 'gemini-sessions.json');
 const loadGemini = () => loadJsonCached(GEMINI_FILE, () => ({ sessions: {} }));
 const saveGemini = (state) => { writeJsonAtomic(GEMINI_FILE, state); rememberJsonCache(GEMINI_FILE, state); invalidateSessionLists(); };
+const DEEPSEEK_FILE = join(STATE_DIR, 'deepseek-sessions.json');
+const loadDeepSeek = () => loadJsonCached(DEEPSEEK_FILE, () => ({ sessions: {} }));
+const saveDeepSeek = (state) => { writeJsonAtomic(DEEPSEEK_FILE, state); rememberJsonCache(DEEPSEEK_FILE, state); invalidateSessionLists(); };
 const AGY_FILE = join(STATE_DIR, 'agy-sessions.json');
 const loadAgy = () => loadJsonCached(AGY_FILE, () => ({ sessions: {} }));
 const saveAgy = (state) => { writeJsonAtomic(AGY_FILE, state); rememberJsonCache(AGY_FILE, state); invalidateSessionLists(); };
@@ -1122,7 +1127,7 @@ function codexUserMessagesFromSession(session) {
 function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
   const safeTitle = title || 'conversation';
   const header = `# ${safeTitle}\n\nExported ${messages.length} messages\n\n`;
-  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
+  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'deepseek' ? 'DeepSeek' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
   const body = messages.map((m) => {
     const role = m.role === 'user' ? '**You**' : `**${assistantName}**`;
     const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
@@ -1135,6 +1140,7 @@ const SESSION_STORES = [
   { agent: 'codex', load: loadCodex, save: saveCodex },
   { agent: 'claude', load: loadTeamClaude, save: saveTeamClaude },
   { agent: 'gemini', load: loadGemini, save: saveGemini },
+  { agent: 'deepseek', load: loadDeepSeek, save: saveDeepSeek },
   { agent: 'agy', load: loadAgy, save: saveAgy },
   { agent: 'mac', load: loadMac, save: saveMac },
 ];
@@ -1786,6 +1792,77 @@ function updateGeminiContext(id, info) {
   }
   return ctx;
 }
+function ensureDeepSeekSession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadDeepSeek();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  const established = prev.title && prev.title !== 'DeepSeek chat' ? prev.title : '';
+  state.sessions[id] = {
+    id,
+    agent: 'deepseek',
+    title: established || attrs.title || prev.title || 'DeepSeek chat',
+    cwd: attrs.cwd || prev.cwd || DEFAULT_CWD,
+    created: prev.created || attrs.created || now,
+    lastUsed: attrs.lastUsed || now,
+    updatedAt: attrs.updatedAt || now,
+    preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
+    messages: attrs.messages || prev.messages || [],
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context != null ? attrs.context : (prev.context || null),
+  };
+  saveDeepSeek(state);
+  return state.sessions[id];
+}
+function appendDeepSeekMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadDeepSeek();
+  const now = Date.now();
+  const prev = state.sessions[id] || { id, agent: 'deepseek', title: 'DeepSeek chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  prev.messages = [...(prev.messages || []), { role, parts }].slice(-160);
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'DeepSeek chat')) prev.title = plain.slice(0, 80) || 'DeepSeek chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = now;
+  prev.updatedAt = now;
+  state.sessions[id] = prev;
+  saveDeepSeek(state);
+}
+let DEEPSEEK_TURN_SEQ = 0;
+function flushDeepSeekAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadDeepSeek();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.dsTurnId, ts: (last && last.live && last.turnId === s.dsTurnId && last.ts) || Date.now() };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.live && last.turnId === s.dsTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  prev.updatedAt = Date.now();
+  state.sessions[s.sessionId] = prev;
+  saveDeepSeek(state);
+}
+function updateDeepSeekContext(id, info) {
+  const used = (info && Number(info.input_tokens)) || 0;
+  const ctx = normalizeContext({ agent: 'deepseek', model: (info && info.model) || '', usedTokens: used, source: used ? 'reported' : 'estimated' });
+  if (id) {
+    const state = loadDeepSeek();
+    const prev = state.sessions[id];
+    if (prev) { prev.context = ctx; prev.lastUsed = Date.now(); state.sessions[id] = prev; saveDeepSeek(state); }
+  }
+  return ctx;
+}
 function ensureAgySession(id, attrs = {}) {
   if (!id) return null;
   const state = loadAgy();
@@ -2091,6 +2168,10 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     title: s.title || 'Gemini chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
   }));
+  const deepseekSessions = Object.values(loadDeepSeek().sessions || {}).map((s) => ({
+    id: s.id, agent: 'deepseek', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'DeepSeek chat', cwd: s.cwd || DEFAULT_CWD,
+  }));
   const agySessions = Object.values(loadAgy().sessions || {}).map((s) => ({
     id: s.id, agent: 'agy', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'Antigravity chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
@@ -2102,7 +2183,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
   }));
   files.sort((a, b) => b.mtime - a.mtime);
-  const items = files.concat(codexSessions, teamClaudeSessions, geminiSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
+  const items = files.concat(codexSessions, teamClaudeSessions, geminiSessions, deepseekSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
   const codexLiveIds = liveCodexSessionIds(codexSessions, codexProcessIds, terminalCodexIds);
@@ -2378,6 +2459,8 @@ async function sessionHistory(id, { before = null } = {}) {
   }
   const gemini = (loadGemini().sessions || {})[id];
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
+  const deepseek = (loadDeepSeek().sessions || {})[id];
+  if (deepseek) return { messages: (deepseek.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: deepseek.cwd || DEFAULT_CWD, agent: 'deepseek', settings: normalizeSettings(deepseek.settings || {}), parentId: deepseek.parentId || null, parentTitle: deepseek.parentTitle || '', context: normalizeContext({ agent: 'deepseek' }) };
   const agy = (loadAgy().sessions || {})[id];
   if (agy) return { messages: (agy.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: agy.cwd || DEFAULT_CWD, agent: 'agy', settings: normalizeSettings(agy.settings || {}), parentId: agy.parentId || null, parentTitle: agy.parentTitle || '', context: normalizeContext({ agent: 'agy' }) };
   const mac = (loadMac().sessions || {})[id];
@@ -2986,7 +3069,7 @@ app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  const stored = (loadCodex().sessions || {})[req.params.id] || (loadTeamClaude().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
+  const stored = (loadCodex().sessions || {})[req.params.id] || (loadTeamClaude().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadDeepSeek().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
   if (stored) return res.json({ messages: codexUserMessagesFromSession(stored) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
@@ -3038,6 +3121,14 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     return res.send(conversationMarkdown({ title, agent: 'gemini', messages: gemini.messages || [] }));
+  }
+  const deepseekExport = (loadDeepSeek().sessions || {})[req.params.id];
+  if (deepseekExport) {
+    const title = deepseekExport.title || 'DeepSeek chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'deepseek', messages: deepseekExport.messages || [] }));
   }
   const agy = (loadAgy().sessions || {})[req.params.id];
   if (agy) {
@@ -3196,6 +3287,7 @@ function scheduledSessionAgent(id) {
   if ((loadCodex().sessions || {})[id]) return 'codex';
   if ((loadTeamClaude().sessions || {})[id]) return 'claude';
   if ((loadGemini().sessions || {})[id]) return 'gemini';
+  if ((loadDeepSeek().sessions || {})[id]) return 'deepseek';
   if ((loadAgy().sessions || {})[id]) return 'agy';
   if ((loadMac().sessions || {})[id]) return 'mac';
   if (findSessionFile(id)) return 'claude';
@@ -3205,6 +3297,7 @@ function scheduledSessionMetadata(id, agent) {
   if (agent === 'codex') return (loadCodex().sessions || {})[id] || {};
   if (agent === 'claude' && (loadTeamClaude().sessions || {})[id]) return (loadTeamClaude().sessions || {})[id] || {};
   if (agent === 'gemini') return (loadGemini().sessions || {})[id] || {};
+  if (agent === 'deepseek') return (loadDeepSeek().sessions || {})[id] || {};
   if (agent === 'agy') return (loadAgy().sessions || {})[id] || {};
   if (agent === 'mac') return (loadMac().sessions || {})[id] || {};
   const file = findSessionFile(id);
@@ -3469,6 +3562,7 @@ const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).re
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
 const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
 const GEMINI_KEY = cfg('GEMINI_API_KEY') || cfg('GOOGLE_AI_STUDIO_API_KEY') || cfg('GOOGLE_API_KEY');
+const DEEPSEEK_KEY = cfg('DEEPSEEK_API_KEY') || '';
 const AGY_CMD = cfg('AGY_CMD') || (existsSync(join(HOME, '.local', 'bin', 'agy')) ? join(HOME, '.local', 'bin', 'agy') : 'agy');
 
 function isPlaceholderTitle(title) {
@@ -3613,6 +3707,7 @@ app.get('/api/config', requireAuth, (req, res) => {
     slack: slackConfigured(cfg),
     codex: codexAvailable(),
     gemini: geminiAvailable(),
+    deepseek: !!DEEPSEEK_KEY,
     agy: agyAvailable(),
     mac: macAvailable(),
   },
@@ -4896,6 +4991,7 @@ function scheduledNeedsInput(id, agent, session) {
     let messages = [];
     if (agent === 'codex') messages = loadCodexMessages(id, (loadCodex().sessions || {})[id]);
     else if (agent === 'gemini') messages = ((loadGemini().sessions || {})[id] || {}).messages || [];
+    else if (agent === 'deepseek') messages = ((loadDeepSeek().sessions || {})[id] || {}).messages || [];
     else if (agent === 'agy') messages = ((loadAgy().sessions || {})[id] || {}).messages || [];
     else if (agent === 'mac') messages = ((loadMac().sessions || {})[id] || {}).messages || [];
     else messages = fullSessionHistory(id).messages || [];
@@ -5369,6 +5465,7 @@ function runTurn(s, msg) {
 	    if (requestedAgent === 'codex') return runCodexTurn(s, msg, resolve);
 	    if (teamSession && requestedAgent === 'claude') return runTeamClaudeTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
+    if ((msg.agent || s.agent) === 'deepseek') return runDeepSeekTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
 	    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
@@ -5910,6 +6007,86 @@ function runMacTurn(s, msg, resolve) {
   s.proc.on('close', finish);
   s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
+function runDeepSeekTurn(s, msg, resolve) {
+  if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  let done = false;
+  let lastError = '';
+  s.dsTurnId = `${Date.now()}-${++DEEPSEEK_TURN_SEQ}`;
+  s.dsLastFlush = 0;
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
+  const isNew = !s.sessionId;
+  const sid = s.sessionId || randomUUID();
+  const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNew && initialTitle) s.title = initialTitle;
+  const session = ensureDeepSeekSession(sid, {
+    cwd: s.cwd,
+    title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
+    lastUsed: Date.now(),
+    settings: s.settings,
+    parentId: msg.parentId || s.parentId || null,
+    parentTitle: msg.parentTitle || s.parentTitle || '',
+  });
+  appendDeepSeekMessage(sid, 'user', userText, { parts: userParts });
+  s.sessionId = sid;
+  s.agent = 'deepseek';
+  ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+  if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+  persist(s);
+
+  const finish = () => {
+    if (done) return; done = true;
+    clearTimeout(s.turnTimer); s.proc = null;
+    if (s.sessionId) {
+      flushDeepSeekAssistant(s, { finalize: true });
+      if (lastError && !s.canceled) appendDeepSeekMessage(s.sessionId, 'assistant', `⚠️ DeepSeek error: ${lastError}`);
+    }
+    bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
+    resolve();
+  };
+  s.turnTimer = setTimeout(() => {
+    if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
+    finish();
+  }, CODEX_TURN_TIMEOUT_MS);
+  bcast(s, { type: 'session', id: s.sessionId, agent: 'deepseek', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || session.title || '' });
+  s.proc = deepseekEngine.run({
+    sessionId: s.sessionId,
+    isNew,
+    cwd: s.cwd,
+    prompt: msg.text || '',
+    images: msg.images || [],
+    settings: (s.settings || {}).deepseek || DEFAULT_SETTINGS.deepseek,
+    guest: sessionIsGuest(s),
+    apiKey: DEEPSEEK_KEY,
+    onEvent: (ev) => {
+      if (ev.type === 'session') {
+        return;
+      } else if (ev.type === 'text') {
+        pushTextPart(s, ev.delta || '');
+        if (s.sessionId) { s.dsLastFlush = Date.now(); flushDeepSeekAssistant(s); }
+        bcast(s, { type: 'text', delta: ev.delta || '' });
+      } else if (ev.type === 'context') {
+        s.context = updateDeepSeekContext(s.sessionId, ev.info);
+        persist(s);
+        bcast(s, { type: 'context', context: s.context });
+      } else if (ev.type === 'tool') {
+        s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        const now = Date.now();
+        if (s.sessionId && (!s.dsLastFlush || now - s.dsLastFlush > 2000)) { s.dsLastFlush = now; flushDeepSeekAssistant(s); }
+        bcast(s, ev);
+      } else if (ev.type === 'tool_result') {
+        const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
+        bcast(s, ev);
+      } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = String(ev.msg || '').slice(0, 300);
+        bcast(s, ev);
+      }
+    },
+  });
+  s.proc.on('close', finish);
+  s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
+}
 // resume persisted, non-empty queues on startup (after a restart) so a queued message is never
 // lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
 // message was queued before its session was created (keyed by the filename, e.g. `new-abc123`) —
@@ -6135,6 +6312,7 @@ wss.on('connection', (ws) => {
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'claude' && teamSession) ensureTeamClaudeSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      if (s.sessionId && s.agent === 'deepseek') ensureDeepSeekSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'mac') ensureMacSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       bcast(s, { type: 'settings', settings: s.settings, cwd: s.cwd || null });
