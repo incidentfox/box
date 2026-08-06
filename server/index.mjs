@@ -79,11 +79,17 @@ const RC_REGISTRY = join(HOME, '.config', 'cc-rc-sessions.tsv');
 // ~/.claude-<id>/projects, not just ~/.claude/projects. projectsBases() (from
 // rc-engine) enumerates every config dir's projects base; these helpers fan the
 // box's session scans across ALL of them so pooled sessions aren't invisible.
+let _projectDirsCache = null;
+let _projectDirsCacheTs = 0;
 function eachProjectDir() {
+  const now = Date.now();
+  if (_projectDirsCache && now - _projectDirsCacheTs < 10000) return _projectDirsCache;
   const dirs = [];
   for (const base of projectsBases()) {
     try { for (const d of readdirSync(base, { withFileTypes: true })) if (d.isDirectory()) dirs.push(join(base, d.name)); } catch {}
   }
+  _projectDirsCache = dirs;
+  _projectDirsCacheTs = now;
   return dirs;
 }
 // The active feed only needs metadata for sessions it can display.  The archive can
@@ -116,9 +122,15 @@ function sessionFiles(archived, { includeArchivedMetadata = false } = {}) {
   }
   return files;
 }
+const _sessionFileCache = new Map(); // id -> { file: string|null, ts: number }
 function findSessionFile(id) {
-  for (const dir of eachProjectDir()) { const c = join(dir, id + '.jsonl'); if (existsSync(c)) return c; }
-  return null;
+  const now = Date.now();
+  const hit = _sessionFileCache.get(id);
+  if (hit && now - hit.ts < 30000) return hit.file;
+  let found = null;
+  for (const dir of eachProjectDir()) { const c = join(dir, id + '.jsonl'); if (existsSync(c)) { found = c; break; } }
+  _sessionFileCache.set(id, { file: found, ts: now });
+  return found;
 }
 const STATE_DIR = join(HOME, '.cc-mobile');
 mkdirSync(STATE_DIR, { recursive: true });
@@ -819,8 +831,8 @@ function tailInfoRead(file) {
 }
 // session ids with a currently-running worker turn (set maintained by runWorker)
 const RUNNING = new Set();
-function addRunning(id) { if (id && !RUNNING.has(id)) { RUNNING.add(id); invalidateSessionLists(); } }
-function deleteRunning(id) { if (id && RUNNING.delete(id)) invalidateSessionLists(); }
+function addRunning(id) { if (id) RUNNING.add(id); }
+function deleteRunning(id) { RUNNING.delete(id); }
 
 // Atomic JSON write: write a temp file then rename over the target, so a concurrent reader
 // always sees either the old or the new COMPLETE file — never a half-written (torn) one.
@@ -2293,7 +2305,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   return { sessions: out, counts };
 }
 const SESSION_LIST_CACHE = new Map();
-function invalidateSessionLists() { try { SESSION_LIST_CACHE.clear(); } catch {} }
+function invalidateSessionLists() { try { SESSION_LIST_CACHE.clear(); _projectDirsCache = null; _sessionFileCache.clear(); } catch {} }
 function cachedListSessions(filter, workspace = 'personal', principal = null) {
   const key = `${workspace}:${teamFavoriteKey(principal)}:${String(filter || 'all')}`;
   const now = Date.now();
