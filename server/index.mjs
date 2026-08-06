@@ -26,6 +26,7 @@ import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { ClaudeExecEngine } from './claude-exec-engine.mjs';
 import { codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-processes.mjs';
+import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import { assistantStopsAutoContinue, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue, shouldAutoContinue, validTimeZone } from './session-scheduler.mjs';
@@ -556,6 +557,21 @@ function reconcileLiveBridges() {
   return LIVE_BRIDGES.size;
 }
 
+// Narrow a shared /proc snapshot to one id (see server/proc-table.mjs). With no
+// snapshot this falls back to a real pgrep, so single-session callers (archive POST,
+// account switch) behave exactly as before on every platform.
+const procLines = (id, procText) => procLinesFor(id, procText, pgrepFull);
+
+// Archived sessions whose runtime is already fully torn down, so the 30s reaper can
+// stop re-tearing them down. An RT entry is never removed once created, so without
+// this every archived chat you had ever opened stayed a reap candidate FOREVER: the
+// tick re-tore-down the same 60 sessions on every pass ("reaped 60" repeated 492x in
+// one log), spawning 4 processes per candidate — ~5s of blocked event loop every 30s,
+// which stalled both HTTP and every open chat's WebSocket. Only ids whose teardown
+// found *nothing* are memoized, so anything with a live process is retried next tick.
+const REAPED_RUNTIMES = new Set();
+function clearReapedRuntime(id) { if (id) REAPED_RUNTIMES.delete(String(id)); }
+
 // Tear down the remote-control bridge for a session. Archiving a chat means "I'm done
 // with this" — there's no reason to keep a `claude --remote-control` process (and its
 // dtach master) burning memory + re-running heartbeats/auto-update for it. We (1) drop
@@ -563,7 +579,7 @@ function reconcileLiveBridges() {
 // the dtach master + claude child (both carry the session id in argv — curated bridges
 // live at /tmp/cc-rc-<rcName>.dtach, box-local ones at /tmp/cc-box-<id>.dtach), and
 // (3) remove the now-stale sockets. Idempotent + best-effort: missing pieces are fine.
-function killSessionBridge(id, { force = false } = {}) {
+function killSessionBridge(id, { force = false, procText = null } = {}) {
   if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { killed: 0 };
   let rcName = null;
   try { const rc = readRcRegistry(); if (rc[id]) rcName = rc[id].rcName; } catch {}
@@ -588,7 +604,7 @@ function killSessionBridge(id, { force = false } = {}) {
   // same); the registry row is already gone, so nothing relaunches it.
   const pids = [];
   try {
-    const out = pgrepFull(id);
+    const out = procLines(id, procText);
     for (const line of out.split('\n')) {
       if (!line.trim() || !/--remote-control(\s|$)/.test(line)) continue;
       const pid = parseInt(line, 10);
@@ -908,6 +924,7 @@ function unarchiveOnResume(id) {
   if (!id) return false;
   try {
     const store = archiveStoreFor(id); const set = store.load();
+    clearReapedRuntime(id);   // back in play: let the reaper see it again if re-archived
     if (!set.has(id)) return false;
     set.delete(id); store.save(set);
     const at = store.loadAt(); if (id in at) { delete at[id]; store.saveAt(at); }
@@ -2081,9 +2098,9 @@ function runningCodexThreadIds() {
   return ids;
 }
 
-function terminateUnmanagedCodexThread(id, signal = 'SIGTERM') {
+function terminateUnmanagedCodexThread(id, signal = 'SIGTERM', procText = null) {
   if (!id) return [];
-  const killed = terminateCodexThreadProcesses(id, signal, { procText: pgrepFull(id) });
+  const killed = terminateCodexThreadProcesses(id, signal, { procText: procLines(id, procText) });
   if (killed.length) CODEX_LIVE_CACHE = { ts: 0, ids: new Set() };
   return killed;
 }
@@ -2933,7 +2950,7 @@ app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
     if (body.preserveFavorites && s && s.favorite) continue;
     const had = set.has(id);
     if (on) { if (!had) { set.add(id); at[id] = now; changed++; } }
-    else { if (had) { set.delete(id); delete at[id]; changed++; } }
+    else { clearReapedRuntime(id); if (had) { set.delete(id); delete at[id]; changed++; } }
     if (on) { try { killed += teardownSessionRuntime(id).killed || 0; } catch {} }
   }
   if (workspace === 'team') { saveTeamArchived(set); saveTeamArchivedAt(at); }
@@ -2945,7 +2962,7 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   if (req.principal.kind === 'guest' && !team.canAccessSession(req.principal, id)) return res.status(403).json({ error: 'not a team session' });
   const store = archiveStoreFor(id);
   const set = store.load(); const at = store.loadAt();
-  if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
+  if (on) { set.add(id); at[id] = Date.now(); } else { clearReapedRuntime(id); set.delete(id); delete at[id]; }
   store.save(set); store.saveAt(at);
   // Archiving = done with it: clear recoverable work and stop every Box-owned
   // runtime, including the remote-control bridge and detached child processes.
@@ -5278,7 +5295,7 @@ function clearPersistedSessionQueue(id) {
 // owned by this Box session, clear restart-recoverable work, stop tail/retry timers,
 // and remove the bridge/registry entry. This is deliberately exact-id scoped and
 // idempotent so both the archive endpoint and the periodic orphan reaper can call it.
-function teardownSessionRuntime(id, { force = true } = {}) {
+function teardownSessionRuntime(id, { force = true, procText = null } = {}) {
   if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { ok: false, killed: 0, processKilled: 0, codexKilled: 0, queueCleared: false };
   const s = RT.get(resolveKey(id));
   const targetIds = new Set([id, s && s.sessionId].filter(Boolean));
@@ -5315,8 +5332,8 @@ function teardownSessionRuntime(id, { force = true } = {}) {
   let codexKilled = 0;
   let killed = 0;
   for (const targetId of targetIds) {
-    try { codexKilled += terminateUnmanagedCodexThread(targetId, signal).length; } catch {}
-    try { killed += killSessionBridge(targetId, { force }).killed || 0; } catch {}
+    try { codexKilled += terminateUnmanagedCodexThread(targetId, signal, procText).length; } catch {}
+    try { killed += killSessionBridge(targetId, { force, procText }).killed || 0; } catch {}
   }
   return { ok: true, killed, processKilled, codexKilled, queueCleared };
 }
@@ -5326,16 +5343,26 @@ function reconcileArchivedSessionRuntimes() {
   try { archived = new Set([...loadArchived(), ...loadTeamArchived()]); } catch { archived = new Set(); }
   const candidates = new Set();
   for (const s of RT.values()) {
-    if (s.sessionId && archived.has(s.sessionId) && !RUNNING.has(s.sessionId)) candidates.add(s.sessionId);
+    if (s.sessionId && archived.has(s.sessionId) && !RUNNING.has(s.sessionId) && !REAPED_RUNTIMES.has(s.sessionId)) candidates.add(s.sessionId);
   }
   // After a Box server restart RT is empty. The process scan catches Box-owned
-  // Codex resumes that no longer have a ChildProcess handle in memory.
+  // Codex resumes that no longer have a ChildProcess handle in memory. A live process
+  // is hard evidence, so these are never skipped by the memo above.
   for (const id of runningCodexThreadIds()) {
     if (archived.has(id) && !RUNNING.has(id)) candidates.add(id);
   }
+  if (!candidates.size) return 0;
+  // One /proc read for the whole batch instead of 4 subprocess spawns per candidate.
+  const procText = procTableSnapshot();
   let reaped = 0;
   for (const id of candidates) {
-    try { teardownSessionRuntime(id); reaped++; } catch {}
+    try {
+      const r = teardownSessionRuntime(id, { procText });
+      // Nothing was killed and no queue drained → this runtime is genuinely gone; stop
+      // rescanning it. If anything WAS reaped there may be more next tick, so retry.
+      if (!((r.killed || 0) + (r.processKilled || 0) + (r.codexKilled || 0)) && !r.queueCleared) REAPED_RUNTIMES.add(String(id));
+      reaped++;
+    } catch {}
   }
   if (reaped) console.log(`reaped ${reaped} archived session runtime(s)`);
   return reaped;
