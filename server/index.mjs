@@ -1889,6 +1889,27 @@ function flushDeepSeekAssistant(s, { finalize = false } = {}) {
   state.sessions[s.sessionId] = prev;
   saveDeepSeek(state);
 }
+// Move a provisional (`new-…`) DeepSeek entry onto the real codex thread id once
+// `thread.started` arrives. Transcripts live inline on the entry, so this is a plain move.
+function migrateDeepSeekSession(fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return null;
+  const state = loadDeepSeek();
+  const prev = state.sessions[fromId];
+  if (!prev) return null;
+  const dest = state.sessions[toId] || {};
+  state.sessions[toId] = {
+    ...prev, ...dest,
+    id: toId,
+    title: (dest.title && dest.title !== 'DeepSeek chat') ? dest.title : (prev.title || dest.title || 'DeepSeek chat'),
+    preview: dest.preview || prev.preview || '',
+    messages: (dest.messages && dest.messages.length) ? dest.messages : (prev.messages || []),
+    created: prev.created || dest.created || Date.now(),
+  };
+  delete state.sessions[fromId];
+  saveDeepSeek(state);
+  try { ALIAS.delete(fromId); } catch {}
+  return state.sessions[toId];
+}
 function updateDeepSeekContext(id, info) {
   const used = (info && Number(info.input_tokens)) || 0;
   const ctx = normalizeContext({ agent: 'deepseek', model: (info && info.model) || '', usedTokens: used, source: used ? 'reported' : 'estimated' });
@@ -6098,23 +6119,40 @@ function runDeepSeekTurn(s, msg, resolve) {
   const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
   const userParts = codexUserParts(userText, msg.images || []);
   const isNew = !s.sessionId;
-  const sid = s.sessionId || randomUUID();
   const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
   const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
   if (isNew && initialTitle) s.title = initialTitle;
-  const session = ensureDeepSeekSession(sid, {
-    cwd: s.cwd,
-    title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
-    lastUsed: Date.now(),
-    settings: s.settings,
-    parentId: msg.parentId || s.parentId || null,
-    parentTitle: msg.parentTitle || s.parentTitle || '',
-  });
-  appendDeepSeekMessage(sid, 'user', userText, { parts: userParts });
-  s.sessionId = sid;
+  // The engine speaks Codex's protocol, so CODEX mints the thread id and reports it via
+  // `thread.started` — the box must NOT invent one. (It used to mint a UUID here like the
+  // Gemini path does; buildCodexArgs then turned it into `exec resume <uuid>` against a rollout
+  // that never existed, so every turn died with "no rollout found ... (code -32600)".)
+  // Register a brand-new chat provisionally under the internal `new-…` key so the user's
+  // message is durable immediately, then migrate it onto the real id.
+  if (isNew) {
+    s.provKey = s.key;
+    ensureDeepSeekSession(s.provKey, {
+      cwd: s.cwd,
+      title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
+      lastUsed: Date.now(),
+      settings: s.settings,
+      parentId: msg.parentId || s.parentId || null,
+      parentTitle: msg.parentTitle || s.parentTitle || '',
+    });
+    appendDeepSeekMessage(s.provKey, 'user', userText, { parts: userParts });
+    addRunning(s.provKey);
+  } else {
+    ensureDeepSeekSession(s.sessionId, {
+      cwd: s.cwd,
+      title: s.title || msg.title || '',
+      lastUsed: Date.now(),
+      settings: s.settings,
+      parentId: msg.parentId || s.parentId || null,
+      parentTitle: msg.parentTitle || s.parentTitle || '',
+    });
+    appendDeepSeekMessage(s.sessionId, 'user', userText, { parts: userParts });
+    ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+  }
   s.agent = 'deepseek';
-  ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
-  if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
   persist(s);
 
   const finish = () => {
@@ -6123,6 +6161,11 @@ function runDeepSeekTurn(s, msg, resolve) {
     if (s.sessionId) {
       flushDeepSeekAssistant(s, { finalize: true });
       if (lastError && !s.canceled) appendDeepSeekMessage(s.sessionId, 'assistant', `⚠️ DeepSeek error: ${lastError}`);
+    } else if (s.provKey) {
+      // codex never emitted a thread id (startup failure / bad key). Keep the provisional chat
+      // with the user's message so it's retryable in place, and clear its "working" marker.
+      deleteRunning(s.provKey);
+      if (!s.canceled) appendDeepSeekMessage(s.provKey, 'assistant', lastError ? `⚠️ DeepSeek didn't start: ${lastError}` : "⚠️ DeepSeek didn't start — send again to retry.");
     }
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
@@ -6131,7 +6174,7 @@ function runDeepSeekTurn(s, msg, resolve) {
     if (s.proc && typeof s.proc.kill === 'function') { try { s.proc.kill('SIGTERM'); } catch {} }
     finish();
   }, CODEX_TURN_TIMEOUT_MS);
-  bcast(s, { type: 'session', id: s.sessionId, agent: 'deepseek', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || session.title || '' });
+  if (!isNew) bcast(s, { type: 'session', id: s.sessionId, agent: 'deepseek', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '' });
   s.proc = deepseekEngine.run({
     sessionId: s.sessionId,
     isNew,
@@ -6142,8 +6185,27 @@ function runDeepSeekTurn(s, msg, resolve) {
     guest: sessionIsGuest(s),
     apiKey: DEEPSEEK_KEY,
     onEvent: (ev) => {
-      if (ev.type === 'session') {
-        return;
+      if (ev.type === 'session' && ev.id) {
+        // codex reported its real thread id — adopt it so the NEXT turn resumes a rollout
+        // that actually exists, and fold the provisional entry into it.
+        const provKey = s.provKey || null;
+        s.sessionId = ev.id; s.agent = 'deepseek';
+        ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+        if (provKey && provKey !== s.sessionId) { deleteRunning(provKey); migrateDeepSeekSession(provKey, s.sessionId); }
+        s.provKey = null;
+        if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+        ensureDeepSeekSession(s.sessionId, {
+          cwd: s.cwd,
+          title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
+          lastUsed: Date.now(),
+          settings: s.settings,
+          parentId: msg.parentId || s.parentId || null,
+          parentTitle: msg.parentTitle || s.parentTitle || '',
+        });
+        if (!provKey) appendDeepSeekMessage(s.sessionId, 'user', userText, { parts: userParts });
+        persist(s);
+        if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'deepseek' }); } catch {} }
+        bcast(s, { type: 'session', id: s.sessionId, agent: 'deepseek', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
       } else if (ev.type === 'text') {
         pushTextPart(s, ev.delta || '');
         if (s.sessionId) { s.dsLastFlush = Date.now(); flushDeepSeekAssistant(s); }
