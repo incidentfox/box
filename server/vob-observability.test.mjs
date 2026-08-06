@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { buildVobSnapshot, classifyEvents, resolveVobAudio } from './vob-observability.mjs';
+import { buildVobSnapshot, classifyEvents, findVobCase, resolveVobAudio } from './vob-observability.mjs';
 
 const event = (at, type, extra = {}) => JSON.stringify({ at, type, ...extra });
 
@@ -71,4 +71,50 @@ test('speech cues correct a stale human phase for hold prompts', () => {
   ], baseAt);
   assert.deepEqual(data.transcript.map((row) => row.phase), ['hold', 'human']);
   assert.deepEqual(data.segments.map((segment) => segment.label), ['human', 'hold', 'human']);
+});
+
+test('resolves nested and legacy session artifacts and backfills result-only ledger rows', () => {
+  const root = mkdtempSync(join(tmpdir(), 'box-vob-legacy-'));
+  const legacyRoot = mkdtempSync(join(tmpdir(), 'box-vob-result-only-'));
+  const requestId = 'rise4_0123456789abcdef0123456789abcdef';
+  const ownerOnly = join(root, requestId);
+  const complete = join(root, `${requestId}_test_3`);
+  const legacy = join(legacyRoot, 'legacy-case');
+  try {
+    mkdirSync(ownerOnly, { recursive: true });
+    mkdirSync(complete, { recursive: true });
+    mkdirSync(legacy, { recursive: true });
+    mkdirSync(join(ownerOnly, 'workspace', 'work', 'automation'), { recursive: true });
+    writeFileSync(join(ownerOnly, 'operator-owner.private.json'), JSON.stringify({
+      requestId: `${requestId}_test_3`, rootRequestId: requestId, metadata: { sessionId: 'nested-session' },
+    }));
+    writeFileSync(join(complete, 'operator-context.private.json'), JSON.stringify({
+      requestId: `${requestId}_test_3`, rootRequestId: requestId, metadata: { resumedOperatorSessionId: 'nested-session' }, payerName: 'Legacy Fixture',
+    }));
+    writeFileSync(join(complete, 'operator-launch.private.json'), JSON.stringify({ requestId: `${requestId}_test_3`, session: { boxSessionId: 'nested-session' } }));
+    writeFileSync(join(complete, 'operator-ledger.private.json'), JSON.stringify({ requestId: `${requestId}_test_3`, calls: [] }));
+    writeFileSync(join(complete, 'operator-result.private.json'), JSON.stringify({
+      callIds: ['livekit_legacy-call'], aggregateEvidence: { facts: [{ key: 'plan.status', status: 'confirmed', value: 'active', sourceCallId: 'livekit_legacy-call' }] },
+    }));
+
+    const match = findVobCase({ sessionId: 'nested-session', session: { cwd: join(ownerOnly, 'workspace', 'work', 'automation') }, root, requestIds: [requestId] });
+    assert.equal(match.caseDir, complete);
+    assert.equal(match.link, 'request-id');
+    const snapshot = buildVobSnapshot({ sessionId: 'nested-session', root, requestIds: [requestId] });
+    assert.equal(snapshot.linked, true);
+    assert.equal(snapshot.payerName, 'Legacy Fixture');
+    assert.equal(snapshot.ledger.length, 1);
+    assert.equal(snapshot.ledger[0].callId, 'livekit_legacy-call');
+    assert.equal(snapshot.ledger[0].fields[0].value, 'active');
+    assert.equal(snapshot.dataQuality.backfilled, true);
+
+    writeFileSync(join(legacy, 'operator-context.private.json'), JSON.stringify({ requestId, payerName: 'Result Only' }));
+    writeFileSync(join(legacy, 'operator-result.private.json'), JSON.stringify({ callIds: ['call-result-only'], aggregateEvidence: { facts: [] } }));
+    const legacySnapshot = buildVobSnapshot({ sessionId: 'unrelated-session', root: legacyRoot, requestIds: [requestId] });
+    assert.equal(legacySnapshot.payerName, 'Result Only');
+    assert.equal(legacySnapshot.ledger[0].callId, 'call-result-only');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(legacyRoot, { recursive: true, force: true });
+  }
 });

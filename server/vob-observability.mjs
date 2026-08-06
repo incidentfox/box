@@ -5,7 +5,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
 // VOB operator artifacts are deliberately kept outside the Box checkout.  This
 // module is the narrow, read-only bridge between those artifacts and the owner-only
@@ -61,6 +61,21 @@ function caseDirectories(root) {
   }
 }
 
+function candidateRoots(root) {
+  const configured = resolve(root);
+  const roots = [configured];
+  // A few older operator runs wrote their private artifacts under the sibling
+  // production/remediation tree.  Keep the fixture/test root isolated, while
+  // making the deployed resolver cover both production artifact locations.
+  if (configured === resolve(DEFAULT_VOB_ROOT)) roots.push(join(dirname(configured), 'remediation'));
+  return [...new Set(roots)];
+}
+
+function hasOperatorArtifacts(candidate) {
+  return ['operator-context.private.json', 'operator-launch.private.json', 'operator-owner.private.json',
+    'operator-ledger.private.json', 'operator-result.private.json'].some((name) => existsSync(join(candidate, name)));
+}
+
 function findCaseFromCwd(cwd, root) {
   const realRoot = safeReal(root);
   const realCwd = safeReal(cwd);
@@ -68,33 +83,96 @@ function findCaseFromCwd(cwd, root) {
   const rel = relative(realRoot, realCwd).split('/');
   if (!rel[0] || rel[0].includes('..')) return null;
   const candidate = join(realRoot, rel[0]);
-  return existsSync(join(candidate, 'operator-context.private.json')) ? candidate : null;
+  return hasOperatorArtifacts(candidate) ? candidate : null;
 }
 
 function sessionIdInArtifact(value, sessionId) {
-  if (!value || typeof value !== 'object') return false;
-  return [value.sessionId, value.resumedOperatorSessionId, value.boxSessionId]
-    .some((candidate) => candidate && String(candidate) === String(sessionId));
+  const target = String(sessionId || '');
+  if (!target || !value || typeof value !== 'object') return false;
+  const keys = new Set(['sessionId', 'resumedOperatorSessionId', 'boxSessionId']);
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return false;
+    if (Array.isArray(node)) return node.some(visit);
+    return Object.entries(node).some(([key, child]) => {
+      if (keys.has(key) && typeof child === 'string' && child === target) return true;
+      return child && typeof child === 'object' ? visit(child) : false;
+    });
+  };
+  return visit(value);
 }
 
-function findCaseFromArtifacts(sessionId, root) {
-  const matches = [];
-  for (const candidate of caseDirectories(root)) {
-    for (const filename of ['operator-owner.private.json', 'operator-launch.private.json', 'operator-context.private.json']) {
-      const value = jsonFile(join(candidate, filename));
-      if (sessionIdInArtifact(value, sessionId)) { matches.push(candidate); break; }
+function requestIdsInArtifact(value) {
+  const ids = [];
+  const keys = new Set(['requestId', 'rootRequestId']);
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) return node.forEach(visit);
+    for (const [key, child] of Object.entries(node)) {
+      if (keys.has(key) && typeof child === 'string' && /^rise4_[A-Za-z0-9._-]+$/.test(child)) ids.push(child);
+      if (child && typeof child === 'object') visit(child);
     }
-  }
-  return [...new Set(matches)];
+  };
+  visit(value);
+  return [...new Set(ids)];
 }
 
-export function findVobCase({ sessionId, session = null, root = DEFAULT_VOB_ROOT } = {}) {
+function requestIdMatches(candidate, requestIds) {
+  const wanted = new Set((requestIds || []).map((id) => String(id || '')).filter(Boolean));
+  if (!wanted.size) return false;
+  const base = basename(candidate).replace(/_test_\d+$/, '');
+  if (wanted.has(basename(candidate)) || wanted.has(base)) return true;
+  return ['operator-owner.private.json', 'operator-launch.private.json', 'operator-context.private.json',
+    'operator-ledger.private.json', 'operator-result.private.json']
+    .some((filename) => requestIdsInArtifact(jsonFile(join(candidate, filename))).some((id) => wanted.has(id)));
+}
+
+function caseScore(candidate, sessionId, requestIds) {
+  const sessionMatch = ['operator-owner.private.json', 'operator-launch.private.json', 'operator-context.private.json']
+    .some((filename) => sessionIdInArtifact(jsonFile(join(candidate, filename)), sessionId));
+  const requestMatch = requestIdMatches(candidate, requestIds);
+  const context = jsonFile(join(candidate, 'operator-context.private.json')) || {};
+  const ledger = jsonFile(join(candidate, 'operator-ledger.private.json')) || {};
+  const result = jsonFile(join(candidate, 'operator-result.private.json')) || {};
+  const calls = Array.isArray(ledger.calls) ? ledger.calls.length : 0;
+  const resultCalls = Array.isArray(result.callIds) ? result.callIds.length : 0;
+  const facts = Array.isArray(result.aggregateEvidence?.facts) ? result.aggregateEvidence.facts.length : 0;
+  return (requestMatch ? 100000 : 0) + (sessionMatch ? 10000 : 0)
+    + (context.requestId ? 500 : 0) + (calls ? 300 : 0) + (resultCalls ? 250 : 0)
+    + (facts ? 150 : 0) + (existsSync(join(candidate, 'runtime')) ? 50 : 0)
+    + (hasOperatorArtifacts(candidate) ? 10 : 0);
+}
+
+function findCaseFromArtifacts(sessionId, root, requestIds = []) {
+  return caseDirectories(root)
+    .filter((candidate) => {
+      const sessionMatch = ['operator-owner.private.json', 'operator-launch.private.json', 'operator-context.private.json']
+        .some((filename) => sessionIdInArtifact(jsonFile(join(candidate, filename)), sessionId));
+      return sessionMatch || requestIdMatches(candidate, requestIds);
+    })
+    .map((caseDir) => ({ caseDir, score: caseScore(caseDir, sessionId, requestIds) }))
+    .sort((a, b) => b.score - a.score || a.caseDir.localeCompare(b.caseDir));
+}
+
+export function findVobCase({ sessionId, session = null, root = DEFAULT_VOB_ROOT, requestIds = [] } = {}) {
   const configuredRoot = resolve(root);
-  const cwdMatch = findCaseFromCwd(session && session.cwd, configuredRoot);
-  if (cwdMatch) return { caseDir: cwdMatch, link: 'cwd' };
-  const artifactMatches = findCaseFromArtifacts(sessionId, configuredRoot);
-  if (artifactMatches.length === 1) return { caseDir: artifactMatches[0], link: 'artifact' };
-  if (artifactMatches.length > 1) return { ambiguous: true, matches: artifactMatches.length };
+  const roots = candidateRoots(configuredRoot);
+  const cwdMatches = roots.map((candidateRoot) => findCaseFromCwd(session && session.cwd, candidateRoot))
+    .filter(Boolean)
+    .map((caseDir) => ({ caseDir, score: caseScore(caseDir, sessionId, requestIds), cwd: true }));
+  const artifactMatches = roots.flatMap((candidateRoot) => findCaseFromArtifacts(sessionId, candidateRoot, requestIds));
+  const candidates = [...cwdMatches, ...artifactMatches];
+  if (candidates.length) {
+    const bestByDir = new Map();
+    for (const candidate of candidates) {
+      const previous = bestByDir.get(candidate.caseDir);
+      if (!previous || candidate.score > previous.score) bestByDir.set(candidate.caseDir, candidate);
+    }
+    const best = [...bestByDir.values()].sort((a, b) => b.score - a.score || a.caseDir.localeCompare(b.caseDir))[0];
+    return {
+      caseDir: best.caseDir,
+      link: requestIdMatches(best.caseDir, requestIds) ? 'request-id' : best.cwd ? 'cwd' : 'artifact',
+    };
+  }
   return null;
 }
 
@@ -252,7 +330,7 @@ function buildAttempt(caseDir, call) {
     callId,
     sequence: call.sequence || null,
     kind: call.kind || null,
-    focusFields: Array.isArray(call.focusFields) ? call.focusFields.map((field) => String(field).slice(0, 160)).slice(0, 80) : [],
+    focusFields: fieldKeys(call),
     status: active ? 'live' : recording ? 'recorded' : terminal ? 'ended' : events.length ? 'observed' : 'pending',
     live: active,
     audio: !!recording,
@@ -261,6 +339,17 @@ function buildAttempt(caseDir, call) {
     segments: transcriptData.segments,
     eventCount: events.length,
   };
+}
+
+function fieldKeys(call) {
+  if (!call || typeof call !== 'object') return [];
+  const values = [call.focusFields, call.fields, call.requestedFields, call.askFields, call.fieldKeys];
+  const fields = values.flatMap((value) => {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === 'object') return Object.keys(value);
+    return [];
+  });
+  return [...new Set(fields.map((field) => String(field || '').trim()).filter(Boolean))].slice(0, 80).map((field) => field.slice(0, 160));
 }
 
 function slackUrlFrom(...values) {
@@ -274,22 +363,40 @@ function slackUrlFrom(...values) {
   return null;
 }
 
-function answerFacts(result) {
-  const facts = result && result.aggregateEvidence && Array.isArray(result.aggregateEvidence.facts)
-    ? result.aggregateEvidence.facts : [];
-  return facts.slice(0, 300).map((fact) => ({
+function answerFacts(result, ledger = {}) {
+  const aggregate = result && result.aggregateEvidence && typeof result.aggregateEvidence === 'object' ? result.aggregateEvidence : {};
+  const candidates = [
+    ...(Array.isArray(aggregate.facts) ? aggregate.facts : []),
+    ...(Array.isArray(result?.facts) ? result.facts : []),
+    ...(Array.isArray(ledger?.facts) ? ledger.facts : []),
+  ];
+  const fieldValues = aggregate.fieldValues && typeof aggregate.fieldValues === 'object' && !Array.isArray(aggregate.fieldValues)
+    ? Object.entries(aggregate.fieldValues).map(([key, value]) => ({ key, value, status: 'confirmed' })) : [];
+  const seen = new Set();
+  return [...candidates, ...fieldValues].filter((fact) => {
+    const key = String(fact?.key || '').trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 300).map((fact) => ({
     key: String(fact.key || '').trim().slice(0, 200),
     status: String(fact.status || 'unknown').slice(0, 80),
     value: typeof fact.value === 'string' ? fact.value.slice(0, MAX_TEXT_LENGTH) : fact.value == null ? null : String(fact.value).slice(0, MAX_TEXT_LENGTH),
-    sourceCallIds: Array.isArray(fact.sourceCallIds) ? fact.sourceCallIds.map(String).slice(0, 20) : fact.sourceCallId ? [String(fact.sourceCallId)] : [],
+    sourceCallIds: [...new Set([
+      ...(Array.isArray(fact.sourceCallIds) ? fact.sourceCallIds : []),
+      fact.sourceCallId,
+      fact.callId,
+    ].filter(Boolean).map((id) => String(id).slice(0, 180)))].slice(0, 20),
     evidenceCount: Array.isArray(fact.evidence) ? fact.evidence.length : 0,
   }));
 }
 
-function ledgerFieldRows(call, factsByKey) {
-  const fields = Array.isArray(call.focusFields)
-    ? call.focusFields.map((field) => String(field || '').trim().slice(0, 160)).filter(Boolean).slice(0, 80)
-    : [];
+function ledgerFieldRows(call, factsByKey, factRows = [], allCalls = []) {
+  let fields = fieldKeys(call);
+  const callId = String(call.callId || call.id || '');
+  const tiedFacts = factRows.filter((fact) => fact.sourceCallIds.includes(callId));
+  if (!fields.length && tiedFacts.length) fields = tiedFacts.map((fact) => fact.key);
+  if (!fields.length && allCalls.length === 1) fields = factRows.map((fact) => fact.key);
   return fields.map((key) => {
     const fact = factsByKey.get(key);
     return {
@@ -302,8 +409,8 @@ function ledgerFieldRows(call, factsByKey) {
   });
 }
 
-export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB_ROOT } = {}) {
-  const match = findVobCase({ sessionId, session, root });
+export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB_ROOT, requestIds = [] } = {}) {
+  const match = findVobCase({ sessionId, session, root, requestIds });
   if (!match || match.ambiguous) return { linked: false, ambiguous: !!match?.ambiguous };
   const caseDir = match.caseDir;
   const context = jsonFile(join(caseDir, 'operator-context.private.json')) || {};
@@ -311,10 +418,11 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
   const owner = jsonFile(join(caseDir, 'operator-owner.private.json')) || {};
   const ledger = jsonFile(join(caseDir, 'operator-ledger.private.json')) || {};
   const result = jsonFile(join(caseDir, 'operator-result.private.json')) || {};
-  const calls = Array.isArray(ledger.calls) ? ledger.calls : [];
+  const calls = normalizedLedgerCalls(ledger, result);
   const attempts = calls.map((call) => buildAttempt(caseDir, call)).filter(Boolean);
-  const factRows = answerFacts(result);
+  const factRows = answerFacts(result, ledger);
   const factsByKey = new Map(factRows.map((fact) => [fact.key, fact]));
+  const attemptsById = new Map(attempts.map((attempt) => [attempt.callId, attempt]));
   const live = attempts.some((attempt) => attempt.live);
   return {
     linked: true,
@@ -330,18 +438,35 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
       callId: String(call.callId || '').slice(0, 180),
       sequence: call.sequence || index + 1,
       kind: String(call.kind || '').slice(0, 120),
-      focusFields: Array.isArray(call.focusFields) ? call.focusFields.map((field) => String(field).slice(0, 160)).slice(0, 80) : [],
-      fields: ledgerFieldRows(call, factsByKey),
-      attemptStatus: attempts[index]?.status || 'pending',
+      focusFields: fieldKeys(call),
+      fields: ledgerFieldRows(call, factsByKey, factRows, calls),
+      attemptStatus: attemptsById.get(String(call.callId || call.id || ''))?.status || 'pending',
     })),
     facts: factRows,
     attempts,
+    dataQuality: {
+      ledgerCalls: calls.length,
+      factCount: factRows.length,
+      attemptsWithEvidence: attempts.filter((attempt) => attempt.eventCount > 0 || attempt.audio).length,
+      fieldsWithValues: calls.reduce((count, call) => count + ledgerFieldRows(call, factsByKey, factRows, calls).filter((field) => field.value != null).length, 0),
+      backfilled: !Array.isArray(ledger.calls) || !ledger.calls.length || calls.some((call) => !Array.isArray(call.focusFields) && fieldKeys(call).length),
+    },
     refreshedAt: new Date().toISOString(),
   };
 }
 
-export function resolveVobAudio({ sessionId, session = null, callId, root = DEFAULT_VOB_ROOT } = {}) {
-  const match = findVobCase({ sessionId, session, root });
+function normalizedLedgerCalls(ledger, result) {
+  const calls = Array.isArray(ledger?.calls) ? ledger.calls.filter((call) => call && typeof call === 'object') : [];
+  if (calls.length) return calls;
+  const ids = Array.isArray(result?.callIds) ? result.callIds : [];
+  return ids.map((value, index) => {
+    const callId = typeof value === 'string' ? value : value?.callId || value?.id;
+    return callId ? { callId: String(callId), sequence: index + 1, kind: 'recovered' } : null;
+  }).filter(Boolean);
+}
+
+export function resolveVobAudio({ sessionId, session = null, callId, root = DEFAULT_VOB_ROOT, requestIds = [] } = {}) {
+  const match = findVobCase({ sessionId, session, root, requestIds });
   if (!match || match.ambiguous || !/^[A-Za-z0-9._-]+$/.test(String(callId || ''))) return null;
   const files = attemptFiles(match.caseDir, callId);
   const path = selectRecording(files.recordings);
