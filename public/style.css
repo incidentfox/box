@@ -1522,12 +1522,25 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 }
 
 .vobLiveMonitorModal { position: fixed; inset: 0; z-index: 75; display: grid; place-items: center; padding: max(16px, var(--safe-t)) max(16px, var(--safe-r)) max(16px, var(--safe-b)) max(16px, var(--safe-l)); background: color-mix(in srgb, #000 58%, transparent); }
-.vobLiveMonitorPanel { display: flex; flex-direction: column; width: min(760px, 100%); max-height: calc(100dvh - 32px); overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--ink); box-shadow: 0 16px 50px rgba(0,0,0,.35); }
+.vobLiveMonitorPanel { display: flex; flex-direction: column; width: min(1120px, 100%); max-height: calc(100dvh - 32px); overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--ink); box-shadow: 0 16px 50px rgba(0,0,0,.35); }
 .vobLiveMonitorHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 17px 18px 14px; border-bottom: 1px solid var(--line); background: var(--subtle); }
 .vobLiveMonitorHead h2 { margin: 3px 0 4px; font-size: 18px; }
 .vobLiveMonitorHead [data-vob-monitor-status] { color: var(--muted); font-size: 12px; }
 .vobLiveMonitorHead [data-vob-monitor-status].live { color: var(--green); }
-.vobLiveMonitorTranscript { min-height: 220px; max-height: min(560px, 62dvh); overflow: auto; padding: 8px 12px; background: var(--card); }
+.vobLiveMonitorBody { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .85fr); min-height: 0; }
+.vobLiveMonitorTranscript { height: min(620px, 64dvh); min-height: 220px; overflow: auto; padding: 8px 12px; background: var(--card); }
+.vobLiveMonitorData { min-width: 0; max-height: min(620px, 64dvh); overflow: auto; padding: 12px; border-left: 1px solid var(--line); background: var(--subtle); }
+.vobMonitorDataHead { display: grid; gap: 3px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
+.vobMonitorDataHead strong { font-size: 14px; overflow-wrap: anywhere; }
+.vobMonitorDataHead > span { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.vobMonitorDataSection { margin-top: 12px; }
+.vobMonitorDataSection h3 { margin: 0 0 6px; color: var(--muted); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+.vobMonitorLedger { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.vobMonitorLedger + .vobMonitorLedger { margin-top: 7px; }
+.vobMonitorLedgerHead { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 6px; margin-bottom: 6px; }
+.vobMonitorLedgerHead code { min-width: 0; overflow-wrap: anywhere; }
+.vobMonitorLedgerHead span { color: var(--muted); font-size: 10px; }
+.vobMonitorLedgerHead b { grid-column: 2; grid-row: 1 / span 2; align-self: start; color: var(--muted); font-size: 9px; text-transform: uppercase; }
 .vobLiveMonitorEmpty { padding: 42px 12px; color: var(--muted); text-align: center; font-size: 12px; }
 .vobLiveMonitorRow { display: grid; grid-template-columns: 44px 58px minmax(0, 1fr); gap: 8px; align-items: start; padding: 8px 7px; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.35; }
 .vobLiveMonitorRow time { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
@@ -1578,6 +1591,44 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .vobTestCallFoot { justify-content: flex-start; padding: 10px 14px 14px; margin-top: 0; border-top: 1px solid var(--line); }
 .vobTestTimer { flex: none; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
 .vobTestHint { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; }
+.vobTestPanel:has(.vobTestCall:not(.hidden)) { width: min(1120px, 100%); overflow: hidden; }
+.vobTestCallBody { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, .85fr); min-height: 0; }
+.vobTestCallBody .vobTestTranscript { height: min(620px, 64dvh); max-height: none; }
+.vobTestInspector { min-width: 0; max-height: min(620px, 64dvh); overflow: auto; padding: 12px; border-left: 1px solid var(--line); background: var(--subtle); }
+.vobTestInspectorHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.vobTestInspectorHead > div { display: grid; gap: 3px; min-width: 0; }
+.vobTestInspectorHead strong { font-size: 14px; overflow-wrap: anywhere; }
+.vobTestInspectorHead span { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.vobTestInspector .vobClose { flex: none; }
+.vobTestConfigSection { padding: 11px 0; border-bottom: 1px solid var(--line); }
+.vobTestConfigSection:last-child { border-bottom: 0; }
+.vobTestConfigSection > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; list-style: none; color: var(--ink); font-size: 11px; font-weight: 750; }
+.vobTestConfigSection > summary::-webkit-details-marker { display: none; }
+.vobTestConfigSection > summary::after { content: '▾'; color: var(--muted); font-size: 12px; }
+.vobTestConfigSection:not([open]) > summary::after { content: '▸'; }
+.vobTestConfigContent { margin-top: 9px; }
+.vobTestConfigNote { color: var(--muted); font-size: 10px; line-height: 1.35; }
+.vobTestConfigSection h3 { margin: 0 0 7px; color: var(--muted); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+.vobTestConfigRows { display: grid; gap: 6px; }
+.vobTestConfigRow { display: grid; grid-template-columns: minmax(72px, .7fr) minmax(0, 1.3fr); gap: 8px; font-size: 11px; line-height: 1.3; }
+.vobTestConfigRow > span:first-child { color: var(--muted); }
+.vobTestConfigRow > span:last-child { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.vobTestDataRows { display: grid; gap: 6px; }
+.vobTestDataRow { display: grid; grid-template-columns: minmax(98px, .72fr) minmax(0, 1.28fr) auto; gap: 7px; align-items: start; padding: 6px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); font-size: 11px; line-height: 1.3; }
+.vobTestDataRow code { min-width: 0; overflow-wrap: anywhere; }
+.vobTestDataRow > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.vobTestDataRow > small { color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.vobTestLedgerCard { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.vobTestLedgerCard + .vobTestLedgerCard { margin-top: 7px; }
+.vobTestLedgerHead { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 6px; margin-bottom: 6px; }
+.vobTestLedgerHead code { min-width: 0; overflow-wrap: anywhere; }
+.vobTestLedgerHead span { color: var(--muted); font-size: 10px; }
+.vobTestLedgerHead b { grid-column: 2; grid-row: 1 / span 2; align-self: start; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.vobTestSettings { display: grid; gap: 8px; }
+.vobTestSettings label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.vobTestSettings select, .vobTestSettings textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); padding: 7px 8px; font: inherit; font-size: 11px; }
+.vobTestSettings textarea { min-height: 64px; resize: vertical; line-height: 1.3; }
+.vobTestSettings button { justify-self: start; }
 @media (max-width: 700px) {
   .vobTestGrid { grid-template-columns: 1fr; }
   .vobTestActions { flex-wrap: wrap; }
@@ -1585,4 +1636,7 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
   .vobTestCallFoot { align-items: flex-start; flex-wrap: wrap; }
   .vobTestHint { flex-basis: calc(100% - 60px); }
   .vobTestCallFoot .vobClose { margin-left: auto; }
+  .vobLiveMonitorBody, .vobTestCallBody { grid-template-columns: 1fr; }
+  .vobLiveMonitorTranscript, .vobTestCallBody .vobTestTranscript { height: 40dvh; min-height: 180px; }
+  .vobLiveMonitorData, .vobTestInspector { max-height: 34dvh; border-top: 1px solid var(--line); border-left: 0; }
 }

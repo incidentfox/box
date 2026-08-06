@@ -3028,7 +3028,9 @@ app.get('/api/sessions/:id/vob', requireOwner, (req, res) => {
   try {
     const session = (loadCodex().sessions || {})[req.params.id] || null;
     const requestIds = vobRequestIdsForSession(req.params.id);
-    const snapshot = buildVobSnapshot({ sessionId: req.params.id, session, requestIds });
+    const includePacketFacts = String(req.query.includePacketFacts || '').toLowerCase() === '1'
+      || String(req.query.includePacketFacts || '').toLowerCase() === 'true';
+    const snapshot = buildVobSnapshot({ sessionId: req.params.id, session, requestIds, includePacketFacts });
     if (!snapshot.linked) return res.status(snapshot.ambiguous ? 409 : 404).json(snapshot);
     res.setHeader('Cache-Control', 'private, no-store');
     return res.json(snapshot);
