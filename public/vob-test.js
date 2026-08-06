@@ -43,10 +43,10 @@
         <form data-vob-test-form>
           <div class="vobTestGrid">
             <label>Production prompt<select name="promptPreset">${optionsHtml(catalog.prompts, defaults.promptPreset, true)}</select></label>
-            <label>Language model<select name="model">${optionsHtml(catalog.models, defaults.model, true)}</select></label>
-            <label>Agent voice<select name="voice">${optionsHtml(catalog.voices, defaults.voice)}</select></label>
+            <label>Production LiveKit model<select name="model">${optionsHtml(catalog.models, defaults.model, true)}</select></label>
+            <label>Production Cartesia voice<select name="voice">${optionsHtml(catalog.voices, defaults.voice, true)}</select></label>
           </div>
-          <div class="vobTestNotice"><strong>Production contract.</strong> The exact caller prompt and this case’s current ledger are loaded as call context. Model and voice are the only test-room overrides.</div>
+          <div class="vobTestNotice"><strong>Production media contract.</strong> This room uses the same Gemma 4 31B IT model, Deepgram Flux transcription, and Cartesia Sonic 3.5 voice as a real payer call. The exact production caller prompt and this case’s current ledger are loaded as call context.</div>
           <div class="vobTestNotice"><strong>Safe test room.</strong> This does not place or modify a payer call. The agent receives a read-only snapshot of this case and the room expires automatically.</div>
           <div class="vobTestActions"><span class="vobTestStatus" data-vob-test-status>Ready to start</span><button type="button" class="vobClose" data-vob-test-close>Cancel</button><button type="submit" class="vobTestPrimary">Start role-play</button></div>
         </form>

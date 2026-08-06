@@ -5,6 +5,15 @@ import {
   buildVobProductionInstructions,
 } from './vob-production-prompt.mjs';
 
+// Keep the owner test room on the same media/runtime contract as the real
+// Rise4 payer call.  The prompt compiler above uses Luna to assemble the
+// deterministic call instructions; this separate model is the LiveKit
+// conversation model that actually speaks with the representative.
+export const VOB_LIVEKIT_PRODUCTION_MODEL = 'google/gemma-4-31b-it';
+export const VOB_LIVEKIT_PRODUCTION_STT_MODEL = 'deepgram/flux-general-en';
+export const VOB_LIVEKIT_PRODUCTION_TTS_MODEL = 'cartesia/sonic-3.5';
+export const VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE = '9626c31c-bec5-4cca-baa8-f8ba9e84c8bc';
+
 // Ephemeral configuration for owner-only VOB test rooms. The agent receives the
 // same pinned production caller contract used by a real payer call. The case
 // snapshot is copied into memory only long enough for the LiveKit agent to load
@@ -19,29 +28,26 @@ export const VOB_TEST_PROMPTS = Object.freeze([
 ]);
 
 export const VOB_TEST_MODELS = Object.freeze([
-  { id: 'gpt-4o-mini', label: 'GPT-4o mini', description: 'Fast and economical.' },
-  { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', description: 'Fast, concise instruction following.' },
-  { id: 'gpt-4.1', label: 'GPT-4.1', description: 'Higher reasoning quality for nuanced calls.' },
-  { id: 'gpt-4o', label: 'GPT-4o', description: 'Natural conversational output.' },
+  {
+    id: VOB_LIVEKIT_PRODUCTION_MODEL,
+    label: 'Gemma 4 31B IT — production',
+    description: 'Exact production LiveKit caller model.',
+  },
 ]);
 
 export const VOB_TEST_VOICES = Object.freeze([
-  { id: 'marin', label: 'Marin' },
-  { id: 'ash', label: 'Ash' },
-  { id: 'cedar', label: 'Cedar' },
-  { id: 'coral', label: 'Coral' },
-  { id: 'ballad', label: 'Ballad' },
-  { id: 'sage', label: 'Sage' },
-  { id: 'verse', label: 'Verse' },
-  { id: 'alloy', label: 'Alloy' },
-  { id: 'echo', label: 'Echo' },
-  { id: 'fable', label: 'Fable' },
-  { id: 'onyx', label: 'Onyx' },
-  { id: 'nova', label: 'Nova' },
-  { id: 'shimmer', label: 'Shimmer' },
+  {
+    id: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
+    label: 'Cartesia Sonic 3.5 — production voice',
+    description: 'Exact production Cartesia voice.',
+  },
 ]);
 
-const DEFAULTS = Object.freeze({ promptPreset: 'production_guarded', model: 'gpt-4.1-mini', voice: 'marin' });
+const DEFAULTS = Object.freeze({
+  promptPreset: 'production_guarded',
+  model: VOB_LIVEKIT_PRODUCTION_MODEL,
+  voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
+});
 
 function idSet(items) { return new Set(items.map((item) => item.id)); }
 const PROMPT_IDS = idSet(VOB_TEST_PROMPTS);
@@ -75,6 +81,15 @@ export function vobTestCatalog() {
       version: VOB_PRODUCTION_PROMPT_VERSION,
       source: VOB_PRODUCTION_PROMPT_SOURCE,
       model: VOB_PRODUCTION_MODEL,
+    },
+    productionRuntime: {
+      llmProvider: 'livekit-inference',
+      model: VOB_LIVEKIT_PRODUCTION_MODEL,
+      sttProvider: 'livekit-inference',
+      sttModel: VOB_LIVEKIT_PRODUCTION_STT_MODEL,
+      ttsProvider: 'livekit-inference',
+      ttsModel: VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
+      voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
     },
     defaults: { ...DEFAULTS },
   };

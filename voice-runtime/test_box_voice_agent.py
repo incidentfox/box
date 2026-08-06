@@ -1,4 +1,23 @@
-from box_voice_agent import BoxCodexVoiceAgent, DEFAULT_CARTESIA_MODEL, DEFAULT_CARTESIA_VOICE, RuntimeConfig, deepgram_options, final_text_to_speak, is_manual_turn_commit, safe_vsid, speakable_text, text_from_message, turn_handling_options, voice_bool, vsid_from_room
+from box_voice_agent import (
+    BoxCodexVoiceAgent,
+    DEFAULT_CARTESIA_MODEL,
+    DEFAULT_CARTESIA_VOICE,
+    RuntimeConfig,
+    VOB_PRODUCTION_CARTESIA_VOICE,
+    VOB_PRODUCTION_LLM_MODEL,
+    VOB_PRODUCTION_STT_MODEL,
+    VOB_PRODUCTION_TTS_MODEL,
+    deepgram_options,
+    final_text_to_speak,
+    is_manual_turn_commit,
+    safe_vsid,
+    speakable_text,
+    text_from_message,
+    turn_handling_options,
+    vob_production_stt_options,
+    voice_bool,
+    vsid_from_room,
+)
 
 
 class FakeMessage:
@@ -25,6 +44,14 @@ def test_deepgram_utterance_end_satisfies_provider_minimum():
     assert deepgram_options()["utterance_end_ms"] >= 1000
     assert deepgram_options()["endpointing_ms"] == 0
     assert deepgram_options()["language"] == "en-US"
+
+
+def test_vob_test_room_uses_production_livekit_media_contract():
+    assert VOB_PRODUCTION_LLM_MODEL == "google/gemma-4-31b-it"
+    assert VOB_PRODUCTION_STT_MODEL == "deepgram/flux-general-en"
+    assert VOB_PRODUCTION_TTS_MODEL == "cartesia/sonic-3.5"
+    assert VOB_PRODUCTION_CARTESIA_VOICE == "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+    assert vob_production_stt_options() == {"model": VOB_PRODUCTION_STT_MODEL, "language": "en"}
 
 
 def test_turn_handling_commits_only_on_deepgram_finalized_speech():
