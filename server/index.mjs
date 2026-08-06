@@ -49,7 +49,6 @@ import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './l
 import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
-import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -174,12 +173,6 @@ const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FI
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 
 const PORT = Number(cfg('PORT', 7321));
-// A restart can recover many interrupted queues at once. Without a process-wide cap,
-// every queue launches its own Codex tree (plus MCP children) concurrently and can consume
-// the whole box before the UI can answer a request. Keep admission FIFO across sessions;
-// BOX_MAX_CONCURRENT_CODEX_TURNS is intentionally tunable without a deploy.
-const MAX_CONCURRENT_CODEX_TURNS = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_TURNS', '3'));
-const CODEX_TURN_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_TURNS);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
 const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
@@ -5467,21 +5460,6 @@ async function runWorker(s) {
     // deploy while waiting leaves the request durable in `queue`, not ambiguously `inflight`.
     const queuedAgent = s.queue[0].agent || s.agent || 'claude';
     let releaseTurnSlot = null;
-    if (queuedAgent === 'codex') {
-      if (CODEX_TURN_LIMITER.active >= CODEX_TURN_LIMITER.limit) {
-        bcast(s, {
-          type: 'native_wait',
-          sessionId: s.sessionId,
-          msg: `Queued — waiting for Box capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
-        });
-      }
-      releaseTurnSlot = await CODEX_TURN_LIMITER.acquire();
-      // Archive/cancel can clear a queue while its worker is waiting for capacity.
-      if (!s.running || !s.queue.length) {
-        releaseTurnSlot();
-        break;
-      }
-    }
     // Drain the leading run of messages from the SAME sender. Batching two people's
     // messages into one turn would merge them into a single bubble and lose the "who
     // said what" the whole shared-session feature rests on. On a solo box every author
