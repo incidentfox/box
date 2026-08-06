@@ -43,6 +43,16 @@ export const VOB_TEST_VOICES = Object.freeze([
   },
 ]);
 
+// The owner room is intentionally initialized after routing. It still uses the
+// exact production caller contract and runtime; this is only the call-state
+// snapshot the real worker would have after IVR and queue audio finish.
+export const VOB_HUMAN_PHASE_CONTEXT = `CONNECTED TO LIVE REPRESENTATIVE
+- Treat IVR routing and hold/queue audio as already completed for this call.
+- Do not navigate an IVR, say the IVR reason phrase "eligibility and benefits," or ask the representative to transfer you.
+- A live payer representative has just answered. You are the same provider-side caller at the start of the live-representative phase.
+- On your first turn, introduce yourself and state the packet-grounded purpose in one concise sentence. Then wait for the representative's response.
+- Continue with the production LIVE REPRESENTATIVE rules and unresolved evidence ledger fields, one question at a time.`;
+
 const DEFAULTS = Object.freeze({
   promptPreset: 'production_guarded',
   model: VOB_LIVEKIT_PRODUCTION_MODEL,
@@ -69,7 +79,7 @@ export function buildVobTestInstructions({ snapshot = {}, settings = DEFAULTS } 
   if (normalized.promptPreset !== 'production_guarded') {
     throw new Error(`unsupported VOB prompt preset: ${normalized.promptPreset}`);
   }
-  return buildVobProductionInstructions({ snapshot });
+  return `${buildVobProductionInstructions({ snapshot })}\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
 }
 
 export function vobTestCatalog() {
@@ -91,6 +101,7 @@ export function vobTestCatalog() {
       ttsModel: VOB_LIVEKIT_PRODUCTION_TTS_MODEL,
       voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
     },
+    initialCallState: 'connected_to_live_representative',
     defaults: { ...DEFAULTS },
   };
 }
