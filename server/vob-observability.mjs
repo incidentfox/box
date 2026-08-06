@@ -212,7 +212,8 @@ function attemptFiles(caseDir, callId, runtimeHint = '') {
   const matching = all.filter((path) => needles.some((needle) => basename(path).startsWith(`${needle}.`) || basename(path).startsWith(`${needle}-`)));
   const events = matching.filter((path) => path.endsWith('.jsonl'));
   const recordings = matching.filter((path) => /recordings/.test(path) && /\.(wav|ogg|mp3|m4a)$/i.test(path));
-  return { events, recordings };
+  const evidence = matching.filter((path) => /[\\/]evidence[\\/]/.test(path) && path.endsWith('.json'));
+  return { events, recordings, evidence };
 }
 
 function eventTime(event) {
@@ -429,11 +430,44 @@ function slackUrlFrom(...values) {
   return null;
 }
 
-function answerFacts(result, ledger = {}) {
+function usableEvidenceFact(fact) {
+  const key = String(fact?.key || '').trim();
+  const status = String(fact?.status || '').trim().toLowerCase();
+  const value = fact?.value == null ? '' : String(fact.value).trim();
+  if (!key || !['confirmed', 'unavailable'].includes(status)) return false;
+  // Older extractors occasionally accepted short question fragments as a
+  // representative name. Do not promote those historical false positives into
+  // the cumulative display; current production extraction rejects them too.
+  if (key === 'rep.name' && /^(?:am i|sure a)$/i.test(value)) return false;
+  return status === 'unavailable' || !!value;
+}
+
+function evidenceFactsForCalls(caseDir, calls) {
+  const rows = [];
+  // Newer validated evidence wins. A later missing fact is intentionally
+  // ignored so it cannot erase an answer captured on an earlier call.
+  for (const call of [...calls].reverse()) {
+    const callId = String(call.callId || call.id || '').trim().slice(0, 180);
+    const runtimeHint = firstCallString(call, ['liveKitRoot', 'runtimeRoot', 'runtimePath', 'runtime']);
+    const files = attemptFiles(caseDir, callId, runtimeHint);
+    for (const path of files.evidence) {
+      const document = jsonFile(path);
+      const facts = Array.isArray(document?.evidence?.facts) ? document.evidence.facts : [];
+      for (const fact of facts) {
+        if (!usableEvidenceFact(fact)) continue;
+        rows.push({ ...fact, sourceCallId: callId });
+      }
+    }
+  }
+  return rows;
+}
+
+function answerFacts(result, ledger = {}, evidenceFacts = []) {
   const aggregate = result && result.aggregateEvidence && typeof result.aggregateEvidence === 'object' ? result.aggregateEvidence : {};
   const candidates = [
     ...(Array.isArray(aggregate.facts) ? aggregate.facts : []),
     ...(Array.isArray(result?.facts) ? result.facts : []),
+    ...evidenceFacts,
     ...(Array.isArray(ledger?.facts) ? ledger.facts : []),
   ];
   const fieldValues = aggregate.fieldValues && typeof aggregate.fieldValues === 'object' && !Array.isArray(aggregate.fieldValues)
@@ -532,6 +566,36 @@ function ledgerFieldRows(call, factsByKey, factRows = [], allCalls = []) {
   });
 }
 
+function cumulativeLedgerRow(calls, attempts, factsByKey, factRows, result) {
+  if (!calls.length) return null;
+  const latestCall = calls[calls.length - 1];
+  const latestCallId = String(latestCall.callId || latestCall.id || '').slice(0, 180);
+  const requested = [...new Set(calls.flatMap((call) => fieldKeys(call)))];
+  const keys = [...new Set([...requested, ...factRows.map((fact) => fact.key)])].slice(0, 300);
+  const fields = keys.map((key) => {
+    const fact = factsByKey.get(key);
+    return {
+      key,
+      status: fact?.status || 'pending',
+      value: fact?.value ?? null,
+      sourceCallIds: fact?.sourceCallIds || [],
+      evidenceCount: fact?.evidenceCount || 0,
+    };
+  });
+  const latestAttempt = attempts.findLast((attempt) => attempt.callId === latestCallId) || attempts.at(-1);
+  const resultStatus = ['completed', 'needs_attention'].includes(String(result?.status || '')) ? String(result.status) : '';
+  return {
+    callId: latestCallId,
+    latestCallId,
+    sequence: calls.length,
+    attemptCount: calls.length,
+    kind: 'cumulative',
+    focusFields: keys,
+    fields,
+    attemptStatus: resultStatus || String(latestAttempt?.status || 'pending'),
+  };
+}
+
 export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB_ROOT, requestIds = [], includePacketFacts = false } = {}) {
   const match = findVobCase({ sessionId, session, root, requestIds });
   if (!match || match.ambiguous) return { linked: false, ambiguous: !!match?.ambiguous };
@@ -543,11 +607,12 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
   const result = jsonFile(join(caseDir, 'operator-result.private.json')) || {};
   const calls = normalizedLedgerCalls(ledger, result);
   const attempts = calls.map((call) => buildAttempt(caseDir, call)).filter(Boolean);
-  const factRows = answerFacts(result, ledger);
+  const evidenceFacts = evidenceFactsForCalls(caseDir, calls);
+  const factRows = answerFacts(result, ledger, evidenceFacts);
   const packetFacts = includePacketFacts ? packetFactsForCalls(caseDir, calls) : [];
   const factsByKey = new Map(factRows.map((fact) => [fact.key, fact]));
-  const attemptsById = new Map(attempts.map((attempt) => [attempt.callId, attempt]));
   const live = attempts.some((attempt) => attempt.live);
+  const cumulativeLedger = cumulativeLedgerRow(calls, attempts, factsByKey, factRows, result);
   const snapshot = {
     linked: true,
     link: match.link,
@@ -558,14 +623,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
     live,
     status: result.status || (live ? 'in_progress' : attempts.length ? 'observed' : 'pending'),
     note: String(result.note || '').slice(0, 800) || null,
-    ledger: calls.map((call, index) => ({
-      callId: String(call.callId || '').slice(0, 180),
-      sequence: call.sequence || index + 1,
-      kind: String(call.kind || '').slice(0, 120),
-      focusFields: fieldKeys(call),
-      fields: ledgerFieldRows(call, factsByKey, factRows, calls),
-      attemptStatus: attemptsById.get(String(call.callId || call.id || ''))?.status || 'pending',
-    })),
+    ledger: cumulativeLedger ? [cumulativeLedger] : [],
     facts: factRows,
     ...(includePacketFacts ? { packetFacts } : {}),
     attempts,
@@ -573,7 +631,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
       ledgerCalls: calls.length,
       factCount: factRows.length,
       attemptsWithEvidence: attempts.filter((attempt) => attempt.eventCount > 0 || attempt.audio).length,
-      fieldsWithValues: calls.reduce((count, call) => count + ledgerFieldRows(call, factsByKey, factRows, calls).filter((field) => field.value != null).length, 0),
+      fieldsWithValues: cumulativeLedger?.fields.filter((field) => field.value != null).length || 0,
       backfilled: !Array.isArray(ledger.calls) || !ledger.calls.length || calls.some((call) => !Array.isArray(call.focusFields) && fieldKeys(call).length),
     },
     refreshedAt: new Date().toISOString(),

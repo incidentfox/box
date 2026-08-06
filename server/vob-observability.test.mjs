@@ -90,6 +90,52 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
   }
 });
 
+test('shows one cumulative ledger from validated evidence across call attempts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'box-vob-cumulative-'));
+  const caseDir = join(root, 'case-fixture');
+  const calls = [
+    { callId: 'livekit_call-one', sequence: 1, kind: 'initial', focusFields: ['plan.status', 'benefit.copay'], liveKitRoot: 'runtime/attempt-1/livekit' },
+    { callId: 'livekit_call-two', sequence: 2, kind: 'followup', focusFields: ['benefit.copay', 'provider.network'], liveKitRoot: 'runtime/attempt-2/livekit' },
+  ];
+  try {
+    mkdirSync(caseDir, { recursive: true });
+    writeFileSync(join(caseDir, 'operator-context.private.json'), JSON.stringify({ sessionId: 'cumulative-session' }));
+    writeFileSync(join(caseDir, 'operator-owner.private.json'), JSON.stringify({ sessionId: 'cumulative-session' }));
+    writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({ calls }));
+    for (const [index, token] of ['call-one', 'call-two'].entries()) {
+      const evidenceDir = join(caseDir, 'runtime', `attempt-${index + 1}`, 'livekit', 'evidence');
+      mkdirSync(evidenceDir, { recursive: true });
+      const facts = index === 0
+        ? [
+          { key: 'plan.status', status: 'confirmed', value: 'Active', evidence: [{ quote: 'active' }] },
+          { key: 'benefit.copay', status: 'confirmed', value: '$40', evidence: [{ quote: 'forty dollars' }] },
+        ]
+        : [
+          { key: 'plan.status', status: 'missing', value: '', evidence: [] },
+          { key: 'benefit.copay', status: 'confirmed', value: '$25', evidence: [{ quote: 'twenty-five dollars' }] },
+          { key: 'provider.network', status: 'missing', value: '', evidence: [] },
+        ];
+      writeFileSync(join(evidenceDir, `${token}.private.json`), JSON.stringify({ evidence: { facts } }));
+    }
+
+    const snapshot = buildVobSnapshot({ sessionId: 'cumulative-session', session: { cwd: caseDir }, root });
+    assert.equal(snapshot.ledger.length, 1);
+    assert.equal(snapshot.ledger[0].kind, 'cumulative');
+    assert.equal(snapshot.ledger[0].attemptCount, 2);
+    assert.equal(snapshot.ledger[0].callId, 'livekit_call-two');
+    assert.deepEqual(snapshot.ledger[0].fields.map((field) => [field.key, field.status, field.value]), [
+      ['plan.status', 'confirmed', 'Active'],
+      ['benefit.copay', 'confirmed', '$25'],
+      ['provider.network', 'pending', null],
+    ]);
+    assert.equal(snapshot.facts.find((fact) => fact.key === 'benefit.copay').sourceCallIds[0], 'livekit_call-two');
+    assert.equal(snapshot.dataQuality.ledgerCalls, 2);
+    assert.equal(snapshot.dataQuality.fieldsWithValues, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('speech cues correct a stale human phase for hold prompts', () => {
   const baseAt = Date.parse('2026-08-05T10:00:00.000Z');
   const data = classifyEvents([
