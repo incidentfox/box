@@ -39,6 +39,7 @@ LIVE REPRESENTATIVE
 - Do not repeat your introduction or call purpose unless a newly connected representative asks for it after a transfer.
 - If directly asked whether this is AI, automated, a bot, human, or live, answer the yes-or-no polarity truthfully in one sentence and stop. Do not append a capability question.
 - If asked for a diagnosis code, answer only the packet-grounded diagnosis_codes value. If asked for place of service, answer only service_setting.
+- The CALL DATA section is the authoritative call packet. If a value is present there, use it; never say that member, provider, or call information is unavailable when the packet provides it. Give the exact packet-grounded value when the representative asks for it.
 - Never substitute the provider or practice address for the member's home, residential, mailing, or account address. If the member address is unavailable, say so briefly and ask to verify with the member ID, name, and DOB instead.
 - Never repeat a question the representative already answered. When they redirect or initially refuse provider network status, make up to three distinct attempts: request a member-specific system check, request a lead or transfer, then ask for the exact identifier or direct route required. If a specific credential is required, offer the packet-grounded NPI or Tax ID once. After those bounded attempts, record the precise gap and move on.
 - If the representative says their department cannot check CPT codes and only answers from a general service description, accept that after the first statement. Ask whether the packet-grounded service type is covered, then ask authorization separately. Ask once for the direct department or route that can verify code-specific validity, coverage, and authorization. Never map a service-level answer onto individual CPT codes.
@@ -53,12 +54,27 @@ While a representative remains engaged, ask at most one natural, on-topic follow
 
 const clean = (value, max = 1200) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, max);
 
-function factMap(snapshot) {
+function factKeyVariants(key) {
+  const cleanKey = clean(key, 240);
+  if (!cleanKey) return [];
+  const snake = cleanKey.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+  return [...new Set([
+    cleanKey,
+    snake,
+    cleanKey.replace(/[._]/g, '_'),
+    snake.replace(/\./g, '_'),
+  ])];
+}
+
+function factMap(snapshot, { includePacketFacts = true } = {}) {
   const map = new Map();
-  for (const fact of Array.isArray(snapshot?.facts) ? snapshot.facts : []) {
-    const key = clean(fact?.key, 240);
-    if (key) map.set(key, fact);
-  }
+  const add = (fact, overwrite) => {
+    for (const key of factKeyVariants(fact?.key)) {
+      if (overwrite || !map.has(key)) map.set(key, fact);
+    }
+  };
+  if (includePacketFacts) for (const fact of Array.isArray(snapshot?.packetFacts) ? snapshot.packetFacts : []) add(fact, false);
+  for (const fact of Array.isArray(snapshot?.facts) ? snapshot.facts : []) add(fact, true);
   return map;
 }
 
@@ -73,20 +89,21 @@ function factValue(facts, aliases) {
 function callData(snapshot) {
   const facts = factMap(snapshot);
   const aliases = {
-    practice_name: ['practice.name', 'practice_name', 'provider.practice_name'],
+    practice_name: ['practice.name', 'practice_name', 'provider.practice_name', 'provider.practiceName'],
     payer_name: ['payer.name', 'payer_name'],
-    provider_name: ['provider.name', 'provider_name'],
+    provider_name: ['provider.name', 'provider_name', 'provider.provider_name', 'provider.providerName'],
     provider_address: ['provider.address', 'provider_address'],
     patient_name: ['patient.name', 'patient_name'],
     patient_member_id: ['patient.member_id', 'patient_member_id', 'member.id'],
     patient_dob: ['patient.dob', 'patient_dob'],
     patient_zip: ['patient.zip', 'patient_zip'],
     patient_group_number: ['patient.group_number', 'patient_group_number'],
-    requested_codes: ['requested_codes', 'codes', 'procedure.codes'],
-    diagnosis_codes: ['diagnosis_codes', 'diagnosis.codes'],
-    service_type: ['service_type', 'service.type'],
-    service_setting: ['service_setting', 'service.setting'],
-    place_of_service_code: ['place_of_service_code', 'service.place_of_service_code'],
+    requested_codes: ['requested_codes', 'codes', 'procedure.codes', 'service.requested_codes'],
+    diagnosis_codes: ['diagnosis_codes', 'diagnosis.codes', 'service.diagnosis_codes'],
+    service_type: ['service_type', 'service.type', 'service.service_type'],
+    service_setting: ['service_setting', 'service.setting', 'service.service_setting'],
+    place_of_service_code: ['place_of_service_code', 'service.place_of_service_code', 'service.place_of_service'],
+    benefit_channel: ['benefit_channel', 'service.benefit_channel'],
     live_rep_purpose: ['live_rep_purpose', 'call.purpose'],
   };
   const values = {
@@ -104,7 +121,7 @@ function callData(snapshot) {
 }
 
 function evidenceLedger(snapshot) {
-  const facts = factMap(snapshot);
+  const facts = factMap(snapshot, { includePacketFacts: false });
   const rows = [];
   const seen = new Set();
   for (const call of Array.isArray(snapshot?.ledger) ? snapshot.ledger : []) {

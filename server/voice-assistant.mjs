@@ -2776,7 +2776,7 @@ ${voiceAutonomyPolicy()}
     try {
       const sessionId = String(req.params.id || '').trim();
       const snapshot = typeof vobSnapshotForSession === 'function'
-        ? await Promise.resolve(vobSnapshotForSession(sessionId))
+        ? await Promise.resolve(vobSnapshotForSession(sessionId, { includePacketFacts: true }))
         : null;
       if (!snapshot || !snapshot.linked) {
         return res.status(snapshot && snapshot.ambiguous ? 409 : 404).json(snapshot || { error: 'VOB case not found' });

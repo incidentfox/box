@@ -29,8 +29,13 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({
       requestId: 'request-1', calls: [{
         callId, sequence: 1, kind: 'benefits', focusFields: ['deductible'], runtime: 'runtime/attempt-1',
-        liveKitRoot: 'runtime/attempt-1/livekit', roomPrefix: 'fixture-room-',
+        liveKitRoot: 'runtime/attempt-1/livekit', roomPrefix: 'fixture-room-', packetPath: 'calls/call-1/packet.private.json',
       }],
+    }));
+    mkdirSync(join(caseDir, 'calls', 'call-1'), { recursive: true });
+    writeFileSync(join(caseDir, 'calls', 'call-1', 'packet.private.json'), JSON.stringify({
+      patient: { name: 'Jordan Cissell', memberId: 'G4P591M89472', dob: '1990-12-10', groupNumber: 'GRP-42' },
+      service: { requestedCodes: ['90834'] },
     }));
     writeFileSync(join(caseDir, 'operator-result.private.json'), JSON.stringify({
       status: 'in_progress', aggregateEvidence: { facts: [{ key: 'deductible', status: 'confirmed', value: '$500', sourceCallId: callId }] },
@@ -62,6 +67,10 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     assert.equal(snapshot.attempts[0].transcript[0].text, 'Rep said hello');
     assert.equal(snapshot.attempts[0].transcript[0].startSec, 15);
     assert.equal(snapshot.attempts[0].roomName, 'fixture-livekit-room');
+    assert.equal(snapshot.packetFacts, undefined);
+    const testSnapshot = buildVobSnapshot({ sessionId: session.id, session, root, includePacketFacts: true });
+    assert.equal(testSnapshot.packetFacts.find((fact) => fact.key === 'patient.memberId').value, 'G4P591M89472');
+    assert.equal(testSnapshot.packetFacts.find((fact) => fact.key === 'patient.name').value, 'Jordan Cissell');
     assert.deepEqual(snapshot.attempts[0].segments.map((segment) => segment.label), ['unknown', 'ivr', 'hold', 'unknown', 'human']);
     assert.equal(snapshot.attempts[0].segments[1].startSec, 2);
     assert.equal(snapshot.attempts[0].segments[2].endSec, 12);
@@ -80,6 +89,33 @@ test('speech cues correct a stale human phase for hold prompts', () => {
   ], baseAt);
   assert.deepEqual(data.transcript.map((row) => row.phase), ['hold', 'human']);
   assert.deepEqual(data.segments.map((segment) => segment.label), ['human', 'hold', 'human']);
+});
+
+test('hydrates packets from the production sibling packets root without allowing arbitrary paths', () => {
+  const root = mkdtempSync(join(tmpdir(), 'box-vob-packet-root-'));
+  const caseDir = join(root, 'case-fixture');
+  const packetDir = join(root, 'packets', 'call-1');
+  try {
+    mkdirSync(caseDir, { recursive: true });
+    mkdirSync(packetDir, { recursive: true });
+    writeFileSync(join(caseDir, 'operator-context.private.json'), JSON.stringify({ sessionId: 'packet-session' }));
+    writeFileSync(join(caseDir, 'operator-owner.private.json'), JSON.stringify({ sessionId: 'packet-session' }));
+    writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({
+      calls: [{ callId: 'livekit_packet-call', packetPath: '../packets/call-1/packet.private.json' }],
+    }));
+    writeFileSync(join(caseDir, 'operator-result.private.json'), JSON.stringify({}));
+    writeFileSync(join(packetDir, 'packet.private.json'), JSON.stringify({ patient: { memberId: 'SIBLING-42' } }));
+
+    const snapshot = buildVobSnapshot({ sessionId: 'packet-session', session: { cwd: caseDir }, root, includePacketFacts: true });
+    assert.equal(snapshot.packetFacts.find((fact) => fact.key === 'patient.memberId').value, 'SIBLING-42');
+
+    writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({
+      calls: [{ callId: 'livekit_packet-call', packetPath: '/tmp/packet-outside-case.json' }],
+    }));
+    assert.deepEqual(buildVobSnapshot({ sessionId: 'packet-session', session: { cwd: caseDir }, root, includePacketFacts: true }).packetFacts, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('resolves nested and legacy session artifacts and backfills result-only ledger rows', () => {
