@@ -29,9 +29,8 @@ SRV_LOG="$STATE_DIR/server.log"
 TUN_LOG="$STATE_DIR/tunnel.log"
 URL_FILE="$STATE_DIR/url.txt"
 # On systemd hosts, keep each server generation in its own transient unit.  The
-# keeper intentionally survives server cutovers, and Box sessions intentionally
-# outlive the HTTP process; putting the server in a fresh cgroup prevents a
-# restart from inheriting every old session/worker process from box-app.service.
+# keeper intentionally survives server cutovers, but a server restart must reap
+# every Box-owned descendant instead of inheriting old session/worker processes.
 # Non-systemd installs retain the portable nohup path below.
 SERVER_UNIT_PREFIX="${BOX_SERVER_UNIT_PREFIX:-box-app-server}"
 SERVER_UNIT_FILE="$STATE_DIR/server-unit"
@@ -101,8 +100,8 @@ start_server() {
     echo "$(date -u +%FT%TZ) starting isolated server unit $unit" >>"$SRV_LOG"
     if systemd-run --user --collect --unit="$unit" --working-directory="$APP_DIR" \
       --property=Type=exec \
-      --property=KillMode=process \
-      --property=OOMPolicy=continue \
+      --property=KillMode=control-group \
+      --property=OOMPolicy=stop \
       --property=Restart=no \
       --property=StandardOutput=append:"$SRV_LOG" \
       --property=StandardError=append:"$SRV_LOG" \
