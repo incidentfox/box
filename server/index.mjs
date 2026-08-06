@@ -39,7 +39,7 @@ import {
 import { sttEngineOrder, stripNonSpeechTags } from './stt-engine.mjs';
 import { findCodexRollout, readCodexCompactionInfo, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
-import { DeepSeekExecEngine } from './deepseek-exec-engine.mjs';
+import { DEEPSEEK_DEFAULT_EFFORT, DEEPSEEK_MODEL, DeepSeekExecEngine, normalizeDeepSeekSettings } from './deepseek-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
 import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
 import { renderMeetingContextForIssue } from './meeting-context.mjs';
@@ -1342,6 +1342,7 @@ const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.l
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.6-luna', reasoningEffort: 'xhigh', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
+  deepseek: { model: DEEPSEEK_MODEL, reasoningEffort: DEEPSEEK_DEFAULT_EFFORT },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'claude-opus-5', effort: 'xhigh' },
@@ -1354,6 +1355,7 @@ function normalizeSettings(settings = {}) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
+    deepseek: normalizeDeepSeekSettings((settings && settings.deepseek) || {}),
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
