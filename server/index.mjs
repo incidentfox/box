@@ -3724,9 +3724,9 @@ try {
       const s = rt(sessionId || key);
       return { sessionId: s.sessionId || '', agent: s.agent || '', busy: !!s.running || s.queue.length > 0 };
     },
-    vobSnapshotForSession: (sessionId) => {
+    vobSnapshotForSession: (sessionId, options = {}) => {
       const session = (loadCodex().sessions || {})[sessionId] || null;
-      return buildVobSnapshot({ sessionId, session, requestIds: vobRequestIdsForSession(sessionId) });
+      return buildVobSnapshot({ sessionId, session, requestIds: vobRequestIdsForSession(sessionId), ...options });
     },
     vobTestConfigStore,
   });

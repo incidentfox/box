@@ -449,6 +449,63 @@ function answerFacts(result, ledger = {}) {
   }));
 }
 
+function packetPathForCall(caseDir, call) {
+  const packetRef = firstCallString(call, ['packetPath', 'packet', 'callPacketPath']);
+  if (!packetRef) return null;
+  const candidate = resolve(caseDir, packetRef);
+  const realCandidate = safeReal(candidate);
+  if (!realCandidate) return null;
+
+  // Most fixtures keep the packet under the case directory. Production
+  // operators write it to the sibling rise4-vob/production/packets tree, so
+  // allow only those two known roots (plus a sibling packets directory for
+  // isolated test roots). Never trust an arbitrary absolute path from an
+  // operator artifact.
+  const caseRoot = resolve(caseDir);
+  const allowedRoots = [
+    safeReal(caseRoot),
+    safeReal(join(caseRoot, 'packets')),
+    safeReal(join(dirname(caseRoot), 'packets')),
+    safeReal(join(dirname(resolve(DEFAULT_VOB_ROOT)), 'packets')),
+  ].filter(Boolean);
+  return allowedRoots.some((root) => inside(realCandidate, root)) ? realCandidate : null;
+}
+
+function flattenPacket(value, prefix = '', rows = [], sourceCallId = '', depth = 0) {
+  if (rows.length >= 600 || depth > 8 || value == null) return rows;
+  if (Array.isArray(value)) {
+    const scalarValues = value.filter((item) => item == null || typeof item !== 'object').map((item) => textOf(item));
+    if (prefix && scalarValues.length) rows.push({ key: prefix, value: scalarValues.join(', '), status: 'packet', sourceCallIds: sourceCallId ? [sourceCallId] : [] });
+    value.forEach((item, index) => flattenPacket(item, prefix ? `${prefix}.${index}` : String(index), rows, sourceCallId, depth + 1));
+    return rows;
+  }
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      const childKey = prefix ? `${prefix}.${key}` : key;
+      flattenPacket(child, childKey, rows, sourceCallId, depth + 1);
+      if (rows.length >= 600) break;
+    }
+    return rows;
+  }
+  const text = textOf(value);
+  if (prefix && text) rows.push({ key: prefix.slice(0, 200), value: text, status: 'packet', sourceCallIds: sourceCallId ? [sourceCallId] : [] });
+  return rows;
+}
+
+function packetFactsForCalls(caseDir, calls) {
+  const rows = [];
+  for (const call of calls) {
+    const path = packetPathForCall(caseDir, call);
+    if (!path) continue;
+    const packet = jsonFile(path);
+    if (!packet) continue;
+    const callId = String(call.callId || call.id || '').trim().slice(0, 180);
+    flattenPacket(packet, '', rows, callId);
+    if (rows.length >= 600) break;
+  }
+  return rows.slice(0, 600);
+}
+
 function ledgerFieldRows(call, factsByKey, factRows = [], allCalls = []) {
   let fields = fieldKeys(call);
   const callId = String(call.callId || call.id || '');
@@ -467,7 +524,7 @@ function ledgerFieldRows(call, factsByKey, factRows = [], allCalls = []) {
   });
 }
 
-export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB_ROOT, requestIds = [] } = {}) {
+export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB_ROOT, requestIds = [], includePacketFacts = false } = {}) {
   const match = findVobCase({ sessionId, session, root, requestIds });
   if (!match || match.ambiguous) return { linked: false, ambiguous: !!match?.ambiguous };
   const caseDir = match.caseDir;
@@ -479,6 +536,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
   const calls = normalizedLedgerCalls(ledger, result);
   const attempts = calls.map((call) => buildAttempt(caseDir, call)).filter(Boolean);
   const factRows = answerFacts(result, ledger);
+  const packetFacts = includePacketFacts ? packetFactsForCalls(caseDir, calls) : [];
   const factsByKey = new Map(factRows.map((fact) => [fact.key, fact]));
   const attemptsById = new Map(attempts.map((attempt) => [attempt.callId, attempt]));
   const live = attempts.some((attempt) => attempt.live);
@@ -501,6 +559,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
       attemptStatus: attemptsById.get(String(call.callId || call.id || ''))?.status || 'pending',
     })),
     facts: factRows,
+    ...(includePacketFacts ? { packetFacts } : {}),
     attempts,
     dataQuality: {
       ledgerCalls: calls.length,

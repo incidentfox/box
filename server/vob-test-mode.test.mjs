@@ -59,6 +59,11 @@ const config = createVobTestConfig({
       { key: 'rep.name', value: 'Taylor', status: 'captured' },
       { key: 'benefit.copay', value: '$25', status: 'captured' },
     ],
+    packetFacts: [
+      { key: 'patient.name', value: 'Jordan Cissell', status: 'packet' },
+      { key: 'patient.memberId', value: 'G4P591M89472', status: 'packet' },
+      { key: 'patient.dob', value: '1990-12-10', status: 'packet' },
+    ],
     ledger: [{ fields: [
       { key: 'rep.name', value: 'Taylor', status: 'captured' },
       { key: 'benefit.copay', value: '$25', status: 'captured' },
@@ -70,6 +75,9 @@ assert.match(config.instructions, /You are the provider-side insurance coordinat
 assert.match(config.instructions, /Example Health/);
 assert.match(config.instructions, /Taylor/);
 assert.match(config.instructions, /\$25/);
+assert.match(config.instructions, /patient_member_id: G4P591M89472/);
+assert.match(config.instructions, /patient_dob: 1990-12-10/);
+assert.match(config.instructions, /CALL DATA section is the authoritative call packet/);
 assert.match(config.instructions, /CALL DATA/);
 assert.match(config.instructions, /EVIDENCE LEDGER/);
 assert.match(config.instructions, new RegExp(VOB_HUMAN_PHASE_CONTEXT.split('\\n')[0]));
