@@ -2801,6 +2801,16 @@ ${voiceAutonomyPolicy()}
       return res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
     }
   });
+  app.get('/api/sessions/:id/vob/test/config/:testId', ownerGuard, (req, res) => {
+    const config = vobTestConfigStore && typeof vobTestConfigStore.get === 'function'
+      ? vobTestConfigStore.get(req.params.testId)
+      : null;
+    if (!config || String(config.sessionId || '') !== String(req.params.id || '')) {
+      return res.status(404).json({ error: 'VOB test config expired or not found' });
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    return res.json(config);
+  });
   // Read-only owner monitor for an already-running production VOB room. This
   // token can subscribe to audio/data but cannot publish or dispatch another
   // agent, so opening the monitor cannot change the payer call.

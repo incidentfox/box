@@ -66,6 +66,37 @@ const VOICE_IDS = idSet(VOB_TEST_VOICES);
 
 const clean = (value, max = 200) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, max);
 
+function copyRows(rows, limit = 600) {
+  return (Array.isArray(rows) ? rows : []).slice(0, limit).map((row) => {
+    if (!row || typeof row !== 'object') return { key: clean(row, 200), value: null, status: 'unknown' };
+    return {
+      key: clean(row.key, 200),
+      value: row.value == null ? null : clean(row.value, 2000),
+      status: clean(row.status || 'unknown', 80),
+      ...(Array.isArray(row.sourceCallIds) ? { sourceCallIds: row.sourceCallIds.map((id) => clean(id, 180)).filter(Boolean).slice(0, 20) } : {}),
+    };
+  }).filter((row) => row.key);
+}
+
+function testDataFromSnapshot(snapshot = {}) {
+  return {
+    requestId: clean(snapshot.requestId, 180) || null,
+    payerName: clean(snapshot.payerName, 240) || null,
+    status: clean(snapshot.status, 80) || null,
+    note: clean(snapshot.note, 800) || null,
+    packetFacts: copyRows(snapshot.packetFacts),
+    facts: copyRows(snapshot.facts),
+    ledger: (Array.isArray(snapshot.ledger) ? snapshot.ledger : []).slice(0, 100).map((call) => ({
+      callId: clean(call?.callId, 180),
+      sequence: call?.sequence || null,
+      kind: clean(call?.kind, 120),
+      attemptStatus: clean(call?.attemptStatus, 80),
+      focusFields: Array.isArray(call?.focusFields) ? call.focusFields.map((field) => clean(field, 200)).filter(Boolean).slice(0, 100) : [],
+      fields: copyRows(call?.fields, 300),
+    })),
+  };
+}
+
 export function normalizeVobTestSettings(input = {}) {
   const body = input && typeof input === 'object' ? input : {};
   const promptPreset = PROMPT_IDS.has(String(body.promptPreset || '')) ? String(body.promptPreset) : DEFAULTS.promptPreset;
@@ -109,10 +140,15 @@ export function vobTestCatalog() {
 export function createVobTestConfig({ testId, sessionId, snapshot, settings, ttlMs = 20 * 60 * 1000 } = {}) {
   const now = Date.now();
   const normalized = normalizeVobTestSettings(settings);
+  const catalog = vobTestCatalog();
   return {
     testId: clean(testId, 120),
     sessionId: clean(sessionId, 180),
     settings: normalized,
+    productionPrompt: catalog.productionPrompt,
+    productionRuntime: catalog.productionRuntime,
+    initialCallState: catalog.initialCallState,
+    testData: testDataFromSnapshot(snapshot),
     instructions: buildVobTestInstructions({ snapshot, settings: normalized }),
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + Math.max(60_000, Number(ttlMs) || 20 * 60 * 1000)).toISOString(),

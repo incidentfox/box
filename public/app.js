@@ -97,7 +97,7 @@ const agentModelLabel = (agent, rawModel) => {
 };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, deepseek: { ...DEFAULT_SETTINGS.deepseek }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null, vobConsoleOpen = false, vobRenderKey = '';
-const vobMonitorState = { room: null, attached: [], panel: null, callId: '', connectedAtMs: 0, segments: new Map(), audioUnlockHandler: null };
+const vobMonitorState = { room: null, attached: [], panel: null, callId: '', connectedAtMs: 0, segments: new Map(), audioUnlockHandler: null, snapshot: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -2663,6 +2663,24 @@ function vobFieldBlock(fields, fallbackFields = []) {
   const extra = rows.length > 4 ? `<details class="vobFieldDetails"><summary>+${rows.length - 4} more fields</summary><div class="vobFieldList">${rows.slice(4).map(rowHtml).join('')}</div></details>` : '';
   return `<div class="vobFieldBlock"><div class="vobFieldRows">${preview}</div>${extra}</div>`;
 }
+function vobMonitorDataMarkup(vob = {}) {
+  const packetFacts = Array.isArray(vob.packetFacts) ? vob.packetFacts : [];
+  const facts = Array.isArray(vob.facts) ? vob.facts : [];
+  const ledger = Array.isArray(vob.ledger) ? vob.ledger : [];
+  const contextRows = [
+    { key: 'payer', value: vob.payerName || null, status: vob.status || 'unknown' },
+    { key: 'request', value: vob.requestId || null, status: 'source' },
+    { key: 'case note', value: vob.note || null, status: 'source' },
+  ];
+  const ledgerHtml = ledger.length
+    ? ledger.map((call) => `<article class="vobMonitorLedger"><div class="vobMonitorLedgerHead"><code>${esc(vobShortId(call.callId))}</code><span>${esc(call.kind || 'call')} · #${esc(call.sequence || '—')}</span><b>${esc(vobFieldStatusLabel(call.attemptStatus || 'pending'))}</b></div>${vobFieldBlock(call.fields, call.focusFields)}</article>`).join('')
+    : '<div class="vobEmpty">No ledger calls recorded yet.</div>';
+  return `<div class="vobMonitorDataHead"><div class="vobEyebrow">Call context</div><strong>${esc(vob.payerName || 'Verification of benefits')}</strong><span>${esc(vobStatusLabel(vob.status, vob.live))}</span></div><section class="vobMonitorDataSection"><h3>Packet / dynamic variables</h3>${vobFieldBlock(packetFacts, contextRows)}</section><section class="vobMonitorDataSection"><h3>Current ledger</h3>${ledgerHtml}</section><section class="vobMonitorDataSection"><h3>Captured answers</h3>${vobFieldBlock(facts)}</section>`;
+}
+function vobMonitorRenderData(vob = {}) {
+  const target = vobMonitorState.panel?.querySelector('[data-vob-monitor-data]');
+  if (target) target.innerHTML = vobMonitorDataMarkup(vob);
+}
 function vobMonitorSetStatus(text, live = false) {
   const target = vobMonitorState.panel?.querySelector('[data-vob-monitor-status]');
   if (target) { target.textContent = text; target.classList.toggle('live', live); }
@@ -2717,6 +2735,7 @@ function stopVobLiveMonitor() {
   vobMonitorState.panel?.remove();
   vobMonitorState.panel = null;
   vobMonitorState.callId = '';
+  vobMonitorState.snapshot = null;
 }
 function armVobMonitorAudioUnlock(room) {
   if (typeof room?.startAudio !== 'function' || vobMonitorState.audioUnlockHandler) return;
@@ -2738,7 +2757,11 @@ async function startVobLiveMonitor(callId) {
   const LK = globalThis.LivekitClient;
   if (!LK || typeof LK.Room !== 'function') { toast('LiveKit client did not load; refresh once and try again'); return; }
   if (!cur?.id) return;
-  document.body.insertAdjacentHTML('beforeend', `<div class="vobLiveMonitorModal" data-vob-live-monitor role="dialog" aria-modal="true" aria-label="Live VOB call monitor"><div class="vobLiveMonitorPanel"><div class="vobLiveMonitorHead"><div><div class="vobEyebrow">Live VOB call</div><h2>Listening to <code>${esc(vobShortId(callId))}</code></h2><span data-vob-monitor-status>Connecting…</span></div><button type="button" class="vobClose" data-vob-live-monitor-close>Stop listening</button></div><div class="vobLiveMonitorTranscript" data-vob-monitor-transcript aria-live="polite"><div class="vobLiveMonitorEmpty">Waiting for live transcript…</div></div><div class="vobLiveMonitorFoot">Read-only monitor · audio is live while the payer call remains connected.</div></div></div>`);
+  try {
+    const snapshotResponse = await api(`/api/sessions/${encodeURIComponent(cur.id)}/vob?includePacketFacts=true`, { ep: chatEp() });
+    if (snapshotResponse.ok) vobMonitorState.snapshot = await snapshotResponse.json();
+  } catch {}
+  document.body.insertAdjacentHTML('beforeend', `<div class="vobLiveMonitorModal" data-vob-live-monitor role="dialog" aria-modal="true" aria-label="Live VOB call monitor"><div class="vobLiveMonitorPanel"><div class="vobLiveMonitorHead"><div><div class="vobEyebrow">Live VOB call</div><h2>Listening to <code>${esc(vobShortId(callId))}</code></h2><span data-vob-monitor-status>Connecting…</span></div><button type="button" class="vobClose" data-vob-live-monitor-close>Stop listening</button></div><div class="vobLiveMonitorBody"><div class="vobLiveMonitorTranscript" data-vob-monitor-transcript aria-live="polite"><div class="vobLiveMonitorEmpty">Waiting for live transcript…</div></div><aside class="vobLiveMonitorData" data-vob-monitor-data>${vobMonitorDataMarkup(vobMonitorState.snapshot || {})}</aside></div><div class="vobLiveMonitorFoot">Read-only monitor · audio is live while the payer call remains connected.</div></div></div>`);
   vobMonitorState.panel = document.querySelector('[data-vob-live-monitor]');
   vobMonitorState.callId = String(callId || '');
   try {
@@ -2882,6 +2905,10 @@ async function refreshVobConsole() {
     const meta = $('vobBarMeta');
     if (meta) meta.textContent = `${data.payerName || 'Verification of benefits'} · ${vobStatusLabel(data.status, data.live)}`;
     syncVobConsoleButton();
+    if (vobMonitorState.panel) {
+      vobMonitorState.snapshot = { ...(vobMonitorState.snapshot || {}), ...data };
+      vobMonitorRenderData(vobMonitorState.snapshot);
+    }
     if (vobConsoleOpen && vobSnapshotKey(data) !== vobRenderKey) vobRenderSnapshot(data);
     // Keep a low-rate watch even before the first call starts or after it ends:
     // the operator can launch a call from the same session, and late ledger /
