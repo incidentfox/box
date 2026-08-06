@@ -50,6 +50,7 @@
             <label>Production LiveKit model<select name="model">${optionsHtml(catalog.models, defaults.model, true)}</select></label>
             <label>Production Cartesia voice<select name="voice">${optionsHtml(catalog.voices, defaults.voice, true)}</select></label>
           </div>
+          <label class="vobTestPrompt">Private test-lane prompt<small>Starts with the exact production prompt. Edits are isolated to this ephemeral room and apply when it restarts.</small><textarea name="promptText" rows="14">${escapeHtml(catalog.productionPrompt?.baseText || '')}</textarea></label>
           <div class="vobTestNotice"><strong>Production caller.</strong> This is the same VOB caller contract, Gemma 4 31B IT model, Deepgram Flux transcription, and Cartesia Sonic 3.5 voice used for a real payer call. The case’s current ledger is loaded as call context.</div>
           <div class="vobTestNotice"><strong>Human representative phase.</strong> IVR routing and hold music are skipped. The caller starts as if a live payer representative has just answered, so you can evaluate introductions, evidence questions, and follow-up behavior.</div>
           <div class="vobTestNotice"><strong>Safe test room.</strong> This does not place or modify a payer call. The agent receives a read-only snapshot of this case and the room expires automatically.</div>
@@ -97,6 +98,14 @@
     const facts = Array.isArray(data.facts) ? data.facts : [];
     const packetFacts = Array.isArray(data.packetFacts) ? data.packetFacts : [];
     const calls = Array.isArray(data.ledger) ? data.ledger : [];
+    const promptEditor = config.promptEditor || {};
+    const promptText = promptEditor.baseText || config.instructions || '';
+    const compiledPrompt = promptEditor.compiledText || config.instructions || '';
+    const promptMeta = [
+      ['Version', promptEditor.version || config.productionPrompt?.version || '—'],
+      ['Source', promptEditor.source || config.productionPrompt?.source || 'production'],
+      ['Lane', promptEditor.overrideActive ? 'private override' : 'production prompt'],
+    ].map(([key, value]) => `<span><b>${escapeHtml(key)}</b> ${escapeHtml(value)}</span>`).join('');
     const callsMarkup = calls.length ? calls.map((call) => {
       const fields = Array.isArray(call.fields) ? call.fields : [];
       const fieldRows = fields.length ? configRows(fields) : configRows((call.focusFields || []).map((key) => ({ key, value: null, status: 'pending' })));
@@ -104,6 +113,7 @@
     }).join('') : '<div class="vobTestEmpty">No ledger calls are recorded for this case.</div>';
     target.innerHTML = `<div class="vobTestInspectorHead"><div><strong>Test lane context</strong><span>read-only case snapshot · refreshes on demand</span></div><button type="button" class="vobClose" data-vob-test-refresh>Refresh</button></div>
       ${configSection('Production configuration', configRows(runtimeRows.map((row) => ({ ...row, key: row.key, value: row.value }))))}
+      ${configSection('Current prompt / private test override', `<div class="vobPromptMeta">${promptMeta}</div><label class="vobTestPrompt">Private test prompt<small>Production calls are unchanged. Restart the test room to apply edits.</small><textarea class="vobPromptEditor" name="promptText" rows="18">${escapeHtml(promptText)}</textarea></label><details class="vobPromptCompiled"><summary>Compiled prompt with packet context</summary><textarea class="vobPromptCompiledText" readonly rows="12">${escapeHtml(compiledPrompt)}</textarea></details><button type="button" class="vobClose" data-vob-test-reset-prompt>Reset to production prompt</button>`, true)}
       ${configSection('Packet / dynamic variables', configRows(packetFacts), true)}
       ${configSection('Ledger fields and captured answers', `<div class="vobTestLedgerCards">${callsMarkup}</div>`, true)}
       ${configSection('Answers / extracted facts', configRows(facts), false)}
@@ -358,6 +368,11 @@
         event.currentTarget.textContent = muted ? 'Unmute mic' : 'Mute mic';
       });
       modal.addEventListener('click', async (event) => {
+        if (event.target.closest('[data-vob-test-reset-prompt]')) {
+          const editor = modal.querySelector('[data-vob-test-inspector] textarea[name="promptText"]');
+          if (editor) editor.value = state.config?.promptEditor?.productionBaseText || state.catalog?.productionPrompt?.baseText || '';
+          return;
+        }
         if (event.target.closest('[data-vob-test-refresh]')) {
           try { await refreshTestConfig(); } catch (error) { notify(error.message || 'Could not refresh test context'); }
         }

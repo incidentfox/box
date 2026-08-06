@@ -138,6 +138,7 @@ function evidenceLedger(snapshot) {
   return rows.join('\n') || 'none';
 }
 
-export function buildVobProductionInstructions({ snapshot = {} } = {}) {
-  return `${VOB_PRODUCTION_INSTRUCTIONS}\n\nCALL DATA\n${callData(snapshot)}\n\nEVIDENCE LEDGER\n${evidenceLedger(snapshot)}`;
+export function buildVobProductionInstructions({ snapshot = {}, basePrompt = VOB_PRODUCTION_INSTRUCTIONS } = {}) {
+  const prompt = String(basePrompt || VOB_PRODUCTION_INSTRUCTIONS).trim() || VOB_PRODUCTION_INSTRUCTIONS;
+  return `${prompt}\n\nCALL DATA\n${callData(snapshot)}\n\nEVIDENCE LEDGER\n${evidenceLedger(snapshot)}`;
 }

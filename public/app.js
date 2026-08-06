@@ -2826,6 +2826,8 @@ function vobRenderSnapshot(vob) {
   const slack = vob.slackUrl ? `<a class="vobLink" href="${esc(vob.slackUrl)}" target="_blank" rel="noopener">Open Slack thread ↗</a>` : '<span class="vobMuted">Slack thread not recorded</span>';
   const ledgerCards = ledger.length ? ledger.map((row) => `<article class="vobLedgerCard"><div class="vobLedgerHead"><div><code>${esc(vobShortId(row.callId))}</code><span class="vobMeta">${esc(row.kind || 'call')} · #${esc(row.sequence || '—')}</span></div><span class="vobPill ${row.attemptStatus === 'live' ? 'live' : ''}">${esc(row.attemptStatus || 'pending')}</span></div>${vobFieldBlock(row.fields, row.focusFields)}</article>`).join('') : '<div class="vobEmpty">No ledger calls recorded yet.</div>';
   const factCards = facts.length ? facts.map((fact) => `<article class="vobFactCard"><div class="vobFactKey">${esc(fact.key)}</div><div class="vobFactValue">${esc(fact.value == null ? '—' : fact.value)}</div><div class="vobFactMeta">${esc(fact.status || 'unknown')} · source ${esc((fact.sourceCallIds || []).map(vobShortId).join(', ') || '—')}</div></article>`).join('') : '<div class="vobEmpty">No answers recorded yet.</div>';
+  const prompt = vob.prompt || {};
+  const promptHtml = prompt.baseText ? `<section class="vobSection vobPromptSection"><div class="vobSectionTitle">Current production prompt <span class="vobMeta">read-only runtime template</span></div><div class="vobPromptMeta"><span><b>Version</b> ${esc(prompt.version || '—')}</span><span><b>Source</b> ${esc(prompt.source || 'production')}</span><span><b>Model</b> ${esc(prompt.model || '—')}</span></div><div class="vobPromptToolbar"><button type="button" class="vobClose" data-vob-copy-prompt>Copy prompt</button><span class="vobMuted">Production calls are never edited here.</span></div><textarea class="vobPromptEditor" readonly rows="18">${esc(prompt.baseText)}</textarea>${prompt.compiledText ? `<details class="vobPromptCompiled"><summary>Compiled prompt with packet context</summary><textarea class="vobPromptCompiledText" readonly rows="14">${esc(prompt.compiledText)}</textarea></details>` : ''}</section>` : '';
   const attemptHtml = attempts.length ? attempts.map((attempt) => {
     const callId = String(attempt.callId || '');
     const audio = attempt.audio ? `<audio class="vobAudio" controls preload="metadata" data-vob-audio="${esc(callId)}" src="${esc(vobAudioUrl(callId))}"></audio><div class="vobAudioError hidden" data-vob-audio-error="${esc(callId)}" role="status">Recording could not be loaded. Try again from the audio controls.</div>` : '<div class="vobEmpty">No recording artifact yet.</div>';
@@ -2835,10 +2837,22 @@ function vobRenderSnapshot(vob) {
     return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><div class="vobAttemptActions">${listen}<span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
   }).join('') : '<div class="vobEmpty">No call attempts recorded yet.</div>';
   const topLiveListen = liveAttempts.length ? `<div class="vobHeadLive" aria-label="Active VOB calls">${liveAttempts.map((attempt) => `<button type="button" class="vobLiveListen" data-vob-live-listen="${esc(String(attempt.callId))}">Listen live${liveAttempts.length > 1 ? ` · ${esc(vobShortId(attempt.callId))}` : ''}</button>`).join('')}</div>` : '';
-  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions">${topLiveListen}<button type="button" class="vobTestStart" data-vob-test-start>Test agent with me</button><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">requested fields and current values</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions">${topLiveListen}<button type="button" class="vobTestStart" data-vob-test-start>Test agent with me</button><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}${promptHtml}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">requested fields and current values</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
   vobRenderKey = renderKey;
   root.scrollTop = previousScrollTop;
   root.querySelector('[data-vob-close]')?.addEventListener('click', () => toggleVobConsole(false));
+  root.querySelector('[data-vob-copy-prompt]')?.addEventListener('click', async (event) => {
+    const promptText = root.querySelector('.vobPromptEditor')?.value || '';
+    try {
+      await navigator.clipboard.writeText(promptText);
+      const button = event.currentTarget;
+      const original = button.textContent;
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = original; }, 1200);
+    } catch {
+      toast('Could not copy prompt');
+    }
+  });
   root.querySelectorAll('[data-vob-seek]').forEach((button) => button.addEventListener('click', () => {
     const audio = [...root.querySelectorAll('audio[data-vob-audio]')].find((candidate) => candidate.dataset.vobAudio === button.dataset.vobCall);
     if (!audio) return;
@@ -2895,7 +2909,7 @@ async function refreshVobConsole() {
   if (!root || !cur || !cur.id || cur.agent !== 'codex' || $('chat').classList.contains('hidden')) { hideVobConsole(); return; }
   const seq = ++vobRefreshSeq;
   try {
-    const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/vob`, { ep: chatEp() });
+    const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/vob?includePacketFacts=true`, { ep: chatEp() });
     if (seq !== vobRefreshSeq || !cur || cur.id === null) return;
     if (response.status === 404) { hideVobConsole(); return; }
     const data = await response.json();
