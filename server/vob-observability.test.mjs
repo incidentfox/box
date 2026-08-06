@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { buildVobSnapshot, classifyEvents, findVobCase, resolveVobAudio } from './vob-observability.mjs';
 import { VOB_PRODUCTION_PROMPT_SOURCE, VOB_PRODUCTION_PROMPT_VERSION } from './vob-production-prompt.mjs';
+import { VOB_PIPELINE_VERSION } from './vob-pipeline.mjs';
 
 const event = (at, type, extra = {}) => JSON.stringify({ at, type, ...extra });
 
@@ -76,6 +77,10 @@ test('builds a linked VOB snapshot with timestamped transcript and call phases',
     assert.equal(testSnapshot.prompt.version, VOB_PRODUCTION_PROMPT_VERSION);
     assert.match(testSnapshot.prompt.baseText, /OUTPUT CONTRACT/);
     assert.match(testSnapshot.prompt.compiledText, /CALL DATA/);
+    assert.equal(testSnapshot.pipeline.version, VOB_PIPELINE_VERSION);
+    assert.equal(testSnapshot.pipeline.ledger.prompt, null);
+    assert.match(testSnapshot.pipeline.extractor.promptTemplate, /payer-side turns/);
+    assert.equal(snapshot.pipeline, undefined);
     assert.deepEqual(snapshot.attempts[0].segments.map((segment) => segment.label), ['unknown', 'ivr', 'hold', 'unknown', 'human']);
     assert.equal(snapshot.attempts[0].segments[1].startSec, 2);
     assert.equal(snapshot.attempts[0].segments[2].endSec, 12);

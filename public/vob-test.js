@@ -79,6 +79,29 @@
     return `<details class="vobTestConfigSection"${open ? ' open' : ''}><summary>${escapeHtml(title)}</summary><div class="vobTestConfigContent">${body}</div></details>`;
   }
 
+  function pipelineJson(value) {
+    try { return JSON.stringify(value || {}, null, 2); } catch { return '{}'; }
+  }
+
+  function pipelineStageMarkup(stage, open = false) {
+    if (!stage) return '';
+    const isLlm = stage.kind === 'llm';
+    const schema = stage.output?.schema ? `<div class="vobPipelineCodeLabel">Structured output schema</div><pre class="vobPipelineCode">${escapeHtml(pipelineJson(stage.output.schema))}</pre>` : '';
+    const prompt = stage.promptTemplate ? `<div class="vobPipelineCodeLabel">Prompt template</div><pre class="vobPipelineCode">${escapeHtml(stage.promptTemplate)}</pre>` : '';
+    const rules = Array.isArray(stage.rules) && stage.rules.length ? `<div class="vobPipelineCodeLabel">Deterministic rules</div><ul class="vobPipelineRules">${stage.rules.map((rule) => `<li>${escapeHtml(rule)}</li>`).join('')}</ul>` : '';
+    const statuses = Array.isArray(stage.statuses) && stage.statuses.length ? `<div class="vobPipelineCodeLabel">Ledger statuses</div><div class="vobPipelineStatuses">${stage.statuses.map((status) => `<span>${escapeHtml(status)}</span>`).join('')}</div>` : '';
+    const closeGate = stage.closeGate ? `<div class="vobPipelineCodeLabel">Close gate</div><div class="vobPipelineMeta"><span><b>Modes</b> ${escapeHtml((stage.closeGate.modes || []).join(' · '))}</span><span><b>Checks</b> ${escapeHtml((stage.closeGate.fields || []).join(' · '))}</span></div>` : '';
+    const noPrompt = !isLlm ? '<div class="vobPipelineNoPrompt">No LLM prompt — deterministic code runs after the model/transcript and can override or block it.</div>' : '';
+    const output = stage.output ? `<div class="vobPipelineMeta"><span><b>Output</b> ${escapeHtml(stage.output.name || 'structured output')} · ${stage.output.strict ? 'strict schema' : 'schema'}</span></div>` : '';
+    return `<details class="vobPipelineCard"${open ? ' open' : ''}><summary><span><strong>${escapeHtml(stage.title || 'Pipeline stage')}</strong><small>${escapeHtml(stage.kind || '')}</small></span><em class="vobPipelineBadge ${isLlm ? 'llm' : 'deterministic'}">${isLlm ? 'LLM' : 'CODE'}</em></summary><div class="vobPipelineCardBody"><div class="vobPipelineMeta"><span><b>Source</b> ${escapeHtml(stage.source || '—')}</span>${stage.model ? `<span><b>Model</b> ${escapeHtml(stage.model)}</span>` : ''}${stage.controlModel ? `<span><b>Control model</b> ${escapeHtml(stage.controlModel)}</span>` : ''}${stage.mediaModel ? `<span><b>Media model</b> ${escapeHtml(stage.mediaModel)}</span>` : ''}${stage.mediaContract ? `<span><b>Media</b> ${escapeHtml(stage.mediaContract)}</span>` : ''}${stage.promptRef ? `<span><b>Prompt</b> ${escapeHtml(stage.promptRef.version || 'production')} · ${escapeHtml(stage.promptRef.source || '')}</span>` : ''}</div><p class="vobPipelineExplain">${escapeHtml(stage.explanation || '')}</p>${noPrompt}${output}${prompt}${schema}${rules}${statuses}${closeGate}</div></details>`;
+  }
+
+  function pipelineMarkup(pipeline) {
+    if (!pipeline) return '<div class="vobTestEmpty">Pipeline metadata is not available for this test.</div>';
+    const stages = [pipeline.caller, pipeline.extractor, pipeline.runtimeEvidence, pipeline.validator, pipeline.ledger].filter(Boolean);
+    return `<div class="vobPipelineIntro"><span><b>Version</b> ${escapeHtml(pipeline.version || '—')}</span><span>LLM stages emit strict internal envelopes; deterministic stages validate and close the ledger.</span></div><div class="vobPipelineGrid">${stages.map((stage, index) => pipelineStageMarkup(stage, index === 0 || index === 1)).join('')}</div>`;
+  }
+
   function renderTestInspector(config) {
     const target = document.querySelector('[data-vob-test-inspector]');
     if (!target) return;
@@ -117,6 +140,7 @@
       ${configSection('Packet / dynamic variables', configRows(packetFacts), true)}
       ${configSection('Ledger fields and captured answers', `<div class="vobTestLedgerCards">${callsMarkup}</div>`, true)}
       ${configSection('Answers / extracted facts', configRows(facts), false)}
+      ${configSection('Decision pipeline / extractor / validator', pipelineMarkup(config.pipeline), false)}
       ${configSection('Current test settings', `<div class="vobTestSettings"><label>Prompt<select name="promptPreset">${optionsHtml(state.catalog?.prompts, settings.promptPreset, true)}</select></label><label>Model<select name="model">${optionsHtml(state.catalog?.models, settings.model, true)}</select></label><label>Voice<select name="voice">${optionsHtml(state.catalog?.voices, settings.voice, true)}</select></label><div class="vobTestConfigNote">Changes apply when the test room restarts. Runtime stays on the production Gemma / Flux / Cartesia contract.</div><button type="button" class="vobTestPrimary" data-vob-test-restart>Restart with settings</button></div>`, false)}`;
   }
 
