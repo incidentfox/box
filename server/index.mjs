@@ -2921,12 +2921,31 @@ app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
     res.status(500).json({ error: String(e && e.message || e) });
   }
 });
+
+// Legacy VOB sessions often predate the private owner/launch artifact that
+// carries the Box session id.  Their rollout still contains the opaque Rise4
+// request id, which is a safe, deterministic bridge to the matching case dir.
+function vobRequestIdsForSession(sessionId) {
+  const rollout = findCodexRollout(CODEX_HOME, sessionId);
+  if (!rollout) return [];
+  try {
+    const text = readFileSync(rollout, 'utf8');
+    // The first request id in the rollout is the case that launched this
+    // session. Later ids are commonly mentioned in copied logs or follow-up
+    // context and must not make the resolver consider unrelated cases.
+    return [...new Set(text.match(/\brise4_[a-f0-9]{32}\b/gi) || [])].slice(0, 1);
+  } catch {
+    return [];
+  }
+}
+
 // Owner-only VOB observability. The artifacts contain payer-call evidence and may
 // include PHI, so this surface intentionally does not enter the guest allowlist.
 app.get('/api/sessions/:id/vob', requireOwner, (req, res) => {
   try {
     const session = (loadCodex().sessions || {})[req.params.id] || null;
-    const snapshot = buildVobSnapshot({ sessionId: req.params.id, session });
+    const requestIds = vobRequestIdsForSession(req.params.id);
+    const snapshot = buildVobSnapshot({ sessionId: req.params.id, session, requestIds });
     if (!snapshot.linked) return res.status(snapshot.ambiguous ? 409 : 404).json(snapshot);
     res.setHeader('Cache-Control', 'private, no-store');
     return res.json(snapshot);
@@ -2937,7 +2956,8 @@ app.get('/api/sessions/:id/vob', requireOwner, (req, res) => {
 app.get('/api/sessions/:id/vob/attempts/:callId/audio', requireOwner, (req, res) => {
   try {
     const session = (loadCodex().sessions || {})[req.params.id] || null;
-    const audio = resolveVobAudio({ sessionId: req.params.id, session, callId: req.params.callId });
+    const requestIds = vobRequestIdsForSession(req.params.id);
+    const audio = resolveVobAudio({ sessionId: req.params.id, session, callId: req.params.callId, requestIds });
     if (!audio) return res.status(404).json({ error: 'recording not found' });
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Accept-Ranges', 'bytes');
@@ -3706,7 +3726,7 @@ try {
     },
     vobSnapshotForSession: (sessionId) => {
       const session = (loadCodex().sessions || {})[sessionId] || null;
-      return buildVobSnapshot({ sessionId, session });
+      return buildVobSnapshot({ sessionId, session, requestIds: vobRequestIdsForSession(sessionId) });
     },
     vobTestConfigStore,
   });
