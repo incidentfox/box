@@ -20,6 +20,7 @@ const catalog = vobTestCatalog();
 assert.equal(catalog.defaults.promptPreset, 'production_guarded');
 assert.equal(catalog.productionPrompt.version, VOB_PRODUCTION_PROMPT_VERSION);
 assert.equal(catalog.productionPrompt.source, VOB_PRODUCTION_PROMPT_SOURCE);
+assert.match(catalog.productionPrompt.baseText, /OUTPUT CONTRACT/);
 assert.equal(catalog.defaults.model, VOB_LIVEKIT_PRODUCTION_MODEL);
 assert.equal(catalog.defaults.voice, VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE);
 assert.deepEqual(catalog.productionRuntime, {
@@ -47,6 +48,8 @@ assert.deepEqual(settings, {
   voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
 });
 assert.equal(normalizeVobTestSettings({ model: 'not-a-model', voice: 'nope' }).model, VOB_LIVEKIT_PRODUCTION_MODEL);
+const promptOverride = normalizeVobTestSettings({ promptText: 'Private test-lane instruction.' });
+assert.equal(promptOverride.promptText, 'Private test-lane instruction.');
 
 const config = createVobTestConfig({
   testId: 'vob-test-1',
@@ -85,6 +88,17 @@ assert.match(config.instructions, /IVR routing and hold\/queue audio as already 
 assert.match(config.instructions, /same provider-side caller at the start of the live-representative phase/);
 assert.doesNotMatch(config.instructions, /simulation|test mode|role-playing/i);
 assert.doesNotMatch(config.instructions, /Additional operator instruction/);
+
+const overrideConfig = createVobTestConfig({
+  testId: 'vob-test-override',
+  sessionId: 'session-1',
+  settings: promptOverride,
+  snapshot: {},
+  ttlMs: 60_000,
+});
+assert.equal(overrideConfig.promptEditor.overrideActive, true);
+assert.equal(overrideConfig.promptEditor.baseText, 'Private test-lane instruction.');
+assert.match(overrideConfig.promptEditor.compiledText, /Private test-lane instruction/);
 
 const store = createVobTestConfigStore({ ttlMs: 60_000 });
 store.put(config);

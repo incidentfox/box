@@ -1,5 +1,6 @@
 import {
   VOB_PRODUCTION_MODEL,
+  VOB_PRODUCTION_INSTRUCTIONS,
   VOB_PRODUCTION_PROMPT_SOURCE,
   VOB_PRODUCTION_PROMPT_VERSION,
   buildVobProductionInstructions,
@@ -102,7 +103,10 @@ export function normalizeVobTestSettings(input = {}) {
   const promptPreset = PROMPT_IDS.has(String(body.promptPreset || '')) ? String(body.promptPreset) : DEFAULTS.promptPreset;
   const model = MODEL_IDS.has(String(body.model || '')) ? String(body.model) : DEFAULTS.model;
   const voice = VOICE_IDS.has(String(body.voice || '')) ? String(body.voice) : DEFAULTS.voice;
-  return { promptPreset, model, voice };
+  const promptText = typeof body.promptText === 'string'
+    ? body.promptText.trim().slice(0, 50_000)
+    : '';
+  return { promptPreset, model, voice, ...(promptText ? { promptText } : {}) };
 }
 
 export function buildVobTestInstructions({ snapshot = {}, settings = DEFAULTS } = {}) {
@@ -110,7 +114,7 @@ export function buildVobTestInstructions({ snapshot = {}, settings = DEFAULTS } 
   if (normalized.promptPreset !== 'production_guarded') {
     throw new Error(`unsupported VOB prompt preset: ${normalized.promptPreset}`);
   }
-  return `${buildVobProductionInstructions({ snapshot })}\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
+  return `${buildVobProductionInstructions({ snapshot, basePrompt: normalized.promptText || VOB_PRODUCTION_INSTRUCTIONS })}\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
 }
 
 export function vobTestCatalog() {
@@ -122,6 +126,7 @@ export function vobTestCatalog() {
       version: VOB_PRODUCTION_PROMPT_VERSION,
       source: VOB_PRODUCTION_PROMPT_SOURCE,
       model: VOB_PRODUCTION_MODEL,
+      baseText: VOB_PRODUCTION_INSTRUCTIONS,
     },
     productionRuntime: {
       llmProvider: 'livekit-inference',
@@ -147,6 +152,15 @@ export function createVobTestConfig({ testId, sessionId, snapshot, settings, ttl
     settings: normalized,
     productionPrompt: catalog.productionPrompt,
     productionRuntime: catalog.productionRuntime,
+    promptEditor: {
+      version: catalog.productionPrompt.version,
+      source: catalog.productionPrompt.source,
+      productionBaseText: VOB_PRODUCTION_INSTRUCTIONS,
+      baseText: normalized.promptText || VOB_PRODUCTION_INSTRUCTIONS,
+      humanPhaseContext: VOB_HUMAN_PHASE_CONTEXT,
+      compiledText: buildVobTestInstructions({ snapshot, settings: normalized }),
+      overrideActive: Boolean(normalized.promptText),
+    },
     initialCallState: catalog.initialCallState,
     testData: testDataFromSnapshot(snapshot),
     instructions: buildVobTestInstructions({ snapshot, settings: normalized }),

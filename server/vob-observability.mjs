@@ -6,6 +6,13 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import {
+  VOB_PRODUCTION_MODEL,
+  VOB_PRODUCTION_PROMPT_SOURCE,
+  VOB_PRODUCTION_PROMPT_VERSION,
+  VOB_PRODUCTION_INSTRUCTIONS,
+  buildVobProductionInstructions,
+} from './vob-production-prompt.mjs';
 
 // VOB operator artifacts are deliberately kept outside the Box checkout.  This
 // module is the narrow, read-only bridge between those artifacts and the owner-only
@@ -540,7 +547,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
   const factsByKey = new Map(factRows.map((fact) => [fact.key, fact]));
   const attemptsById = new Map(attempts.map((attempt) => [attempt.callId, attempt]));
   const live = attempts.some((attempt) => attempt.live);
-  return {
+  const snapshot = {
     linked: true,
     link: match.link,
     requestId: String(context.requestId || ledger.requestId || launch.requestId || '').slice(0, 180),
@@ -570,6 +577,16 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
     },
     refreshedAt: new Date().toISOString(),
   };
+  if (includePacketFacts) {
+    snapshot.prompt = {
+      version: VOB_PRODUCTION_PROMPT_VERSION,
+      source: VOB_PRODUCTION_PROMPT_SOURCE,
+      model: VOB_PRODUCTION_MODEL,
+      baseText: VOB_PRODUCTION_INSTRUCTIONS,
+      compiledText: buildVobProductionInstructions({ snapshot }),
+    };
+  }
+  return snapshot;
 }
 
 function normalizedLedgerCalls(ledger, result) {
