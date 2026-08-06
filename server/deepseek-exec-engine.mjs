@@ -17,6 +17,16 @@ import {
 } from './codex-exec-engine.mjs';
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+export const DEEPSEEK_MODEL = 'deepseek-v4-flash';
+export const DEEPSEEK_DEFAULT_EFFORT = 'high';
+const DEEPSEEK_EFFORTS = new Set(['low', 'high', 'max']);
+
+export function normalizeDeepSeekSettings(settings = {}) {
+  const reasoningEffort = DEEPSEEK_EFFORTS.has(settings.reasoningEffort)
+    ? settings.reasoningEffort
+    : DEEPSEEK_DEFAULT_EFFORT;
+  return { ...settings, model: DEEPSEEK_MODEL, reasoningEffort };
+}
 
 export class DeepSeekExecEngine {
   constructor({ spawnImpl = spawn } = {}) {
@@ -24,7 +34,7 @@ export class DeepSeekExecEngine {
   }
 
   run({ sessionId, cwd, prompt, images = [], settings = {}, apiKey = '', onEvent }) {
-    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
+    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings: normalizeDeepSeekSettings(settings) });
     const envFile = process.env.CODEX_ENV_FILE;
     const script = buildOwnerCodexScript(envFile);
 

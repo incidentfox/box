@@ -60,7 +60,7 @@ function onTeamAccessLost() {
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-5.6-luna', reasoningEffort: 'xhigh', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
-  deepseek: { model: 'deepseek-chat', reasoningEffort: '' },
+  deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
   claude: { model: 'claude-opus-5', effort: 'xhigh' },
@@ -3791,10 +3791,12 @@ function finishTurn(o) {
 }
 
 function normalizeSettings(settings) {
+  const deepseek = (settings && settings.deepseek) || {};
+  const deepseekEffort = ['low', 'high', 'max'].includes(deepseek.reasoningEffort) ? deepseek.reasoningEffort : DEFAULT_SETTINGS.deepseek.reasoningEffort;
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
-    deepseek: { ...DEFAULT_SETTINGS.deepseek, ...((settings && settings.deepseek) || {}) },
+    deepseek: { ...DEFAULT_SETTINGS.deepseek, ...deepseek, model: DEFAULT_SETTINGS.deepseek.model, reasoningEffort: deepseekEffort },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
     claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
@@ -4044,7 +4046,7 @@ function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
   const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-luna' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'claude-opus-5');
-  const effort = (agent === 'codex' || agent === 'mac') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
+  const effort = (agent === 'codex' || agent === 'mac' || agent === 'deepseek') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
   $('agentChip').classList.toggle('codex', agent === 'codex');
@@ -4613,6 +4615,7 @@ function openStatusSheet() {
     rows.push({ ic: '◆', label: 'Permissions', desc: sandboxLabel(cfg.sandbox || 'off'), fn: openApprovalsSheet });
   }
   else if (agent === 'gemini') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'}`, fn: openModelSheet });
+  else if (agent === 'deepseek') rows.push({ ic: '', label: 'Model', desc: `${cfg.model} / ${cfg.reasoningEffort}`, fn: openModelSheet });
   else if (agent === 'agy') rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'Antigravity default'}`, fn: openModelSheet });
   else rows.push({ ic: '', label: 'Model', desc: `${cfg.model || 'default'} / ${cfg.effort || 'default'}`, fn: openModelSheet });
   if (cur.id) rows.push({
@@ -4701,8 +4704,12 @@ const GEMINI_MODELS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', desc: 'Stronger reasoning' },
 ];
 const DEEPSEEK_MODELS = [
-  { id: 'deepseek-chat', label: 'DeepSeek Chat' },
-  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
+  { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: 'Pinned for every DeepSeek chat' },
+];
+const DEEPSEEK_EFFORTS = [
+  { id: 'low', label: 'Low', desc: 'Faster thinking' },
+  { id: 'high', label: 'High', desc: 'Default · deeper thinking' },
+  { id: 'max', label: 'Max', desc: 'Maximum thinking depth' },
 ];
 const AGY_MODELS = [
   { id: '', label: 'Antigravity default', desc: 'Use the signed-in agy default model' },
@@ -4761,8 +4768,13 @@ function openModelSheet() {
     return;
   }
   if (agent === 'deepseek') {
-    rows.push({ ic: '', label: 'Model', desc: 'Used on the next DeepSeek turn in this Box chat', fn: () => openModelSheet() });
-    for (const m of DEEPSEEK_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.deepseek.model = m.id; sendSettings(); toast(`DeepSeek model: ${m.label}`); openModelSheet(); }));
+    rows.push({ ic: '', label: 'Model', desc: 'DeepSeek is hard-pinned to V4 Flash', fn: () => {} });
+    rows.push(settingRow(DEEPSEEK_MODELS[0], true, () => {}));
+    rows.push({ ic: '', label: 'Thinking effort', desc: 'Applies to the next DeepSeek turn in this Box chat', fn: () => openModelSheet() });
+    for (const e of DEEPSEEK_EFFORTS) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => {
+      cur.settings.deepseek.reasoningEffort = e.id;
+      sendSettings(); toast(`DeepSeek effort: ${e.label}`); openModelSheet();
+    }));
     openSheet('DeepSeek model', rows);
     return;
   }
