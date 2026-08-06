@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from livekit import rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, TurnHandlingOptions, cli, inference, tts
 from livekit.plugins import cartesia, deepgram, openai, silero
 
@@ -26,6 +27,7 @@ VOB_PRODUCTION_LLM_MODEL = "google/gemma-4-31b-it"
 VOB_PRODUCTION_STT_MODEL = "deepgram/flux-general-en"
 VOB_PRODUCTION_TTS_MODEL = "cartesia/sonic-3.5"
 VOB_PRODUCTION_CARTESIA_VOICE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+VOB_TRANSCRIPT_TOPIC = "box-vob-transcript"
 
 
 def safe_vsid(value: str) -> str:
@@ -73,10 +75,77 @@ async def fetch_vob_test_config(runtime: "RuntimeConfig", test_id: str) -> dict[
     return body
 
 
+async def publish_vob_event(room: rtc.Room, payload: dict[str, Any]) -> None:
+    """Send small live status/transcript events alongside the audio track."""
+    try:
+        await room.local_participant.publish_data(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            reliable=True,
+            topic=VOB_TRANSCRIPT_TOPIC,
+        )
+    except Exception:
+        # Audio must continue even if a late monitor disconnects or data delivery
+        # is unavailable in a particular LiveKit deployment.
+        return
+
+
+def created_at_ms(value: Any) -> int | None:
+    if hasattr(value, "timestamp") and callable(value.timestamp):
+        value = value.timestamp()
+    try:
+        if value is None:
+            return None
+        number = float(value)
+        # LiveKit versions have emitted both epoch seconds and epoch
+        # milliseconds here. Preserve an already-millisecond timestamp.
+        return int(number if abs(number) >= 100_000_000_000 else number * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def wire_vob_transcripts(session: AgentSession, room: rtc.Room) -> None:
+    """Mirror the agent session's real-time turns to read-only console monitors."""
+    def emit(role: str, text: Any, final: bool = True, item_id: Any = None, created_at: Any = None) -> None:
+        value = str(text or "").strip()
+        if not value:
+            return
+        payload = {
+            "type": "transcript",
+            "role": role,
+            "text": value,
+            "final": bool(final),
+            "itemId": str(item_id or ""),
+        }
+        if created_at is not None:
+            created_ms = created_at_ms(created_at)
+            if created_ms is not None:
+                payload["createdAtMs"] = created_ms
+        asyncio.create_task(publish_vob_event(room, payload))
+
+    def on_user(event: Any) -> None:
+        emit("user", getattr(event, "transcript", ""), getattr(event, "is_final", True), getattr(event, "item_id", ""), getattr(event, "created_at", None))
+
+    def on_item(event: Any) -> None:
+        item = getattr(event, "item", None)
+        if str(getattr(item, "role", "assistant") or "assistant") != "assistant":
+            return
+        emit("assistant", text_from_message(item), True, getattr(item, "id", ""), getattr(event, "created_at", None))
+
+    session.on("user_input_transcribed", on_user)
+    session.on("conversation_item_added", on_item)
+
+
 def text_from_message(message: Any) -> str:
-    value = getattr(message, "text_content", "")
+    # ChatMessage exposes these as properties in current LiveKit Agents, but
+    # older adapters returned callables. Support both so transcript packets
+    # always contain the generated text rather than a Python method repr.
+    value = getattr(message, "raw_text_content", "")
     if callable(value):
         value = value()
+    if not value:
+        value = getattr(message, "text_content", "")
+        if callable(value):
+            value = value()
     return str(value or "").strip()
 
 
@@ -368,8 +437,10 @@ async def entrypoint(ctx: JobContext) -> None:
             vad=ctx.proc.userdata["vad"],
             turn_handling=turn_handling_options(allow_interruptions=True),
         )
+        wire_vob_transcripts(session, ctx.room)
         await session.start(agent=VobProductionAgent(str(config["instructions"])), room=ctx.room)
         await ctx.connect()
+        await publish_vob_event(ctx.room, {"type": "status", "status": "agent_ready"})
         await session.generate_reply()
         return
 
@@ -406,6 +477,7 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata["vad"],
         turn_handling=turn_handling_options(allow_interruptions=runtime.allow_interruptions),
     )
+    wire_vob_transcripts(session, ctx.room)
     # Semantic endpointing is the normal path. This packet makes the visible
     # End turn button real: it flushes Deepgram and commits the buffered turn
     # immediately when a caller chooses not to wait for the detector.

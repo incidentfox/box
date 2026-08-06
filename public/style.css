@@ -1488,6 +1488,8 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .vobAttempt { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--subtle); }
 .vobAttemptHead { display: flex; justify-content: space-between; gap: 8px; }
 .vobAttemptHead > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.vobAttemptActions { align-items: flex-end !important; }
+.vobLiveListen { border: 1px solid color-mix(in srgb, var(--green) 50%, var(--line)); border-radius: 7px; background: color-mix(in srgb, var(--green) 12%, var(--card)); color: var(--green); padding: 5px 7px; font-size: 10px; font-weight: 750; white-space: nowrap; }
 .vobAudio { display: block; width: 100%; margin: 10px 0 5px; }
 .vobAudioError { margin: 2px 0 7px; color: #c96b59; font-size: 11px; overflow-wrap: anywhere; }
 .vobSegments { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 4px; }
@@ -1516,6 +1518,26 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
   .vobFieldRow { grid-template-columns: minmax(0, 1fr) auto; }
   .vobFieldValue { grid-column: 1 / -1; }
   .vobTranscriptRow { grid-template-columns: 38px 54px 74px minmax(0, 1fr); gap: 5px; padding-left: 6px; padding-right: 6px; }
+}
+
+.vobLiveMonitorModal { position: fixed; inset: 0; z-index: 75; display: grid; place-items: center; padding: max(16px, var(--safe-t)) max(16px, var(--safe-r)) max(16px, var(--safe-b)) max(16px, var(--safe-l)); background: color-mix(in srgb, #000 58%, transparent); }
+.vobLiveMonitorPanel { display: flex; flex-direction: column; width: min(760px, 100%); max-height: calc(100dvh - 32px); overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--ink); box-shadow: 0 16px 50px rgba(0,0,0,.35); }
+.vobLiveMonitorHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 17px 18px 14px; border-bottom: 1px solid var(--line); background: var(--subtle); }
+.vobLiveMonitorHead h2 { margin: 3px 0 4px; font-size: 18px; }
+.vobLiveMonitorHead [data-vob-monitor-status] { color: var(--muted); font-size: 12px; }
+.vobLiveMonitorHead [data-vob-monitor-status].live { color: var(--green); }
+.vobLiveMonitorTranscript { min-height: 220px; max-height: min(560px, 62dvh); overflow: auto; padding: 8px 12px; background: var(--card); }
+.vobLiveMonitorEmpty { padding: 42px 12px; color: var(--muted); text-align: center; font-size: 12px; }
+.vobLiveMonitorRow { display: grid; grid-template-columns: 44px 58px minmax(0, 1fr); gap: 8px; align-items: start; padding: 8px 7px; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.35; }
+.vobLiveMonitorRow time { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
+.vobLiveMonitorRow strong { color: var(--accent); font-size: 10px; text-transform: uppercase; }
+.vobLiveMonitorRow.caller strong { color: var(--green); }
+.vobLiveMonitorRow span { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.vobLiveMonitorFoot { padding: 10px 14px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+@media (max-width: 700px) {
+  .vobLiveMonitorHead { align-items: flex-start; flex-direction: column; }
+  .vobLiveMonitorHead .vobClose { align-self: flex-end; }
+  .vobLiveMonitorRow { grid-template-columns: 38px 54px minmax(0, 1fr); gap: 5px; }
 }
 
 /* VOB owner-only role-play room */

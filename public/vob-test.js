@@ -10,6 +10,8 @@
     attached: [],
     segments: new Map(),
     startedAt: 0,
+    connectedAtMs: 0,
+    audioUnlockHandler: null,
     ended: false,
     timer: null,
   };
@@ -79,11 +81,16 @@
 
   function cleanup() {
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    if (state.audioUnlockHandler) {
+      document.removeEventListener('pointerdown', state.audioUnlockHandler);
+      state.audioUnlockHandler = null;
+    }
     if (state.mic) { try { state.mic.stop(); } catch {} state.mic = null; }
     stopAttached();
     if (state.room) { try { state.room.disconnect(); } catch {} state.room = null; }
     state.segments.clear();
     state.startedAt = 0;
+    state.connectedAtMs = 0;
   }
 
   function endCall(remove = true) {
@@ -100,6 +107,11 @@
   }
 
   function segmentTime(segment) {
+    if (typeof segment?.elapsedSec === 'number') return Math.max(0, segment.elapsedSec);
+    if (segment?.createdAtMs && state.connectedAtMs) {
+      const elapsed = (Number(segment.createdAtMs) - state.connectedAtMs) / 1000;
+      if (Number.isFinite(elapsed)) return Math.max(0, elapsed);
+    }
     const value = segment?.startTime ?? segment?.start ?? segment?.timestamp;
     if (typeof value === 'number') return value > 100000 ? (value / 1000) : value;
     if (value instanceof Date) return value.getTime() / 1000;
@@ -131,6 +143,25 @@
     list.scrollTop = list.scrollHeight;
   }
 
+  function handleDataPacket(payload, participant, room, topic) {
+    if (topic && topic !== 'box-vob-transcript') return;
+    let value = payload;
+    try {
+      if (value instanceof Uint8Array || value instanceof ArrayBuffer) value = new TextDecoder().decode(value);
+      if (ArrayBuffer.isView(value)) value = new TextDecoder().decode(value);
+      if (typeof value !== 'string') return;
+      value = JSON.parse(value);
+    } catch { return; }
+    if (!value || value.type !== 'transcript' || !value.text) return;
+    upsertTranscript([{
+      id: value.itemId || `${value.role || 'agent'}-${value.createdAtMs || Date.now()}`,
+      text: value.text,
+      final: value.final !== false,
+      elapsedSec: Number.isFinite(Number(value.elapsedSec)) ? Number(value.elapsedSec) : undefined,
+      createdAtMs: value.createdAtMs,
+    }], participant, room);
+  }
+
   function bindRoom(LK, room) {
     room.on(LK.RoomEvent.TrackSubscribed, (track) => {
       if (track.kind !== LK.Track.Kind.Audio) return;
@@ -140,7 +171,11 @@
         element.autoplay = true;
         element.muted = false;
         element.setAttribute('aria-hidden', 'true');
-        element.style.display = 'none';
+        element.style.position = 'fixed';
+        element.style.width = '1px';
+        element.style.height = '1px';
+        element.style.opacity = '0';
+        element.style.pointerEvents = 'none';
         element.dataset.vobTestAudio = '1';
         document.body.append(element);
         state.attached.push(element);
@@ -148,6 +183,9 @@
       }
     });
     room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => upsertTranscript(segments, participant, room));
+    if (LK.RoomEvent.DataReceived) {
+      room.on(LK.RoomEvent.DataReceived, (payload, participant, _kind, topic) => handleDataPacket(payload, participant, room, topic));
+    }
     room.on(LK.RoomEvent.Reconnecting, () => setStatus('Reconnecting…'));
     room.on(LK.RoomEvent.Reconnected, () => setStatus('Connected', true));
     room.on(LK.RoomEvent.Disconnected, () => {
@@ -156,6 +194,22 @@
       if (state.mic) { try { state.mic.stop(); } catch {} state.mic = null; }
       setStatus('Disconnected — end the test and start again');
     });
+  }
+
+  function armAudioUnlock(room) {
+    if (typeof room?.startAudio !== 'function' || state.audioUnlockHandler) return;
+    state.audioUnlockHandler = async () => {
+      if (state.room !== room) return;
+      try {
+        await room.startAudio();
+        document.removeEventListener('pointerdown', state.audioUnlockHandler);
+        state.audioUnlockHandler = null;
+        setStatus('Connected', true);
+      } catch {
+        setStatus('Connected — tap the page to enable speaker', true);
+      }
+    };
+    document.addEventListener('pointerdown', state.audioUnlockHandler);
   }
 
   async function startCall(form) {
@@ -179,9 +233,15 @@
       showCallPanel();
       setStatus('Connecting…');
       await state.room.connect(join.url, join.token);
-      await state.room.localParticipant.publishTrack(state.mic, { source: LK.Track.Source.Microphone });
+      state.connectedAtMs = Date.now();
       state.startedAt = performance.now();
-      setStatus('Connected', true);
+      let audioReady = true;
+      if (typeof state.room.startAudio === 'function') {
+        try { await state.room.startAudio(); }
+        catch { audioReady = false; armAudioUnlock(state.room); }
+      }
+      await state.room.localParticipant.publishTrack(state.mic, { source: LK.Track.Source.Microphone });
+      setStatus(audioReady ? 'Connected' : 'Connected — tap the page to enable speaker', true);
       const timer = document.querySelector('[data-vob-test-timer]');
       const updateTimer = () => { if (timer && state.startedAt) timer.textContent = clock((performance.now() - state.startedAt) / 1000); };
       updateTimer();

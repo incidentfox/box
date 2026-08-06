@@ -94,6 +94,7 @@ const agentModelLabel = (agent, rawModel) => {
 };
 let cur = { id: null, cwd: '', title: '', mode: 'normal', agent: agentType(LS.getItem('box_agent') || 'claude'), archived: false, favorite: false, parentId: null, parentTitle: '', settings: { codex: { ...DEFAULT_SETTINGS.codex }, gemini: { ...DEFAULT_SETTINGS.gemini }, agy: { ...DEFAULT_SETTINGS.agy }, mac: { ...DEFAULT_SETTINGS.mac }, claude: { ...DEFAULT_SETTINGS.claude } }, context: null };
 let vobRefreshTimer = null, vobRefreshSeq = 0, vobSnapshot = null, vobConsoleOpen = false, vobRenderKey = '';
+const vobMonitorState = { room: null, attached: [], panel: null, callId: '', connectedAtMs: 0, segments: new Map(), audioUnlockHandler: null };
 let images = [];            // composer attachment buffer: [{path, url, name, isImage}]
 let waitingState = null;    // pending interactive prompt (AskUserQuestion / plan / permission) or null
 let commandsCache = {};
@@ -2586,6 +2587,7 @@ function toggleVobConsole(force) {
   vobConsoleOpen = force == null ? !vobConsoleOpen : !!force;
   if (vobConsoleOpen) vobRenderSnapshot(vobSnapshot);
   else {
+    stopVobLiveMonitor();
     vobRenderKey = '';
     const root = $('vobConsole');
     if (root) { root.classList.add('hidden'); root.innerHTML = ''; }
@@ -2596,6 +2598,7 @@ function hideVobConsole() {
   if (vobRefreshTimer) { clearTimeout(vobRefreshTimer); vobRefreshTimer = null; }
   vobRefreshSeq += 1;
   vobSnapshot = null;
+  stopVobLiveMonitor();
   vobRenderKey = '';
   vobConsoleOpen = false;
   const bar = $('vobBar');
@@ -2654,6 +2657,123 @@ function vobFieldBlock(fields, fallbackFields = []) {
   const extra = rows.length > 4 ? `<details class="vobFieldDetails"><summary>+${rows.length - 4} more fields</summary><div class="vobFieldList">${rows.slice(4).map(rowHtml).join('')}</div></details>` : '';
   return `<div class="vobFieldBlock"><div class="vobFieldRows">${preview}</div>${extra}</div>`;
 }
+function vobMonitorSetStatus(text, live = false) {
+  const target = vobMonitorState.panel?.querySelector('[data-vob-monitor-status]');
+  if (target) { target.textContent = text; target.classList.toggle('live', live); }
+}
+function vobMonitorDecode(payload) {
+  try {
+    let value = payload;
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) value = new TextDecoder().decode(value);
+    return typeof value === 'string' ? JSON.parse(value) : value;
+  } catch { return null; }
+}
+function vobMonitorAppendTranscript(packet) {
+  const panel = vobMonitorState.panel;
+  if (!panel || !packet || packet.type !== 'transcript' || !String(packet.text || '').trim()) return;
+  const id = String(packet.itemId || `${packet.role || 'agent'}-${packet.createdAtMs || Date.now()}-${packet.text}`);
+  const list = panel.querySelector('[data-vob-monitor-transcript]');
+  if (!list) return;
+  const elapsed = Number.isFinite(Number(packet.elapsedSec)) ? Number(packet.elapsedSec)
+    : packet.createdAtMs && vobMonitorState.connectedAtMs ? Math.max(0, (Number(packet.createdAtMs) - vobMonitorState.connectedAtMs) / 1000) : 0;
+  let row = vobMonitorState.segments.get(id);
+  if (!row) {
+    list.querySelector('.vobLiveMonitorEmpty')?.remove();
+    row = document.createElement('div');
+    vobMonitorState.segments.set(id, row);
+    list.append(row);
+  }
+  row.className = `vobLiveMonitorRow ${packet.role === 'user' ? 'caller' : 'agent'}${packet.final === false ? ' interim' : ''}`;
+  row.dataset.vobSegment = id;
+  row.replaceChildren();
+  const time = document.createElement('time');
+  time.textContent = vobClock(elapsed);
+  const speaker = document.createElement('strong');
+  speaker.textContent = packet.role === 'user' ? 'Caller' : 'Agent';
+  const text = document.createElement('span');
+  text.textContent = String(packet.text).trim();
+  row.append(time, speaker, text);
+  list.scrollTop = list.scrollHeight;
+}
+function stopVobLiveMonitor() {
+  if (vobMonitorState.audioUnlockHandler) {
+    document.removeEventListener('pointerdown', vobMonitorState.audioUnlockHandler);
+    vobMonitorState.audioUnlockHandler = null;
+  }
+  for (const element of vobMonitorState.attached.splice(0)) {
+    try { element.pause(); } catch {}
+    try { element.remove(); } catch {}
+  }
+  if (vobMonitorState.room) { try { vobMonitorState.room.disconnect(); } catch {} }
+  vobMonitorState.room = null;
+  vobMonitorState.connectedAtMs = 0;
+  vobMonitorState.segments.clear();
+  vobMonitorState.panel?.remove();
+  vobMonitorState.panel = null;
+  vobMonitorState.callId = '';
+}
+function armVobMonitorAudioUnlock(room) {
+  if (typeof room?.startAudio !== 'function' || vobMonitorState.audioUnlockHandler) return;
+  vobMonitorState.audioUnlockHandler = async () => {
+    if (vobMonitorState.room !== room) return;
+    try {
+      await room.startAudio();
+      document.removeEventListener('pointerdown', vobMonitorState.audioUnlockHandler);
+      vobMonitorState.audioUnlockHandler = null;
+      vobMonitorSetStatus('Connected', true);
+    } catch {
+      vobMonitorSetStatus('Connected — tap to enable speaker', true);
+    }
+  };
+  document.addEventListener('pointerdown', vobMonitorState.audioUnlockHandler);
+}
+async function startVobLiveMonitor(callId) {
+  stopVobLiveMonitor();
+  const LK = globalThis.LivekitClient;
+  if (!LK || typeof LK.Room !== 'function') { toast('LiveKit client did not load; refresh once and try again'); return; }
+  if (!cur?.id) return;
+  document.body.insertAdjacentHTML('beforeend', `<div class="vobLiveMonitorModal" data-vob-live-monitor role="dialog" aria-modal="true" aria-label="Live VOB call monitor"><div class="vobLiveMonitorPanel"><div class="vobLiveMonitorHead"><div><div class="vobEyebrow">Live VOB call</div><h2>Listening to <code>${esc(vobShortId(callId))}</code></h2><span data-vob-monitor-status>Connecting…</span></div><button type="button" class="vobClose" data-vob-live-monitor-close>Stop listening</button></div><div class="vobLiveMonitorTranscript" data-vob-monitor-transcript aria-live="polite"><div class="vobLiveMonitorEmpty">Waiting for live transcript…</div></div><div class="vobLiveMonitorFoot">Read-only monitor · audio is live while the payer call remains connected.</div></div></div>`);
+  vobMonitorState.panel = document.querySelector('[data-vob-live-monitor]');
+  vobMonitorState.callId = String(callId || '');
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/vob/live-token?callId=${encodeURIComponent(callId)}`);
+    const join = await response.json();
+    if (!response.ok) throw new Error(join.error || `Could not join live call (${response.status})`);
+    const room = new LK.Room({ adaptiveStream: true, dynacast: true });
+    vobMonitorState.room = room;
+    room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind !== LK.Track.Kind.Audio) return;
+      const elements = track.attach();
+      for (const element of (Array.isArray(elements) ? elements : [elements])) {
+        if (!element) continue;
+        element.autoplay = true; element.muted = false;
+        element.style.position = 'fixed'; element.style.width = '1px'; element.style.height = '1px';
+        element.style.opacity = '0'; element.style.pointerEvents = 'none';
+        document.body.append(element); vobMonitorState.attached.push(element); element.play().catch(() => {});
+      }
+    });
+    if (LK.RoomEvent.DataReceived) room.on(LK.RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+      if (topic && topic !== 'box-vob-transcript') return;
+      const packet = vobMonitorDecode(payload);
+      if (packet?.type === 'status') vobMonitorSetStatus(packet.status === 'agent_ready' ? 'Connected' : String(packet.status || 'Live'), true);
+      else vobMonitorAppendTranscript(packet);
+    });
+    if (LK.RoomEvent.TranscriptionReceived) room.on(LK.RoomEvent.TranscriptionReceived, (segments) => {
+      for (const segment of (Array.isArray(segments) ? segments : [])) vobMonitorAppendTranscript({ type: 'transcript', role: 'agent', text: segment.text, itemId: segment.id, createdAtMs: segment.createdAtMs });
+    });
+    room.on(LK.RoomEvent.Disconnected, () => vobMonitorSetStatus('Call disconnected', false));
+    await room.connect(join.url, join.token);
+    vobMonitorState.connectedAtMs = Date.now();
+    let audioReady = true;
+    if (typeof room.startAudio === 'function') {
+      try { await room.startAudio(); } catch { audioReady = false; armVobMonitorAudioUnlock(room); }
+    }
+    vobMonitorSetStatus(audioReady ? 'Connected' : 'Connected — tap to enable speaker', true);
+  } catch (error) {
+    stopVobLiveMonitor();
+    toast(error.message || 'Could not listen to the active VOB call');
+  }
+}
 function vobRenderSnapshot(vob) {
   const root = $('vobConsole');
   if (!root) return;
@@ -2679,7 +2799,8 @@ function vobRenderSnapshot(vob) {
     const audio = attempt.audio ? `<audio class="vobAudio" controls preload="metadata" data-vob-audio="${esc(callId)}" src="${esc(vobAudioUrl(callId))}"></audio><div class="vobAudioError hidden" data-vob-audio-error="${esc(callId)}" role="status">Recording could not be loaded. Try again from the audio controls.</div>` : '<div class="vobEmpty">No recording artifact yet.</div>';
     const segments = (attempt.segments || []).map((segment) => `<button type="button" class="vobSegment ${vobPhaseClass(segment.label)}" data-vob-seek="${Number(segment.startSec) || 0}" data-vob-end="${Number(segment.endSec) || 0}" data-vob-call="${esc(callId)}"><span>${esc(vobPhaseLabel(segment.label))}</span><small>${vobClock(segment.startSec)}–${vobClock(segment.endSec)}</small></button>`).join('');
     const transcript = (attempt.transcript || []).map((row, index) => `<button type="button" class="vobTranscriptRow" data-vob-seek="${Number(row.startSec) || 0}" data-vob-call="${esc(callId)}" data-vob-transcript-index="${index}"><time>${vobClock(row.startSec)}</time><span class="vobTranscriptRole">${esc(row.role || 'unknown')}</span><span class="vobTranscriptPhase ${vobPhaseClass(row.phase)}">${esc(vobPhaseLabel(row.phase))}</span><span class="vobTranscriptText">${esc(row.text)}</span></button>`).join('');
-    return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
+    const listen = attempt.live ? `<button type="button" class="vobLiveListen" data-vob-live-listen="${esc(callId)}">Listen live + transcript</button>` : '';
+    return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><div class="vobAttemptActions">${listen}<span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
   }).join('') : '<div class="vobEmpty">No call attempts recorded yet.</div>';
   root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions"><button type="button" class="vobTestStart" data-vob-test-start>Test agent with me</button><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">requested fields and current values</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">from the operator result</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
   vobRenderKey = renderKey;
@@ -2729,6 +2850,12 @@ function vobRenderSnapshot(vob) {
     });
   });
 }
+document.addEventListener('click', (event) => {
+  const listen = event.target.closest?.('[data-vob-live-listen]');
+  if (listen) { startVobLiveMonitor(listen.dataset.vobLiveListen); return; }
+  if (event.target.closest?.('[data-vob-live-monitor-close]')) stopVobLiveMonitor();
+});
+window.addEventListener('beforeunload', () => stopVobLiveMonitor());
 async function refreshVobConsole() {
   if (vobRefreshTimer) { clearTimeout(vobRefreshTimer); vobRefreshTimer = null; }
   const root = $('vobConsole');
@@ -2794,6 +2921,9 @@ async function renderLinearBar(inc, sessionId) {
 // button, this arrow, and swipe-back all do the same thing. (ws is closed by
 // renderRoute when the popped route leaves the chat.)
 function goBackFromChat() {
+  // The VOB console is an in-place overlay, not a history entry. Close it first
+  // so Back returns to this session's chat instead of popping to another session.
+  if (vobConsoleOpen) { toggleVobConsole(false); return; }
   if (attnMode) return history.back();   // pops the chatAttn entry → renderRoute closes the overlay
   // A newly-created fork already sits directly after its parent in browser history.
   // Pushing the parent again here produced parent → fork → parent; the next Back
