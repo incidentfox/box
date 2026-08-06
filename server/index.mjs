@@ -2839,7 +2839,7 @@ app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
     const had = set.has(id);
     if (on) { if (!had) { set.add(id); at[id] = now; changed++; } }
     else { if (had) { set.delete(id); delete at[id]; changed++; } }
-    if (on) { try { killed += killSessionBridge(id).killed || 0; } catch {} }
+    if (on) { try { killed += teardownSessionRuntime(id).killed || 0; } catch {} }
   }
   if (workspace === 'team') { saveTeamArchived(set); saveTeamArchivedAt(at); }
   else { saveArchived(set); saveArchivedAt(at); }
@@ -2852,12 +2852,12 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const set = store.load(); const at = store.loadAt();
   if (on) { set.add(id); at[id] = Date.now(); } else { set.delete(id); delete at[id]; }
   store.save(set); store.saveAt(at);
-  // Archiving = done with it → kill its remote-control bridge so it stops consuming a
-  // claude process + heartbeating. Unarchiving explicitly warms a fresh bridge below.
-  let killed = 0;
-  if (on) { try { killed = killSessionBridge(id).killed; } catch {} }
+  // Archiving = done with it: clear recoverable work and stop every Box-owned
+  // runtime, including the remote-control bridge and detached child processes.
+  const teardown = on ? teardownSessionRuntime(id) : null;
+  const killed = teardown ? teardown.killed : 0;
   const restored = on ? null : restoreSessionBridge(id);
-  res.json({ ok: true, archived: on, killed, restored });
+  res.json({ ok: true, archived: on, killed, teardown, restored });
 });
 app.post('/api/sessions/:id/favorite', requireAuth, (req, res) => {
   const id = req.params.id;
@@ -4856,6 +4856,18 @@ function killAgentProcess(proc, signal = 'SIGTERM') {
   } catch { return false; }
 }
 
+// Bash turns are spawned as their own process group so archive/cancel can reap the
+// command they launched as well as the shell wrapper. Without this, killing the
+// parent bash leaves tools such as npm/node/python detached under the Box server.
+function attachProcessGroupKiller(proc) {
+  if (!proc || !proc.pid) return proc;
+  proc.killTree = (signal = 'SIGTERM') => {
+    try { process.kill(-proc.pid, signal); return true; } catch {}
+    try { return !!proc.kill(signal); } catch { return false; }
+  };
+  return proc;
+}
+
 function enqueue(extKey, msg) {
   const s = rt(extKey);
   msg.qid = randomBytes(4).toString('hex');
@@ -5120,7 +5132,7 @@ function undoQueuedCancel(extKey, qid) {
 }
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
-  if (s.bashProc) { try { s.bashProc.kill('SIGTERM'); } catch {} }
+  if (s.bashProc) killAgentProcess(s.bashProc, 'SIGTERM');
   if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
   if (s.codexGoalProc) killAgentProcess(s.codexGoalProc, 'SIGTERM');
   // A server restart loses ChildProcess handles while a pre-existing Codex resume may
@@ -5136,6 +5148,87 @@ function cancelCurrent(extKey) {
     bcast(s, { type: 'done', sessionId: s.sessionId, canceled: true });
     bcast(s, { type: 'idle' });
   }
+}
+
+function clearPersistedSessionQueue(id) {
+  if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return false;
+  try {
+    const file = qpath(id);
+    const p = JSON.parse(readFileSync(file, 'utf8'));
+    const hadWork = (Array.isArray(p.queue) && p.queue.length > 0) || !!p.inflight;
+    if (!hadWork) return false;
+    p.queue = [];
+    p.inflight = null;
+    writeJsonAtomic(file, p);
+    return true;
+  } catch { return false; }
+}
+
+// Archiving is a lifecycle boundary, not just a list filter. Stop every process
+// owned by this Box session, clear restart-recoverable work, stop tail/retry timers,
+// and remove the bridge/registry entry. This is deliberately exact-id scoped and
+// idempotent so both the archive endpoint and the periodic orphan reaper can call it.
+function teardownSessionRuntime(id, { force = true } = {}) {
+  if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { ok: false, killed: 0, processKilled: 0, codexKilled: 0, queueCleared: false };
+  const s = RT.get(resolveKey(id));
+  const targetIds = new Set([id, s && s.sessionId].filter(Boolean));
+  const signal = force ? 'SIGKILL' : 'SIGTERM';
+  let processKilled = 0;
+  let queueCleared = false;
+
+  if (s) {
+    const owned = [s.proc, s.bashProc, s.codexGoalProc].filter(Boolean);
+    queueCleared = (s.queue && s.queue.length > 0) || !!s.inflight;
+    s.queue = [];
+    s.inflight = null;
+    s.queueUndo.clear();
+    // This interrupts the active runner and any exact-session Codex process that
+    // survived a server restart. Force-killing the captured handles below also
+    // catches child handles nulled by their normal close path.
+    cancelCurrent(s.key);
+    for (const proc of owned) if (killAgentProcess(proc, signal)) processKilled++;
+    stopTail(s);
+    s.proc = null;
+    s.bashProc = null;
+    s.codexGoalProc = null;
+    s.onTurnEnd = null;
+    s.canceled = true;
+    s.running = false;
+    s.inflight = null;
+    deleteRunning(s.key);
+    if (s.sessionId) deleteRunning(s.sessionId);
+    persist(s);
+  } else {
+    queueCleared = clearPersistedSessionQueue(id);
+  }
+
+  let codexKilled = 0;
+  let killed = 0;
+  for (const targetId of targetIds) {
+    try { codexKilled += terminateUnmanagedCodexThread(targetId, signal).length; } catch {}
+    try { killed += killSessionBridge(targetId, { force }).killed || 0; } catch {}
+  }
+  return { ok: true, killed, processKilled, codexKilled, queueCleared };
+}
+
+function reconcileArchivedSessionRuntimes() {
+  let archived;
+  try { archived = new Set([...loadArchived(), ...loadTeamArchived()]); } catch { archived = new Set(); }
+  const candidates = new Set();
+  for (const s of RT.values()) {
+    if (s.sessionId && archived.has(s.sessionId) && !RUNNING.has(s.sessionId)) candidates.add(s.sessionId);
+  }
+  // After a Box server restart RT is empty. The process scan catches Box-owned
+  // Codex resumes that no longer have a ChildProcess handle in memory.
+  for (const id of runningCodexThreadIds()) {
+    if (archived.has(id) && !RUNNING.has(id)) candidates.add(id);
+  }
+  let reaped = 0;
+  for (const id of candidates) {
+    try { teardownSessionRuntime(id); reaped++; } catch {}
+  }
+  if (reaped) console.log(`reaped ${reaped} archived session runtime(s)`);
+  return reaped;
 }
 
 // Merge everything queued right now into ONE turn — so Claude sees all the user's
@@ -5260,7 +5353,7 @@ function runTurn(s, msg) {
         bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
         return resolve();
       }
-      const p = spawn('bash', ['-lc', msg.text || ''], { cwd: msg.cwd || s.cwd || DEFAULT_CWD, env: childEnv({ guest: sessionIsGuest(s) }) });
+      const p = attachProcessGroupKiller(spawn('bash', ['-lc', msg.text || ''], { cwd: msg.cwd || s.cwd || DEFAULT_CWD, env: childEnv({ guest: sessionIsGuest(s) }), detached: true }));
       s.bashProc = p;
       p.stdout.on('data', (d) => emit({ type: 'bash_out', text: d.toString() }));
       p.stderr.on('data', (d) => emit({ type: 'bash_out', text: d.toString() }));
@@ -6065,7 +6158,7 @@ function summarizeToolInput(name, input) {
 
 function killAllProcs() {
   for (const s of RT.values()) {
-    if (s.bashProc) { try { s.bashProc.kill('SIGKILL'); } catch {} }
+    if (s.bashProc) killAgentProcess(s.bashProc, 'SIGKILL');
     // Codex/Gemini/Mac turns live in `proc`, not `bashProc`. Leaving these alive across
     // a Box restart creates an orphan worker while the new server recovers the turn.
     if (s.proc) killAgentProcess(s.proc, 'SIGKILL');
@@ -6097,7 +6190,11 @@ setInterval(() => {
 // show as live immediately (not as orphaned idle cards). Run once at boot + refresh
 // every 30s as sessions start/stop. Cheap: one pgrep + a readlink per live bridge.
 try { const n = reconcileLiveBridges(); console.log(`reconciled ${n} live RC bridge(s)`); } catch (e) { console.log('reconcile failed:', e.message); }
-setInterval(() => { try { reconcileLiveBridges(); } catch {} }, 30 * 1000);
+try { reconcileArchivedSessionRuntimes(); } catch (e) { console.log('runtime reconcile failed:', e.message); }
+setInterval(() => {
+  try { reconcileLiveBridges(); } catch {}
+  try { reconcileArchivedSessionRuntimes(); } catch {}
+}, 30 * 1000);
 
 server.listen(PORT, () => {
   console.log(`\ncc-mobile (chat) on http://localhost:${PORT}`);
