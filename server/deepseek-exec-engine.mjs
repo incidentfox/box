@@ -13,13 +13,24 @@ import {
   buildCodexArgs,
   terminateCodexProcess,
   reasoningHeartbeat,
-  buildOwnerCodexScript,
 } from './codex-exec-engine.mjs';
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+const DEEPSEEK_KEY_ENV = 'BOX_DEEPSEEK_OPENAI_API_KEY';
+const DEEPSEEK_BASE_URL_ENV = 'BOX_DEEPSEEK_OPENAI_BASE_URL';
 export const DEEPSEEK_MODEL = 'deepseek-v4-flash';
 export const DEEPSEEK_DEFAULT_EFFORT = 'high';
 const DEEPSEEK_EFFORTS = new Set(['low', 'high', 'max']);
+
+// The owner Codex wrapper deliberately unsets OPENAI_API_KEY so ChatGPT-backed
+// sessions cannot accidentally spend metered API credits. DeepSeek is the
+// opposite case: its API key and endpoint must survive sourcing CODEX_ENV_FILE.
+// Keep private copies in uniquely named variables, source the shared environment,
+// then restore the DeepSeek values immediately before launching Codex.
+export function buildDeepSeekCodexScript(envFile = '') {
+  const sourceEnv = envFile ? `[ -f ${JSON.stringify(envFile)} ] && . ${JSON.stringify(envFile)}; ` : '';
+  return `${sourceEnv}export OPENAI_BASE_URL="$${DEEPSEEK_BASE_URL_ENV}"; export OPENAI_API_KEY="$${DEEPSEEK_KEY_ENV}"; unset ${DEEPSEEK_BASE_URL_ENV} ${DEEPSEEK_KEY_ENV} CODEX_API_KEY; exec codex "$@"`;
+}
 
 export function normalizeDeepSeekSettings(settings = {}) {
   const reasoningEffort = DEEPSEEK_EFFORTS.has(settings.reasoningEffort)
@@ -36,15 +47,19 @@ export class DeepSeekExecEngine {
   run({ sessionId, cwd, prompt, images = [], settings = {}, apiKey = '', onEvent }) {
     const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings: normalizeDeepSeekSettings(settings) });
     const envFile = process.env.CODEX_ENV_FILE;
-    const script = buildOwnerCodexScript(envFile);
+    const script = buildDeepSeekCodexScript(envFile);
 
     // Inject DeepSeek credentials. OPENAI_BASE_URL redirects codex to DeepSeek's
     // endpoint; OPENAI_API_KEY carries the DeepSeek secret. We explicitly set both
-    // so they win over anything inherited from the shell or CODEX_ENV_FILE.
+    // so they win over anything inherited from the shell or CODEX_ENV_FILE. The
+    // private copies are restored by buildDeepSeekCodexScript after that file is
+    // sourced; otherwise the shared owner wrapper would erase these values.
     const env = buildChildEnv(process.env, {
       extra: {
         OPENAI_BASE_URL: DEEPSEEK_BASE_URL,
         OPENAI_API_KEY: String(apiKey || ''),
+        [DEEPSEEK_BASE_URL_ENV]: DEEPSEEK_BASE_URL,
+        [DEEPSEEK_KEY_ENV]: String(apiKey || ''),
       },
     });
 
