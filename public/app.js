@@ -566,7 +566,15 @@ function expandBoxPath(path) {
   return path;
 }
 function decodePathMaybe(path) {
-  try { return decodeURIComponent(path); } catch { return path; }
+  let value = String(path || '').trim();
+  const unwrapMarkdownDestination = () => {
+    if (value.startsWith('&lt;') && value.endsWith('&gt;')) value = value.slice(4, -4).trim();
+    else if (value.startsWith('<') && value.endsWith('>')) value = value.slice(1, -1).trim();
+  };
+  unwrapMarkdownDestination();
+  try { value = decodeURIComponent(value); } catch {}
+  unwrapMarkdownDestination();
+  return value;
 }
 function displayPath(path) {
   const home = (CFG && CFG.home) || '/home/factory';
@@ -717,7 +725,7 @@ function md(src) {
     t = safeEsc(t).replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `${codes.length - 1}`; });
     // images before links so ![ doesn't partially match the link regex
     t = t.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
-      src = src.trim();
+      src = decodePathMaybe(src);
       const isHttp = /^https?:\/\//i.test(src);
       const looksImg = /\.(png|jpe?g|gif|webp|svg|bmp|heic|avif)(\?|#|$)/i.test(src);
       // A non-image http(s) URL embedded as a "screenshot" (e.g. a dashboard webpage the
@@ -732,6 +740,7 @@ function md(src) {
       return `<img class="mdImg" src="${esc(url)}" alt="${esc(alt)}" loading="lazy" decoding="async" onerror="this.style.display='none'">`;
     });
     t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+      href = decodePathMaybe(href);
       const local = localPathLinkHtml(label, href);
       if (local) return local;
       return `<a href="${esc(href)}" target="_blank" rel="noopener">${label}</a>`;
