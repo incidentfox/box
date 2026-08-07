@@ -49,6 +49,7 @@ import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './l
 import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
+import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -173,6 +174,11 @@ const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FI
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 
 const PORT = Number(cfg('PORT', 7321));
+// Normal phone turns stay uncapped: independent Codex chats are expected to run in parallel.
+// A server restart is different because every interrupted turn resumes at once. Bound only
+// those automatic recoveries so a restart cannot create another CPU/memory stampede.
+const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '3'));
+const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
 const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
@@ -5454,12 +5460,32 @@ async function runWorker(s) {
   }
   s.running = true;
   while (s.queue.length) {
-    // Session queues are serialized individually, but recovery and scheduled wakeups can start
-    // hundreds of different workers together. Admit expensive Codex process trees globally so
-    // one restart cannot turn into a memory/CPU stampede. Do not dequeue until admitted: a
-    // deploy while waiting leaves the request durable in `queue`, not ambiguously `inflight`.
-    const queuedAgent = s.queue[0].agent || s.agent || 'claude';
     let releaseTurnSlot = null;
+    // Only an interrupted in-flight Codex turn is marked `recovered`. Ordinary phone turns and
+    // scheduled work retain full concurrency. Do not dequeue a recovery until admitted: if the
+    // server restarts again while waiting, the request remains durable in `queue`.
+    const recoveryQid = s.queue[0].recovered && (s.queue[0].agent || s.agent || 'claude') === 'codex'
+      ? s.queue[0].qid
+      : null;
+    if (recoveryQid) {
+      if (CODEX_RECOVERY_LIMITER.active >= CODEX_RECOVERY_LIMITER.limit) {
+        bcast(s, {
+          type: 'native_wait',
+          sessionId: s.sessionId,
+          msg: `Queued — restoring interrupted work when Box has capacity (${CODEX_RECOVERY_LIMITER.limit} recoveries at a time).`,
+        });
+      }
+      releaseTurnSlot = await CODEX_RECOVERY_LIMITER.acquire();
+      // Archive/cancel can clear or replace a queued recovery while it waits for capacity.
+      if (!s.running || !s.queue.length) {
+        releaseTurnSlot();
+        break;
+      }
+      if (s.queue[0].qid !== recoveryQid || !s.queue[0].recovered) {
+        releaseTurnSlot();
+        continue;
+      }
+    }
     // Drain the leading run of messages from the SAME sender. Batching two people's
     // messages into one turn would merge them into a single bubble and lose the "who
     // said what" the whole shared-session feature rests on. On a solo box every author

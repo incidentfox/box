@@ -2469,6 +2469,7 @@ async function openPipeDetail(path, title) {
 // history stays in `localEarlier` and appears normally when the user scrolls up.
 const INITIAL_HISTORY_RENDER_LIMIT = 40;
 const EARLIER_HISTORY_BATCH = 120;
+const HISTORY_LOAD_TIMEOUT_MS = 15000;
 let wsLastMsg = 0, wsWatchdog = null;
 let historyAbortController = null;
 function beginHistoryRequest() {
@@ -2525,6 +2526,15 @@ function addHistoryLoader() {
   $('messages').appendChild(loader);
   return loader;
 }
+function showHistoryLoadError(loader, session, message) {
+  loader.textContent = `${message} `;
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'histRetry';
+  retry.textContent = 'Retry';
+  retry.onclick = () => openChat(session);
+  loader.appendChild(retry);
+}
 function annotateHistoryMessages(messages, start = 0) {
   return (messages || []).map((m, i) => ({ ...m, _idx: start + i }));
 }
@@ -2564,6 +2574,11 @@ async function openChat(s) {
   if (s.id) {
     const loader = addHistoryLoader();
     const historyRequest = beginHistoryRequest();
+    let historyTimedOut = false;
+    const historyTimeout = setTimeout(() => {
+      historyTimedOut = true;
+      historyRequest.abort();
+    }, HISTORY_LOAD_TIMEOUT_MS);
     try {
       const h = await (await api(`/api/sessions/${s.id}/history`, { ep: cur.ep || LOCAL_EP, signal: historyRequest.signal })).json();
       if (renderSeq !== chatRenderSeq) return;
@@ -2582,8 +2597,11 @@ async function openChat(s) {
       if (renderSeq !== chatRenderSeq) return;
       scrollBottom();
     } catch (err) {
-      if (renderSeq === chatRenderSeq && err && err.name !== 'AbortError') loader.textContent = 'Could not load history.';
+      if (renderSeq === chatRenderSeq && (historyTimedOut || (err && err.name !== 'AbortError'))) {
+        showHistoryLoadError(loader, s, historyTimedOut ? 'History timed out.' : 'Could not load history.');
+      }
     } finally {
+      clearTimeout(historyTimeout);
       if (historyAbortController === historyRequest) historyAbortController = null;
     }
   } else if (s.carry && s.carry.length) {
