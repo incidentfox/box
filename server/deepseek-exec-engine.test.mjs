@@ -5,6 +5,7 @@ import {
   DEEPSEEK_DEFAULT_EFFORT,
   DEEPSEEK_MODEL,
   DeepSeekExecEngine,
+  buildDeepSeekCodexScript,
   normalizeDeepSeekSettings,
 } from './deepseek-exec-engine.mjs';
 
@@ -41,8 +42,15 @@ assert.equal(normalizeDeepSeekSettings({ model: 'deepseek-v4-pro', reasoningEffo
   assert.ok(spawned.args.includes('model_reasoning_effort="max"'));
   assert.equal(spawned.options.env.OPENAI_BASE_URL, 'https://api.deepseek.com');
   assert.equal(spawned.options.env.OPENAI_API_KEY, 'test-key');
+  assert.equal(spawned.options.env.BOX_DEEPSEEK_OPENAI_BASE_URL, 'https://api.deepseek.com');
+  assert.equal(spawned.options.env.BOX_DEEPSEEK_OPENAI_API_KEY, 'test-key');
+  assert.match(spawned.args[1], /export OPENAI_BASE_URL="\$BOX_DEEPSEEK_OPENAI_BASE_URL"/);
+  assert.match(spawned.args[1], /export OPENAI_API_KEY="\$BOX_DEEPSEEK_OPENAI_API_KEY"/);
+  assert.doesNotMatch(spawned.args[1], /unset OPENAI_API_KEY/);
   child.stdout.end();
   child.stderr.end();
 }
+
+assert.ok(buildDeepSeekCodexScript('/run/factory secrets.env').includes('[ -f "/run/factory secrets.env" ]'));
 
 console.log('✅ deepseek-exec-engine.test.mjs passed');
