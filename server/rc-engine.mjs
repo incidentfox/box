@@ -19,6 +19,7 @@ import { homedir } from 'node:os';
 import { EventEmitter } from 'events';
 import { randomUUID } from 'node:crypto';
 import { buildChildEnv } from './child-env.mjs';
+import { normalizeClaudeModel } from './claude-model.mjs';
 
 const require = createRequire(import.meta.url);
 const pty = require('node-pty');
@@ -411,7 +412,7 @@ export class RCEngine extends EventEmitter {
     // Wrap the RC process in dtach so it survives server restarts and SSH disconnects.
     // dtach -A creates the socket+process if absent, or reattaches if it exists (idempotent).
     const claudeArgs = ['--remote-control', name, '--permission-mode', 'auto'];
-    if (opts.settings && opts.settings.model) claudeArgs.push('--model', opts.settings.model);
+    claudeArgs.push('--model', normalizeClaudeModel(opts.settings && opts.settings.model));
     if (opts.settings && opts.settings.effort) claudeArgs.push('--effort', opts.settings.effort);
     if (sessionId) claudeArgs.push('--resume', sessionId);
     else claudeArgs.push('--session-id', newId);   // deterministic id for a fresh chat
