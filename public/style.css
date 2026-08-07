@@ -388,7 +388,7 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .sCard .preview { margin-top: 5px; font-size: 13px; line-height: 1.4; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 /* messages */
-.messages { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 14px; }
+.messages { flex: 1; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; -webkit-overflow-scrolling: touch; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 14px; }
 .msg { max-width: 100%; min-width: 0; overflow: hidden; flex: 0 0 auto; }
 /* Skip layout/paint for off-screen messages. Long chats reach 50k+ DOM nodes; without
    this every style/layout pass walks all of them, which is most of the scroll jank on

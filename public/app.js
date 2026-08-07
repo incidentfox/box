@@ -365,6 +365,23 @@ function applyChatCapabilities() {
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
 function atBottom() { const m = $('messages'); return m.scrollHeight - m.scrollTop - m.clientHeight < 90; }
+// Streaming replies continually change the height of the last message. Capture the
+// user's intent before mutating the DOM so updates follow the bottom only when the
+// user was already there; someone reading older messages keeps the same viewport.
+function preservedChatScrollTop(viewport, nextHeight, prepend = false) {
+  if (!viewport || viewport.follow) return nextHeight;
+  return viewport.top + (prepend ? Math.max(0, nextHeight - viewport.height) : 0);
+}
+function captureChatViewport() {
+  const m = $('messages');
+  return { top: m.scrollTop, height: m.scrollHeight, follow: atBottom() };
+}
+function restoreChatViewport(viewport, prepend = false) {
+  if (!viewport) return;
+  const m = $('messages');
+  m.scrollTop = Math.max(0, preservedChatScrollTop(viewport, m.scrollHeight, prepend));
+  updateToBottom();
+}
 function maybeScroll() { if (atBottom()) scrollBottom(); else updateToBottom(); }
 function updateToBottom() { const b = $('toBottom'); if (b) b.classList.toggle('hidden', atBottom()); }
 $('messages').addEventListener('scroll', updateToBottom);
@@ -658,6 +675,7 @@ function messagePathRefs(m) {
 // every .mdBlock nuked and rebuilt the whole chat's DOM (aborting in-flight <img> loads,
 // then re-downloading them) each time one path resolved.
 function rerenderResolvedMarkdown(paths) {
+  const viewport = captureChatViewport();
   const names = (paths || []).map((p) => String(p).split('/').filter(Boolean).pop() || String(p));
   const touches = (txt) => !paths || paths.some((p, i) => txt.includes(p) || (names[i] && txt.includes(names[i])));
   for (const el of document.querySelectorAll('.mdBlock')) {
@@ -666,8 +684,8 @@ function rerenderResolvedMarkdown(paths) {
   if (live && live.textEl && live.raw && touches(live.raw)) {
     liveMdCache = { cut: -1, html: '' };   // cached prefix may now render differently
     live.textEl.innerHTML = md(live.raw);
-    maybeScroll();
   }
+  restoreChatViewport(viewport);
 }
 // One renderer for any local file reference in chat. Images preview inline; PDFs get a compact
 // "PDF · name" card (tap → full viewer); everything else is a file chip. All open via the
@@ -3520,6 +3538,7 @@ function activityAge(ms) {
 }
 function renderLiveProgress() {
   if (!live || !live.progress || !live.progress.isConnected) return;
+  const viewport = captureChatViewport();
   const ageMs = Math.max(0, Date.now() - (live.lastActivityAt || Date.now()));
   const stale = ageMs >= 90_000;
   const started = fmtClock(live.startedAt);
@@ -3530,7 +3549,8 @@ function renderLiveProgress() {
   live.progress.title = stale && live.activityLabel ? `Last phase: ${live.activityLabel}` : '';
   // Keep the status immediately below the newest tool/text block. Otherwise a long
   // tool-heavy turn leaves it above the fold and still looks frozen at the bottom.
-  live.body.appendChild(live.progress);
+  if (live.body.lastElementChild !== live.progress) live.body.appendChild(live.progress);
+  restoreChatViewport(viewport);
 }
 function setLiveActivity(label, at = Date.now()) {
   if (!live) { pendingLiveActivity = { label: label || 'Working', at: Number(at) || Date.now() }; return; }
@@ -3545,6 +3565,7 @@ function stopLiveProgress(target = live) {
   if (target.progress) target.progress.remove();
 }
 function startAssistant() {
+  const viewport = captureChatViewport();
   killGhostIndicators();
   const wrap = document.createElement('div'); wrap.className = 'msg assistant';
   const body = document.createElement('div'); body.className = 'body';
@@ -3558,7 +3579,7 @@ function startAssistant() {
   live = { body, raw: '', copyText: '', textEl, loading, progress, progressText: progress.querySelector('.liveProgressText'), activityLabel: 'Starting', lastActivityAt: Date.now(), startedAt: Number.isFinite(userTs) ? userTs : Date.now(), progressTimer: null };
   live.progressTimer = setInterval(renderLiveProgress, 5000);
   if (pendingLiveActivity) { const pending = pendingLiveActivity; pendingLiveActivity = null; setLiveActivity(pending.label, pending.at); }
-  running = true; refreshButton(); scrollBottom();
+  running = true; refreshButton(); restoreChatViewport(viewport);
   liveMdCache = { cut: -1, html: '' };   // never reuse a previous turn's cached prefix
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
@@ -3626,9 +3647,10 @@ function onServer(o) {
   if (o.type === 'context') { cur.context = o.context || null; renderContextMeter(); return; }
   if (o.type === 'turn_start') { refreshSessionsSoon(150); return beginTurn(o.text, o.images, o.author); }
   if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); refreshSessionModesSoon(); return; }
-  if (o.type === 'thinking') { if (live) { clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; } }
+  if (o.type === 'thinking') { if (live) { const viewport = captureChatViewport(); clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; restoreChatViewport(viewport); } }
   else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
   else if (o.type === 'tool') {
+    const viewport = captureChatViewport();
     if (!live) startAssistant(); clearLoading();
     live.textEl.classList.remove('cursor'); live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw);
     const data = { input: o.detail }; (live.toolData = live.toolData || {})[o.id] = data;
@@ -3637,14 +3659,14 @@ function onServer(o) {
     // summary written right before an AskUserQuestion rendered UNDER the question card.
     const chip = toolChip(o.name, o.input || '', data);
     live.textEl.insertAdjacentElement('afterend', chip);
-    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; maybeScroll();
+    live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt; restoreChatViewport(viewport);
     // AskUserQuestion pauses the turn waiting for user input — clear the running/loading state so Send shows
     if (o.name === 'AskUserQuestion') { live.textEl.classList.remove('cursor'); running = false; killGhostIndicators(); refreshButton(); }
   }
   else if (o.type === 'tool_result') { if (live && live.toolData && live.toolData[o.id]) live.toolData[o.id].result = o.content; }
-  else if (o.type === 'bash_out') { if (!live) startAssistant(); clearLoading(); if (!live.bash) { live.bash = document.createElement('div'); live.bash.className = 'bashout'; live.body.appendChild(live.bash); } live.bash.textContent += o.text; maybeScroll(); }
-  else if (o.type === 'notice') { if (!live) startAssistant(); const n = document.createElement('div'); n.className = 'notice'; n.textContent = o.text; live.body.appendChild(n); maybeScroll(); }
-  else if (o.type === 'error') { if (!live) startAssistant(); clearLoading(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.msg; live.body.appendChild(e); }
+  else if (o.type === 'bash_out') { const viewport = captureChatViewport(); if (!live) startAssistant(); clearLoading(); if (!live.bash) { live.bash = document.createElement('div'); live.bash.className = 'bashout'; live.body.appendChild(live.bash); } live.bash.textContent += o.text; restoreChatViewport(viewport); }
+  else if (o.type === 'notice') { const viewport = captureChatViewport(); if (!live) startAssistant(); const n = document.createElement('div'); n.className = 'notice'; n.textContent = o.text; live.body.appendChild(n); restoreChatViewport(viewport); }
+  else if (o.type === 'error') { const viewport = captureChatViewport(); if (!live) startAssistant(); clearLoading(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.msg; live.body.appendChild(e); restoreChatViewport(viewport); }
   else if (o.type === 'blocked') renderBlocked(o);
   else if (o.type === 'native_wait') toast(o.msg || 'Queued behind the terminal turn.', 3500);
   else if (o.type === 'waiting') renderWaiting(o);
@@ -3665,6 +3687,7 @@ function onServer(o) {
 }
 function onSync(o) {
   // restore in-flight turn + pending queue after a (re)connect
+  const viewport = captureChatViewport();
   if (o.sessionId) cur.id = o.sessionId;
   // Identity + presence for a shared chat. `me` is per-connection and authoritative —
   // it's how the same transcript can say "(you)" on the host's box and on a guest's.
@@ -3767,7 +3790,7 @@ function onSync(o) {
     const lastTool = [...parts].reverse().find((p) => (p.t === 'tool' || p.name) && p.name);
     if (lastTool && lastTool.name === 'AskUserQuestion' && !lastTool.result) { running = false; killGhostIndicators(); }
   } else running = false;
-  renderQueue(o.queue); refreshButton(); scrollBottom(); refreshSessionModesSoon();
+  renderQueue(o.queue); refreshButton(); restoreChatViewport(viewport); refreshSessionModesSoon();
 }
 let raf = 0, lastLiveRenderAt = 0;
 // While a reply streams we used to re-run md() over the ENTIRE accumulated text on every
@@ -3790,10 +3813,11 @@ function liveMdHtml(raw) {
 }
 function renderLiveNow() {
   if (!live) return;
+  const viewport = captureChatViewport();
   lastLiveRenderAt = performance.now();
   live.textEl._rawMdText = live.raw;
   live.textEl.innerHTML = liveMdHtml(live.raw);
-  maybeScroll();
+  restoreChatViewport(viewport);
 }
 function queueRender() {
   if (raf) return;
@@ -3801,6 +3825,7 @@ function queueRender() {
   raf = setTimeout(() => { requestAnimationFrame(() => { raf = 0; renderLiveNow(); }); }, wait);
 }
 function finishTurn(o) {
+  const viewport = captureChatViewport();
   pendingLiveActivity = null;
   if (live) {
     stopLiveProgress(live);
@@ -3825,7 +3850,7 @@ function finishTurn(o) {
   if (isPlaceholderChatTitle(cur.title) && cur.firstUser) { cur.title = cur.firstUser.slice(0, 50); setChatTitle(cur.title); }
   refreshSessionsSoon();
   refreshSessionModesSoon();
-  maybeScroll();
+  restoreChatViewport(viewport);
 }
 
 function normalizeSettings(settings) {
@@ -3970,6 +3995,7 @@ async function submit() {
 // the box held the message. One-tap take-over: re-send with force — the box becomes
 // the live owner. (Close the chat on the other device first to avoid a brief fight.)
 function renderBlocked(o) {
+  const viewport = captureChatViewport();
   if (!live) startAssistant();
   clearLoading();
   running = false; killGhostIndicators(); refreshButton();
@@ -3979,18 +4005,21 @@ function renderBlocked(o) {
   const btn = document.createElement('button'); btn.className = 'takeover'; btn.textContent = 'Take over here';
   btn.onclick = () => { box.remove(); enqueueText(o.text || '', { images: o.images || [], force: true }); };
   box.appendChild(msg); box.appendChild(btn);
-  live.body.appendChild(box); maybeScroll();
+  live.body.appendChild(box); restoreChatViewport(viewport);
 }
 // A pending interactive prompt (AskUserQuestion / plan approval / permission). These never reach
 // the JSONL until answered, so the server detects the parked state + scrapes the TUI and pushes it
 // here; tapping an option (or typing a reply) injects the answer back into the live session.
 function clearWaitingCard() {
+  const viewport = captureChatViewport();
   waitingState = null;
   document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
   $('input').placeholder = cur.mode === 'bash' ? 'Run a command on the box…' : 'Message…';
   refreshButton();
+  restoreChatViewport(viewport);
 }
 function renderWaiting(o) {
+  const viewport = captureChatViewport();
   clearWaitingCard();                 // never stack two cards
   if (!live) startAssistant();
   clearLoading(); running = false; killGhostIndicators();
@@ -4025,7 +4054,7 @@ function renderWaiting(o) {
       : 'Open this chat on desktop to answer.';
     card.appendChild(hint);
   }
-  live.body.appendChild(card); maybeScroll();
+  live.body.appendChild(card); restoreChatViewport(viewport);
   if (o.answerable) $('input').placeholder = 'Type your answer…';
   refreshButton();
 }
