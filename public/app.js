@@ -3890,7 +3890,7 @@ function normalizeSettings(settings) {
   const deepseek = (settings && settings.deepseek) || {};
   const deepseekEffort = ['low', 'high', 'max'].includes(deepseek.reasoningEffort) ? deepseek.reasoningEffort : DEFAULT_SETTINGS.deepseek.reasoningEffort;
   const claude = { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) };
-  if (!claude.model || claude.model === 'claude-opus-5') claude.model = DEFAULT_SETTINGS.claude.model;
+  if (!claude.model || claude.model === 'opus' || claude.model === 'claude-opus-5') claude.model = DEFAULT_SETTINGS.claude.model;
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
