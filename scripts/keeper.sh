@@ -98,10 +98,12 @@ start_server() {
     local unit="${SERVER_UNIT_PREFIX}-$(date +%s)-$$.service"
     printf '%s\n' "$unit" >"$SERVER_UNIT_FILE"
     echo "$(date -u +%FT%TZ) starting isolated server unit $unit" >>"$SRV_LOG"
+    # A child helper OOM must not tear down the healthy Node server. If Node itself is
+    # killed, its main process still exits and the keeper starts a fresh generation.
     if systemd-run --user --collect --unit="$unit" --working-directory="$APP_DIR" \
       --property=Type=exec \
       --property=KillMode=control-group \
-      --property=OOMPolicy=stop \
+      --property=OOMPolicy=continue \
       --property=Restart=no \
       --property=StandardOutput=append:"$SRV_LOG" \
       --property=StandardError=append:"$SRV_LOG" \
