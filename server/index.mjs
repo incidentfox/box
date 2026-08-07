@@ -177,7 +177,7 @@ const PORT = Number(cfg('PORT', 7321));
 // Normal phone turns stay uncapped: independent Codex chats are expected to run in parallel.
 // A server restart is different because every interrupted turn resumes at once. Bound only
 // those automatic recoveries so a restart cannot create another CPU/memory stampede.
-const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '3'));
+const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '1'));
 const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.

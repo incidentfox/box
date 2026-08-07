@@ -34,6 +34,12 @@ URL_FILE="$STATE_DIR/url.txt"
 # Non-systemd installs retain the portable nohup path below.
 SERVER_UNIT_PREFIX="${BOX_SERVER_UNIT_PREFIX:-box-app-server}"
 SERVER_UNIT_FILE="$STATE_DIR/server-unit"
+# Keep Box from consuming the host when an agent or tool subprocess grows without
+# bound. MemoryHigh applies reclaim/backpressure before the hard limit; MemoryMax
+# and MemorySwapMax are last-resort fuses. Override these in .env for larger hosts.
+SERVER_MEMORY_HIGH="${BOX_SERVER_MEMORY_HIGH:-6G}"
+SERVER_MEMORY_MAX="${BOX_SERVER_MEMORY_MAX:-10G}"
+SERVER_MEMORY_SWAP_MAX="${BOX_SERVER_MEMORY_SWAP_MAX:-2G}"
 
 # Single-instance guard (cron tick + manual launch dedupe).
 # flock is Linux-only (util-linux); fall back to a PID-file lock on macOS/BSD.
@@ -104,6 +110,9 @@ start_server() {
       --property=Type=exec \
       --property=KillMode=control-group \
       --property=OOMPolicy=continue \
+      --property=MemoryHigh="$SERVER_MEMORY_HIGH" \
+      --property=MemoryMax="$SERVER_MEMORY_MAX" \
+      --property=MemorySwapMax="$SERVER_MEMORY_SWAP_MAX" \
       --property=Restart=no \
       --property=StandardOutput=append:"$SRV_LOG" \
       --property=StandardError=append:"$SRV_LOG" \
