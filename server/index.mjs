@@ -25,6 +25,7 @@ import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { ClaudeExecEngine } from './claude-exec-engine.mjs';
+import { claudeModelContextWindow, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from './claude-model.mjs';
 import { codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-processes.mjs';
 import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
@@ -1344,20 +1345,22 @@ const DEFAULT_SETTINGS = {
   deepseek: { model: DEEPSEEK_MODEL, reasoningEffort: DEEPSEEK_DEFAULT_EFFORT },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
-  claude: { model: 'claude-opus-5', effort: 'xhigh' },
+  claude: { model: DEFAULT_CLAUDE_MODEL, effort: 'xhigh' },
 };
 const refreshRuntimeDefaults = () => {
   DEFAULT_CWD = appDefaultCwd();
   DEFAULT_SETTINGS.codex.sandbox = appCodexSandbox();
 };
 function normalizeSettings(settings = {}) {
+  const claude = { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) };
+  claude.model = normalizeClaudeModel(claude.model);
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
     deepseek: normalizeDeepSeekSettings((settings && settings.deepseek) || {}),
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
-    claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
+    claude,
   };
 }
 function appSettingsPayload() {
@@ -1390,9 +1393,7 @@ function modelContextWindow(agent, model) {
     return DEFAULT_CONTEXT_WINDOWS.codex;
   }
   if (agent === 'gemini') return DEFAULT_CONTEXT_WINDOWS.gemini;
-  if (!m) return DEFAULT_CONTEXT_WINDOWS.claude;
-  if (m.includes('opus-4-8') || m.includes('opus')) return 1000000;
-  return 200000;
+  return claudeModelContextWindow(m);
 }
 const sumNums = (...vals) => vals.reduce((n, v) => n + (Number.isFinite(Number(v)) ? Number(v) : 0), 0);
 function normalizeContext({ agent, model, usedTokens, windowTokens, source = 'estimated', updatedAt = Date.now() } = {}) {
