@@ -63,7 +63,7 @@ const DEFAULT_SETTINGS = {
   deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },
   agy: { model: '' },
   mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
-  claude: { model: 'claude-opus-5', effort: 'xhigh' },
+  claude: { model: 'claude-opus-5[1m]', effort: 'xhigh' },
 };
 const AGENT_META = {
   claude: { label: 'Claude', icon: '⌘' },
@@ -78,6 +78,7 @@ const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000
 function defaultContextWindow(agent) {
   const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
   if ((agent === 'codex' || agent === 'mac') && (!model || model.startsWith('gpt-5.6'))) return 1050000;
+  if (agent === 'claude') return /\[1m\]$/.test(model) ? 1000000 : 200000;
   return DEFAULT_CONTEXT_WINDOW[agent];
 }
 const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
@@ -2477,6 +2478,23 @@ function beginHistoryRequest() {
   historyAbortController = new AbortController();
   return historyAbortController;
 }
+async function loadHistoryWithDeadline(path, { ep, controller, timeoutMs = HISTORY_LOAD_TIMEOUT_MS } = {}) {
+  let timeoutId;
+  const deadline = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      const error = new Error('History timed out.');
+      error.name = 'HistoryTimeoutError';
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    const request = api(path, { ep, signal: controller.signal, cache: 'no-store' }).then((response) => response.json());
+    return await Promise.race([request, deadline]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 function resetWsWatchdog() {
   wsLastMsg = Date.now();
   if (wsWatchdog) return;
@@ -2574,13 +2592,11 @@ async function openChat(s) {
   if (s.id) {
     const loader = addHistoryLoader();
     const historyRequest = beginHistoryRequest();
-    let historyTimedOut = false;
-    const historyTimeout = setTimeout(() => {
-      historyTimedOut = true;
-      historyRequest.abort();
-    }, HISTORY_LOAD_TIMEOUT_MS);
     try {
-      const h = await (await api(`/api/sessions/${s.id}/history`, { ep: cur.ep || LOCAL_EP, signal: historyRequest.signal })).json();
+      const h = await loadHistoryWithDeadline(`/api/sessions/${s.id}/history`, {
+        ep: cur.ep || LOCAL_EP,
+        controller: historyRequest,
+      });
       if (renderSeq !== chatRenderSeq) return;
       loader.remove();
       cur.cwd = h.cwd || cur.cwd; cur.settings = normalizeSettings(h.settings || cur.settings); if (h.agent) setAgent(h.agent); else refreshAgentChip();
@@ -2597,11 +2613,10 @@ async function openChat(s) {
       if (renderSeq !== chatRenderSeq) return;
       scrollBottom();
     } catch (err) {
-      if (renderSeq === chatRenderSeq && (historyTimedOut || (err && err.name !== 'AbortError'))) {
-        showHistoryLoadError(loader, s, historyTimedOut ? 'History timed out.' : 'Could not load history.');
+      if (renderSeq === chatRenderSeq && err && err.name !== 'AbortError') {
+        showHistoryLoadError(loader, s, err.name === 'HistoryTimeoutError' ? 'History timed out.' : 'Could not load history.');
       }
     } finally {
-      clearTimeout(historyTimeout);
       if (historyAbortController === historyRequest) historyAbortController = null;
     }
   } else if (s.carry && s.carry.length) {
@@ -3874,13 +3889,15 @@ function finishTurn(o) {
 function normalizeSettings(settings) {
   const deepseek = (settings && settings.deepseek) || {};
   const deepseekEffort = ['low', 'high', 'max'].includes(deepseek.reasoningEffort) ? deepseek.reasoningEffort : DEFAULT_SETTINGS.deepseek.reasoningEffort;
+  const claude = { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) };
+  if (!claude.model || claude.model === 'claude-opus-5') claude.model = DEFAULT_SETTINGS.claude.model;
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
     deepseek: { ...DEFAULT_SETTINGS.deepseek, ...deepseek, model: DEFAULT_SETTINGS.deepseek.model, reasoningEffort: deepseekEffort },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
-    claude: { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) },
+    claude,
   };
 }
 function sendSettings() {
@@ -4815,7 +4832,7 @@ const codexEffortsForModel = (model) => String(model || '').startsWith('gpt-5.6'
   ? CODEX_EFFORTS.filter((effort) => effort.id !== 'max')
   : CODEX_EFFORTS;
 const CLAUDE_MODELS = [
-  { id: 'claude-opus-5', label: 'Opus 5', desc: 'Default — newest, most capable (1M context)' },
+  { id: 'claude-opus-5[1m]', label: 'Opus 5 · 1M', desc: 'Default — explicit 1M context' },
   { id: 'opus', label: 'Opus 4.8', desc: 'Previous Opus' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
   { id: 'fable', label: 'Fable 5', desc: 'Fast, fewer check-ins (heavier usage)' },
