@@ -43,15 +43,16 @@
     const defaults = catalog.defaults || {};
     return `<div class="vobTestModal" data-vob-test-modal role="dialog" aria-modal="true" aria-labelledby="vobTestTitle">
       <div class="vobTestPanel">
-        <div class="vobTestHeader"><div><div class="vobEyebrow">Production VOB caller</div><h2 id="vobTestTitle">Test the live representative phase</h2><p>The production VOB caller joins a private room after IVR and hold are complete. You are the insurance representative and can answer the questions out loud.</p></div><button type="button" class="vobTestIcon" data-vob-test-close aria-label="Close">×</button></div>
+        <div class="vobTestHeader"><div><div class="vobEyebrow">VOB agent test mode</div><h2 id="vobTestTitle">Test the live representative phase</h2><p>The same production VOB caller joins a private room after IVR and hold are complete. Choose the guarded production pipeline or a prompt-only iteration lane, then answer as the insurance representative.</p></div><button type="button" class="vobTestIcon" data-vob-test-close aria-label="Close">×</button></div>
         <form data-vob-test-form>
           <div class="vobTestGrid">
-            <label>Production prompt<select name="promptPreset">${optionsHtml(catalog.prompts, defaults.promptPreset, true)}</select></label>
+            <label>Test lane mode / prompt<select name="promptPreset">${optionsHtml(catalog.prompts, defaults.promptPreset, true)}</select></label>
             <label>Production LiveKit model<select name="model">${optionsHtml(catalog.models, defaults.model, true)}</select></label>
             <label>Production Cartesia voice<select name="voice">${optionsHtml(catalog.voices, defaults.voice, true)}</select></label>
           </div>
           <label class="vobTestPrompt">Private test-lane prompt<small>Starts with the exact production prompt. Edits are isolated to this ephemeral room and apply when it restarts.</small><textarea name="promptText" rows="14">${escapeHtml(catalog.productionPrompt?.baseText || '')}</textarea></label>
-          <div class="vobTestNotice"><strong>Production caller.</strong> This is the same VOB caller contract, Gemma 4 31B IT model, Deepgram Flux transcription, and Cartesia Sonic 3.5 voice used for a real payer call. The case’s current ledger is loaded as call context.</div>
+          <div class="vobTestNotice"><strong>Same production caller.</strong> Both lanes use the production Gemma 4 31B IT model, Deepgram Flux transcription, Cartesia Sonic 3.5 voice, and the same provider-side caller prompt. The case packet is injected as LiveKit context variables.</div>
+          <div class="vobTestNotice"><strong>Pipeline choice.</strong> Production guarded runs the deterministic extractor, validator, ledger update, and close gate. Prompt-only iteration runs one caller prompt and intentionally skips those postprocessors.</div>
           <div class="vobTestNotice"><strong>Human representative phase.</strong> IVR routing and hold music are skipped. The caller starts as if a live payer representative has just answered, so you can evaluate introductions, evidence questions, and follow-up behavior.</div>
           <div class="vobTestNotice"><strong>Safe test room.</strong> This does not place or modify a payer call. The agent receives a read-only snapshot of this case and the room expires automatically.</div>
           <div class="vobTestActions"><span class="vobTestStatus" data-vob-test-status>Ready to start</span><button type="button" class="vobClose" data-vob-test-close>Cancel</button><button type="submit" class="vobTestPrimary">Start human-phase test</button></div>
@@ -96,10 +97,20 @@
     return `<details class="vobPipelineCard"${open ? ' open' : ''}><summary><span><strong>${escapeHtml(stage.title || 'Pipeline stage')}</strong><small>${escapeHtml(stage.kind || '')}</small></span><em class="vobPipelineBadge ${isLlm ? 'llm' : 'deterministic'}">${isLlm ? 'LLM' : 'CODE'}</em></summary><div class="vobPipelineCardBody"><div class="vobPipelineMeta"><span><b>Source</b> ${escapeHtml(stage.source || '—')}</span>${stage.model ? `<span><b>Model</b> ${escapeHtml(stage.model)}</span>` : ''}${stage.controlModel ? `<span><b>Control model</b> ${escapeHtml(stage.controlModel)}</span>` : ''}${stage.mediaModel ? `<span><b>Media model</b> ${escapeHtml(stage.mediaModel)}</span>` : ''}${stage.mediaContract ? `<span><b>Media</b> ${escapeHtml(stage.mediaContract)}</span>` : ''}${stage.promptRef ? `<span><b>Prompt</b> ${escapeHtml(stage.promptRef.version || 'production')} · ${escapeHtml(stage.promptRef.source || '')}</span>` : ''}</div><p class="vobPipelineExplain">${escapeHtml(stage.explanation || '')}</p>${noPrompt}${output}${prompt}${schema}${rules}${statuses}${closeGate}</div></details>`;
   }
 
-  function pipelineMarkup(pipeline) {
-    if (!pipeline) return '<div class="vobTestEmpty">Pipeline metadata is not available for this test.</div>';
-    const stages = [pipeline.caller, pipeline.extractor, pipeline.runtimeEvidence, pipeline.validator, pipeline.ledger].filter(Boolean);
-    return `<div class="vobPipelineIntro"><span><b>Version</b> ${escapeHtml(pipeline.version || '—')}</span><span>LLM stages emit strict internal envelopes; deterministic stages validate and close the ledger.</span></div><div class="vobPipelineGrid">${stages.map((stage, index) => pipelineStageMarkup(stage, index === 0 || index === 1)).join('')}</div>`;
+  function pipelineMarkup(pipeline, pipelineModes) {
+    const modes = Object.values(pipelineModes || {}).length
+      ? Object.values(pipelineModes)
+      : (pipeline ? [{ id: 'current', label: 'Current pipeline', description: '', pipeline }] : []);
+    if (!modes.length) return '<div class="vobTestEmpty">Pipeline metadata is not available for this test.</div>';
+    const cards = modes.map((mode, modeIndex) => {
+      const current = mode.pipeline || mode;
+      const stages = [current.caller, current.extractor, current.runtimeEvidence, current.validator, current.ledger].filter(Boolean);
+      const removed = Array.isArray(mode.removedStages) && mode.removedStages.length
+        ? `<div class="vobPipelineRemoved"><b>Not run:</b> ${escapeHtml(mode.removedStages.join(' · '))}</div>` : '';
+      const guarded = Array.isArray(mode.deterministicStages) && mode.deterministicStages.length;
+      return `<article class="vobPipelineMode"><div class="vobPipelineModeHead"><div><strong>${escapeHtml(mode.label || mode.id || 'Pipeline')}</strong><p>${escapeHtml(mode.description || '')}</p></div><span class="vobPill">${guarded ? 'guarded' : 'prompt only'}</span></div><div class="vobPipelineIntro"><span><b>Version</b> ${escapeHtml(current.version || '—')}</span><span>${guarded ? 'LLM proposals are validated before evidence can close.' : 'One LiveKit caller prompt; no deterministic postprocessor runs.'}</span></div>${removed}<div class="vobPipelineGrid">${stages.map((stage, index) => pipelineStageMarkup(stage, modeIndex === 0 && index < 2)).join('')}</div></article>`;
+    }).join('');
+    return configSection('Decision pipeline modes · production guardrails and prompt-only test lane', cards, false);
   }
 
   function renderTestInspector(config) {
@@ -109,7 +120,10 @@
     const runtime = config.productionRuntime || {};
     const settings = config.settings || {};
     const data = config.testData || {};
+    const contextVariables = config.contextVariables || data.contextVariables || {};
+    const contextRows = Object.entries(contextVariables).map(([key, value]) => ({ key, value, status: 'LiveKit context' }));
     const runtimeRows = [
+      ['Lane', config.pipelineMode === 'prompt_only' || settings.promptPreset === 'prompt_only' ? 'Prompt-only iteration' : 'Production guarded'],
       ['Prompt', config.productionPrompt?.label || config.productionPrompt?.id || configValue(settings.promptPreset)],
       ['Prompt source', config.productionPrompt?.source || 'production'],
       ['LLM', `${runtime.llmProvider || 'livekit'} / ${runtime.llmModel || runtime.model || configValue(settings.model)}`],
@@ -127,7 +141,7 @@
     const promptMeta = [
       ['Version', promptEditor.version || config.productionPrompt?.version || '—'],
       ['Source', promptEditor.source || config.productionPrompt?.source || 'production'],
-      ['Lane', promptEditor.overrideActive ? 'private override' : 'production prompt'],
+      ['Lane', `${config.pipelineMode === 'prompt_only' ? 'prompt-only iteration' : 'production guarded'}${promptEditor.overrideActive ? ' · private override' : ''}`],
     ].map(([key, value]) => `<span><b>${escapeHtml(key)}</b> ${escapeHtml(value)}</span>`).join('');
     const callsMarkup = calls.length ? calls.map((call) => {
       const fields = Array.isArray(call.fields) ? call.fields : [];
@@ -138,9 +152,10 @@
       ${configSection('Production configuration', configRows(runtimeRows.map((row) => ({ ...row, key: row.key, value: row.value }))))}
       ${configSection('Current prompt / private test override', `<div class="vobPromptMeta">${promptMeta}</div><label class="vobTestPrompt">Private test prompt<small>Production calls are unchanged. Restart the test room to apply edits.</small><textarea class="vobPromptEditor" name="promptText" rows="18">${escapeHtml(promptText)}</textarea></label><details class="vobPromptCompiled"><summary>Compiled prompt with packet context</summary><textarea class="vobPromptCompiledText" readonly rows="12">${escapeHtml(compiledPrompt)}</textarea></details><button type="button" class="vobClose" data-vob-test-reset-prompt>Reset to production prompt</button>`, true)}
       ${configSection('Packet / dynamic variables', configRows(packetFacts), true)}
+      ${configSection('LiveKit context variables / injected at session start', configRows(contextRows, 'No context variables were generated for this case.'), true)}
       ${configSection('Ledger fields and captured answers', `<div class="vobTestLedgerCards">${callsMarkup}</div>`, true)}
       ${configSection('Answers / extracted facts', configRows(facts), false)}
-      ${configSection('Decision pipeline / extractor / validator', pipelineMarkup(config.pipeline), false)}
+      ${pipelineMarkup(config.pipeline, config.pipelineModes)}
       ${configSection('Current test settings', `<div class="vobTestSettings"><label>Prompt<select name="promptPreset">${optionsHtml(state.catalog?.prompts, settings.promptPreset, true)}</select></label><label>Model<select name="model">${optionsHtml(state.catalog?.models, settings.model, true)}</select></label><label>Voice<select name="voice">${optionsHtml(state.catalog?.voices, settings.voice, true)}</select></label><div class="vobTestConfigNote">Changes apply when the test room restarts. Runtime stays on the production Gemma / Flux / Cartesia contract.</div><button type="button" class="vobTestPrimary" data-vob-test-restart>Restart with settings</button></div>`, false)}`;
   }
 

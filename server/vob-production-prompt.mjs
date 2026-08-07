@@ -86,7 +86,7 @@ function factValue(facts, aliases) {
   return '';
 }
 
-function callData(snapshot) {
+export function buildVobContextVariables(snapshot = {}) {
   const facts = factMap(snapshot);
   const aliases = {
     practice_name: ['practice.name', 'practice_name', 'provider.practice_name', 'provider.practiceName'],
@@ -117,7 +117,14 @@ function callData(snapshot) {
   for (const key of VOB_PRODUCTION_RUNTIME_VARIABLES) {
     if (values[key] == null || values[key] === '') values[key] = factValue(facts, aliases[key] || [key]);
   }
-  return VOB_PRODUCTION_RUNTIME_VARIABLES.map((key) => `${key}: ${values[key] || 'not provided'}`).join('\n');
+  return Object.fromEntries(VOB_PRODUCTION_RUNTIME_VARIABLES.map((key) => [key, values[key] || 'not provided']));
+}
+
+function callData(snapshot) {
+  const values = buildVobContextVariables(snapshot);
+  return VOB_PRODUCTION_RUNTIME_VARIABLES
+    .map((key) => `${key}: ${values[key] || 'not provided'}`)
+    .join('\n');
 }
 
 function evidenceLedger(snapshot) {

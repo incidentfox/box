@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   VOB_PRODUCTION_PROMPT_SOURCE,
   VOB_PRODUCTION_PROMPT_VERSION,
+  buildVobContextVariables,
 } from './vob-production-prompt.mjs';
 import {
   VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
@@ -40,6 +41,11 @@ assert.equal(catalog.pipeline.version, VOB_PIPELINE_VERSION);
 assert.equal(catalog.pipeline.extractor.output.name, 'rise4_vob_evidence');
 assert.equal(catalog.pipeline.validator.prompt, null);
 assert.match(catalog.pipeline.extractor.promptTemplate, /REQUIREMENTS/);
+assert.deepEqual(catalog.prompts.map((prompt) => prompt.id), ['production_guarded', 'prompt_only']);
+assert.equal(catalog.pipelineModes.production_guarded.pipeline.version, VOB_PIPELINE_VERSION);
+assert.equal(catalog.pipelineModes.prompt_only.pipeline.version, 'rise4-vob-prompt-only-2026-08-07.v1');
+assert.deepEqual(catalog.pipelineModes.prompt_only.deterministicStages, []);
+assert.deepEqual(catalog.pipelineModes.prompt_only.removedStages, ['extractor', 'runtimeEvidence', 'validator', 'ledger']);
 
 const settings = normalizeVobTestSettings({
   promptPreset: 'balanced',
@@ -55,6 +61,7 @@ assert.deepEqual(settings, {
 assert.equal(normalizeVobTestSettings({ model: 'not-a-model', voice: 'nope' }).model, VOB_LIVEKIT_PRODUCTION_MODEL);
 const promptOverride = normalizeVobTestSettings({ promptText: 'Private test-lane instruction.' });
 assert.equal(promptOverride.promptText, 'Private test-lane instruction.');
+assert.equal(normalizeVobTestSettings({ promptPreset: 'prompt_only' }).promptPreset, 'prompt_only');
 
 const config = createVobTestConfig({
   testId: 'vob-test-1',
@@ -94,6 +101,40 @@ assert.match(config.instructions, /same provider-side caller at the start of the
 assert.deepEqual(config.pipeline, catalog.pipeline);
 assert.doesNotMatch(config.instructions, /simulation|test mode|role-playing/i);
 assert.doesNotMatch(config.instructions, /Additional operator instruction/);
+
+const promptOnlySnapshot = {
+  payerName: 'Example Health',
+  requestId: 'request-prompt-only',
+  packetFacts: [
+    { key: 'patient.name', value: 'Jordan Cissell', status: 'packet' },
+    { key: 'patient.memberId', value: 'G4P591M89472', status: 'packet' },
+    { key: 'patient.dob', value: '1990-12-10', status: 'packet' },
+    { key: 'provider.name', value: 'Example Clinic', status: 'packet' },
+  ],
+  ledger: [{ fields: [{ key: 'benefit.copay', status: 'missing', value: '' }] }],
+};
+const contextVariables = buildVobContextVariables(promptOnlySnapshot);
+assert.equal(contextVariables.patient_member_id, 'G4P591M89472');
+assert.equal(contextVariables.patient_dob, '1990-12-10');
+assert.equal(contextVariables.provider_name, 'Example Clinic');
+assert.equal(contextVariables.payer_name, 'Example Health');
+const promptOnlySettings = normalizeVobTestSettings({ promptPreset: 'prompt_only' });
+const promptOnlyConfig = createVobTestConfig({
+  testId: 'vob-test-prompt-only',
+  sessionId: 'session-prompt-only',
+  settings: promptOnlySettings,
+  snapshot: promptOnlySnapshot,
+  ttlMs: 60_000,
+});
+assert.equal(promptOnlyConfig.pipelineMode, 'prompt_only');
+assert.equal(promptOnlyConfig.pipeline.extractor, undefined);
+assert.equal(promptOnlyConfig.pipeline.validator, undefined);
+assert.equal(promptOnlyConfig.pipeline.ledger, undefined);
+assert.match(promptOnlyConfig.instructions, /LIVEKIT CONTEXT VARIABLES ARE INJECTED AT SESSION START/);
+assert.match(promptOnlyConfig.instructions, /authoritative packet values supplied in the LiveKit context block/);
+assert.doesNotMatch(promptOnlyConfig.instructions, /\n\nEVIDENCE LEDGER\n/);
+assert.equal(promptOnlyConfig.testData.contextVariables.patient_member_id, 'G4P591M89472');
+assert.equal(promptOnlyConfig.promptEditor.mode, 'prompt_only');
 
 const overrideConfig = createVobTestConfig({
   testId: 'vob-test-override',

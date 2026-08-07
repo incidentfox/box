@@ -3,9 +3,10 @@ import {
   VOB_PRODUCTION_INSTRUCTIONS,
   VOB_PRODUCTION_PROMPT_SOURCE,
   VOB_PRODUCTION_PROMPT_VERSION,
+  buildVobContextVariables,
   buildVobProductionInstructions,
 } from './vob-production-prompt.mjs';
-import { buildVobPipeline } from './vob-pipeline.mjs';
+import { buildVobPipeline, buildVobPipelineModes } from './vob-pipeline.mjs';
 
 // Keep the owner test room on the same media/runtime contract as the real
 // Rise4 payer call.  The prompt compiler above uses Luna to assemble the
@@ -26,6 +27,11 @@ export const VOB_TEST_PROMPTS = Object.freeze([
     id: 'production_guarded',
     label: 'Production VOB caller',
     description: `Exact production caller contract (${VOB_PRODUCTION_PROMPT_VERSION}).`,
+  },
+  {
+    id: 'prompt_only',
+    label: 'Prompt-only iteration',
+    description: 'Same production caller prompt with no extractor, validator, ledger update, or close gate.',
   },
 ]);
 
@@ -80,7 +86,7 @@ function copyRows(rows, limit = 600) {
   }).filter((row) => row.key);
 }
 
-function testDataFromSnapshot(snapshot = {}) {
+function testDataFromSnapshot(snapshot = {}, contextVariables = {}) {
   return {
     requestId: clean(snapshot.requestId, 180) || null,
     payerName: clean(snapshot.payerName, 240) || null,
@@ -88,6 +94,7 @@ function testDataFromSnapshot(snapshot = {}) {
     note: clean(snapshot.note, 800) || null,
     packetFacts: copyRows(snapshot.packetFacts),
     facts: copyRows(snapshot.facts),
+    contextVariables: Object.fromEntries(Object.entries(contextVariables || {}).map(([key, value]) => [clean(key, 200), clean(value, 2000)]).filter(([key]) => key)),
     ledger: (Array.isArray(snapshot.ledger) ? snapshot.ledger : []).slice(0, 100).map((call) => ({
       callId: clean(call?.callId, 180),
       sequence: call?.sequence || null,
@@ -112,10 +119,14 @@ export function normalizeVobTestSettings(input = {}) {
 
 export function buildVobTestInstructions({ snapshot = {}, settings = DEFAULTS } = {}) {
   const normalized = normalizeVobTestSettings(settings);
-  if (normalized.promptPreset !== 'production_guarded') {
-    throw new Error(`unsupported VOB prompt preset: ${normalized.promptPreset}`);
+  const basePrompt = normalized.promptText || VOB_PRODUCTION_INSTRUCTIONS;
+  if (normalized.promptPreset === 'production_guarded') {
+    return `${buildVobProductionInstructions({ snapshot, basePrompt })}\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
   }
-  return `${buildVobProductionInstructions({ snapshot, basePrompt: normalized.promptText || VOB_PRODUCTION_INSTRUCTIONS })}\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
+  if (normalized.promptPreset === 'prompt_only') {
+    return `${basePrompt}\n\nCALL DATA (LIVEKIT CONTEXT VARIABLES ARE INJECTED AT SESSION START)\nUse the authoritative packet values supplied in the LiveKit context block; never claim a supplied member, provider, or call value is unavailable.\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
+  }
+  throw new Error(`unsupported VOB prompt preset: ${normalized.promptPreset}`);
 }
 
 export function vobTestCatalog() {
@@ -139,6 +150,7 @@ export function vobTestCatalog() {
       voice: VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE,
     },
     pipeline: buildVobPipeline(),
+    pipelineModes: buildVobPipelineModes(),
     initialCallState: 'connected_to_live_representative',
     defaults: { ...DEFAULTS },
   };
@@ -148,13 +160,18 @@ export function createVobTestConfig({ testId, sessionId, snapshot, settings, ttl
   const now = Date.now();
   const normalized = normalizeVobTestSettings(settings);
   const catalog = vobTestCatalog();
+  const contextVariables = buildVobContextVariables(snapshot);
+  const pipelineMode = catalog.pipelineModes[normalized.promptPreset] || catalog.pipelineModes.production_guarded;
   return {
     testId: clean(testId, 120),
     sessionId: clean(sessionId, 180),
     settings: normalized,
     productionPrompt: catalog.productionPrompt,
     productionRuntime: catalog.productionRuntime,
-    pipeline: catalog.pipeline,
+    pipeline: pipelineMode.pipeline,
+    pipelineModes: catalog.pipelineModes,
+    pipelineMode: pipelineMode.id,
+    contextVariables,
     promptEditor: {
       version: catalog.productionPrompt.version,
       source: catalog.productionPrompt.source,
@@ -162,10 +179,12 @@ export function createVobTestConfig({ testId, sessionId, snapshot, settings, ttl
       baseText: normalized.promptText || VOB_PRODUCTION_INSTRUCTIONS,
       humanPhaseContext: VOB_HUMAN_PHASE_CONTEXT,
       compiledText: buildVobTestInstructions({ snapshot, settings: normalized }),
+      contextVariables,
+      mode: pipelineMode.id,
       overrideActive: Boolean(normalized.promptText),
     },
     initialCallState: catalog.initialCallState,
-    testData: testDataFromSnapshot(snapshot),
+    testData: testDataFromSnapshot(snapshot, contextVariables),
     instructions: buildVobTestInstructions({ snapshot, settings: normalized }),
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + Math.max(60_000, Number(ttlMs) || 20 * 60 * 1000)).toISOString(),

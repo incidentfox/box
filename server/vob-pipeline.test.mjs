@@ -7,6 +7,7 @@ import {
   RUNTIME_SCHEMA,
   VOB_PIPELINE_VERSION,
   buildVobPipeline,
+  buildVobPipelineModes,
 } from './vob-pipeline.mjs';
 
 const pipeline = buildVobPipeline();
@@ -28,5 +29,16 @@ assert.equal(pipeline.validator.prompt, null);
 assert.equal(pipeline.ledger.prompt, null);
 assert.ok(pipeline.ledger.closeGate.fields.includes('contradictions'));
 assert.equal(JSON.stringify(pipeline).includes('patient'), false);
+
+const modes = buildVobPipelineModes();
+assert.deepEqual(Object.keys(modes), ['production_guarded', 'prompt_only']);
+assert.deepEqual(modes.production_guarded.pipeline, pipeline);
+assert.deepEqual(modes.production_guarded.deterministicStages, ['validator', 'ledger']);
+assert.deepEqual(modes.prompt_only.deterministicStages, []);
+assert.deepEqual(modes.prompt_only.removedStages, ['extractor', 'runtimeEvidence', 'validator', 'ledger']);
+assert.equal(modes.prompt_only.pipeline.caller.title, 'Prompt-only VOB caller');
+assert.deepEqual(Object.keys(modes.prompt_only.pipeline), ['version', 'caller']);
+assert.equal(modes.prompt_only.pipeline.extractor, undefined);
+assert.equal(modes.prompt_only.pipeline.caller.deterministic, false);
 
 console.log('vob pipeline: ok');
