@@ -149,5 +149,7 @@ while true; do
     tunnel_up || { echo "$(date -u +%FT%TZ) starting tunnel ($TUNNEL_MODE)" >>"$TUN_LOG"; start_tunnel; sleep 5; }
     scrape_quick_url
   fi
-  sleep 30
+  # Do not let the child sleep inherit fd 9: otherwise it keeps the singleton
+  # flock alive briefly after systemd restarts the keeper.
+  sleep 30 9>&-
 done
