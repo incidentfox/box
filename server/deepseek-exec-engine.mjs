@@ -18,9 +18,25 @@ import {
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const DEEPSEEK_KEY_ENV = 'BOX_DEEPSEEK_OPENAI_API_KEY';
 const DEEPSEEK_BASE_URL_ENV = 'BOX_DEEPSEEK_OPENAI_BASE_URL';
+// The env var codex itself reads, named by `model_providers.deepseek.env_key` below.
+const DEEPSEEK_PROVIDER_KEY_ENV = 'DEEPSEEK_API_KEY';
 export const DEEPSEEK_MODEL = 'deepseek-v4-flash';
 export const DEEPSEEK_DEFAULT_EFFORT = 'high';
-const DEEPSEEK_EFFORTS = new Set(['low', 'high', 'max']);
+// codex 0.135 only accepts these reasoning-effort values; `max` is rejected by its model cache.
+const DEEPSEEK_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
+
+// OPENAI_BASE_URL alone does NOT redirect codex when the box is signed in to a ChatGPT
+// account — codex keeps using that account and rejects the model ("The 'deepseek-v4-flash'
+// model is not supported when using Codex with a ChatGPT account"). Declaring an explicit
+// provider is what actually routes the request to DeepSeek. `wire_api` must be "responses":
+// codex 0.135 dropped support for "chat", and DeepSeek serves the responses API.
+const DEEPSEEK_PROVIDER_CONFIG = [
+  '-c', 'model_provider="deepseek"',
+  '-c', 'model_providers.deepseek.name="DeepSeek"',
+  '-c', `model_providers.deepseek.base_url="${DEEPSEEK_BASE_URL}"`,
+  '-c', `model_providers.deepseek.env_key="${DEEPSEEK_PROVIDER_KEY_ENV}"`,
+  '-c', 'model_providers.deepseek.wire_api="responses"',
+];
 
 // The owner Codex wrapper deliberately unsets OPENAI_API_KEY so ChatGPT-backed
 // sessions cannot accidentally spend metered API credits. DeepSeek is the
@@ -29,7 +45,7 @@ const DEEPSEEK_EFFORTS = new Set(['low', 'high', 'max']);
 // then restore the DeepSeek values immediately before launching Codex.
 export function buildDeepSeekCodexScript(envFile = '') {
   const sourceEnv = envFile ? `[ -f ${JSON.stringify(envFile)} ] && . ${JSON.stringify(envFile)}; ` : '';
-  return `${sourceEnv}export OPENAI_BASE_URL="$${DEEPSEEK_BASE_URL_ENV}"; export OPENAI_API_KEY="$${DEEPSEEK_KEY_ENV}"; unset ${DEEPSEEK_BASE_URL_ENV} ${DEEPSEEK_KEY_ENV} CODEX_API_KEY; exec codex "$@"`;
+  return `${sourceEnv}export OPENAI_BASE_URL="$${DEEPSEEK_BASE_URL_ENV}"; export OPENAI_API_KEY="$${DEEPSEEK_KEY_ENV}"; export ${DEEPSEEK_PROVIDER_KEY_ENV}="$${DEEPSEEK_KEY_ENV}"; unset ${DEEPSEEK_BASE_URL_ENV} ${DEEPSEEK_KEY_ENV} CODEX_API_KEY; exec codex "$@"`;
 }
 
 export function normalizeDeepSeekSettings(settings = {}) {
@@ -45,7 +61,7 @@ export class DeepSeekExecEngine {
   }
 
   run({ sessionId, cwd, prompt, images = [], settings = {}, apiKey = '', onEvent }) {
-    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings: normalizeDeepSeekSettings(settings) });
+    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings: normalizeDeepSeekSettings(settings), extraConfig: DEEPSEEK_PROVIDER_CONFIG });
     const envFile = process.env.CODEX_ENV_FILE;
     const script = buildDeepSeekCodexScript(envFile);
 
@@ -60,6 +76,7 @@ export class DeepSeekExecEngine {
         OPENAI_API_KEY: String(apiKey || ''),
         [DEEPSEEK_BASE_URL_ENV]: DEEPSEEK_BASE_URL,
         [DEEPSEEK_KEY_ENV]: String(apiKey || ''),
+        [DEEPSEEK_PROVIDER_KEY_ENV]: String(apiKey || ''),
       },
     });
 

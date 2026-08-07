@@ -85,10 +85,14 @@ export function reasoningHeartbeat(o) {
 // prompt from stdin... No prompt provided via stdin", exits before emitting `thread.started`,
 // and the box never learns the session id — so an image message silently disappears from the
 // chat list. Positionals first, variadic `-i …` last (end-of-args terminates the list).
-export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings = {} } = {}) {
+export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings = {}, extraConfig = [] } = {}) {
   const imageArgs = (images || []).flatMap((image) => ['-i', image]);
   const cfgArgs = [];
   if (settings.model) cfgArgs.push('--model', settings.model);
+  // Caller-supplied `-c key=value` pairs (e.g. the DeepSeek engine pointing codex at a
+  // non-OpenAI provider). They ride with the other config flags, which are accepted on
+  // both `exec` and `exec resume`.
+  cfgArgs.push(...extraConfig);
   if (settings.reasoningEffort) cfgArgs.push('-c', `model_reasoning_effort="${settings.reasoningEffort}"`);
   if (settings.serviceTier === 'fast') cfgArgs.push('-c', 'service_tier="fast"', '-c', 'features.fast_mode=true');
   if (['friendly', 'pragmatic', 'none'].includes(settings.personality)) cfgArgs.push('-c', `personality="${settings.personality}"`);
