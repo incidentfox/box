@@ -3,6 +3,7 @@ import { claudeModelContextWindow, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } 
 
 assert.equal(DEFAULT_CLAUDE_MODEL, 'claude-opus-5[1m]');
 assert.equal(normalizeClaudeModel(), DEFAULT_CLAUDE_MODEL);
+assert.equal(normalizeClaudeModel('opus'), DEFAULT_CLAUDE_MODEL);
 assert.equal(normalizeClaudeModel('claude-opus-5'), DEFAULT_CLAUDE_MODEL);
 assert.equal(normalizeClaudeModel('claude-opus-5[1m]'), DEFAULT_CLAUDE_MODEL);
 assert.equal(normalizeClaudeModel('sonnet'), 'sonnet');
