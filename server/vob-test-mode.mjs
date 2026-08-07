@@ -1,5 +1,6 @@
 import {
   VOB_PRODUCTION_MODEL,
+  VOB_PRODUCTION_CALLER,
   VOB_PRODUCTION_INSTRUCTIONS,
   VOB_PRODUCTION_PROMPT_SOURCE,
   VOB_PRODUCTION_PROMPT_VERSION,
@@ -25,13 +26,13 @@ export const VOB_LIVEKIT_PRODUCTION_CARTESIA_VOICE = '9626c31c-bec5-4cca-baa8-f8
 export const VOB_TEST_PROMPTS = Object.freeze([
   {
     id: 'production_guarded',
-    label: 'Production VOB caller',
-    description: `Exact production caller contract (${VOB_PRODUCTION_PROMPT_VERSION}).`,
+    label: 'Production guarded',
+    description: `Exact production caller contract (${VOB_PRODUCTION_PROMPT_VERSION}) plus extractor, validator, ledger, and close gate.`,
   },
   {
     id: 'prompt_only',
     label: 'Prompt-only iteration',
-    description: 'Same production caller prompt with no extractor, validator, ledger update, or close gate.',
+    description: 'Same production caller prompt and packet context; no extractor, validator, ledger update, or close gate.',
   },
 ]);
 
@@ -58,7 +59,7 @@ export const VOB_HUMAN_PHASE_CONTEXT = `CONNECTED TO LIVE REPRESENTATIVE
 - Treat IVR routing and hold/queue audio as already completed for this call.
 - Do not navigate an IVR, say the IVR reason phrase "eligibility and benefits," or ask the representative to transfer you.
 - A live payer representative has just answered. You are the same provider-side caller at the start of the live-representative phase.
-- On your first turn, introduce yourself and state the packet-grounded purpose in one concise sentence. Then wait for the representative's response.
+- On your first turn, introduce yourself using the caller identity in the packet (normally Jessica A when no case override is present) and state the packet-grounded purpose in one concise sentence. Then wait for the representative's response.
 - Continue with the production LIVE REPRESENTATIVE rules and unresolved evidence ledger fields, one question at a time.`;
 
 const DEFAULTS = Object.freeze({
@@ -124,7 +125,7 @@ export function buildVobTestInstructions({ snapshot = {}, settings = DEFAULTS } 
     return `${buildVobProductionInstructions({ snapshot, basePrompt })}\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
   }
   if (normalized.promptPreset === 'prompt_only') {
-    return `${basePrompt}\n\nCALL DATA (LIVEKIT CONTEXT VARIABLES ARE INJECTED AT SESSION START)\nUse the authoritative packet values supplied in the LiveKit context block; never claim a supplied member, provider, or call value is unavailable.\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
+    return `${basePrompt}\n\nCALL DATA (LIVEKIT CONTEXT VARIABLES ARE INJECTED AT SESSION START)\nUse the authoritative packet values supplied in the LiveKit context block; never claim a supplied member, provider, or call value is unavailable. The caller identity is authoritative too: introduce yourself as the supplied caller (normally Jessica A when no case override is present).\n\nCALL STATE AT CONNECT\n${VOB_HUMAN_PHASE_CONTEXT}`;
   }
   throw new Error(`unsupported VOB prompt preset: ${normalized.promptPreset}`);
 }
@@ -140,6 +141,7 @@ export function vobTestCatalog() {
       model: VOB_PRODUCTION_MODEL,
       baseText: VOB_PRODUCTION_INSTRUCTIONS,
     },
+    productionCaller: { ...VOB_PRODUCTION_CALLER },
     productionRuntime: {
       llmProvider: 'livekit-inference',
       model: VOB_LIVEKIT_PRODUCTION_MODEL,
@@ -167,6 +169,7 @@ export function createVobTestConfig({ testId, sessionId, snapshot, settings, ttl
     sessionId: clean(sessionId, 180),
     settings: normalized,
     productionPrompt: catalog.productionPrompt,
+    productionCaller: catalog.productionCaller,
     productionRuntime: catalog.productionRuntime,
     pipeline: pipelineMode.pipeline,
     pipelineModes: catalog.pipelineModes,

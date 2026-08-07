@@ -58,7 +58,7 @@
           <div class="vobTestActions"><span class="vobTestStatus" data-vob-test-status>Ready to start</span><button type="button" class="vobClose" data-vob-test-close>Cancel</button><button type="submit" class="vobTestPrimary">Start human-phase test</button></div>
         </form>
         <section class="vobTestCall hidden" data-vob-test-call>
-          <div class="vobTestCallHead"><div><strong>Live production caller</strong><span class="vobTestStatus" data-vob-test-live-status>Connecting…</span></div><button type="button" class="vobClose" data-vob-test-end>End test</button></div>
+          <div class="vobTestCallHead"><div class="vobTestLiveHeadCopy"><div class="vobTestLiveHeadTitle"><strong>Live production caller</strong><span class="vobTestLaneBadge" data-vob-test-live-lane>PRODUCTION GUARDED</span></div><span class="vobTestStatus" data-vob-test-live-status>Connecting…</span><small data-vob-test-live-contract>Same production prompt · deterministic guardrails on</small></div><button type="button" class="vobClose" data-vob-test-end>End test</button></div>
           <div class="vobTestCallBody"><div class="vobTestTranscript" data-vob-test-transcript aria-live="polite"><div class="vobTestEmpty">Say hello as the insurance representative to begin.</div></div><aside class="vobTestInspector" data-vob-test-inspector><div class="vobTestEmpty">Loading test context…</div></aside></div>
           <div class="vobTestCallFoot"><span class="vobTestTimer" data-vob-test-timer>0:00</span><span class="vobTestHint">You are the live insurance representative.</span><button type="button" class="vobClose" data-vob-test-mute>Mute mic</button></div>
         </section>
@@ -68,6 +68,24 @@
 
   function configValue(value, fallback = '—') {
     return value == null || value === '' ? fallback : String(value);
+  }
+
+  function laneInfo(config = {}) {
+    const promptOnly = config.pipelineMode === 'prompt_only' || config.settings?.promptPreset === 'prompt_only';
+    return promptOnly
+      ? { id: 'prompt_only', label: 'PROMPT-ONLY', description: 'Same production prompt + packet context; deterministic extractor, validator, ledger, and close gate are off.' }
+      : { id: 'production_guarded', label: 'PRODUCTION GUARDED', description: 'Same production prompt + packet context with deterministic extractor, validator, ledger, and close gate on.' };
+  }
+
+  function updateLiveLaneHeader(config) {
+    const lane = laneInfo(config || {});
+    const badge = document.querySelector('[data-vob-test-live-lane]');
+    const contract = document.querySelector('[data-vob-test-live-contract]');
+    if (badge) {
+      badge.textContent = lane.label;
+      badge.classList.toggle('promptOnly', lane.id === 'prompt_only');
+    }
+    if (contract) contract.textContent = lane.description;
   }
 
   function configRows(rows, empty = 'No values available.') {
@@ -117,13 +135,16 @@
     const target = document.querySelector('[data-vob-test-inspector]');
     if (!target) return;
     if (!config) { target.innerHTML = '<div class="vobTestEmpty">Test context is not available yet.</div>'; return; }
+    updateLiveLaneHeader(config);
+    const lane = laneInfo(config);
     const runtime = config.productionRuntime || {};
     const settings = config.settings || {};
     const data = config.testData || {};
+    const caller = config.productionCaller || {};
     const contextVariables = config.contextVariables || data.contextVariables || {};
     const contextRows = Object.entries(contextVariables).map(([key, value]) => ({ key, value, status: 'LiveKit context' }));
     const runtimeRows = [
-      ['Lane', config.pipelineMode === 'prompt_only' || settings.promptPreset === 'prompt_only' ? 'Prompt-only iteration' : 'Production guarded'],
+      ['Lane', `${lane.label} — ${lane.description}`],
       ['Prompt', config.productionPrompt?.label || config.productionPrompt?.id || configValue(settings.promptPreset)],
       ['Prompt source', config.productionPrompt?.source || 'production'],
       ['LLM', `${runtime.llmProvider || 'livekit'} / ${runtime.llmModel || runtime.model || configValue(settings.model)}`],
@@ -141,14 +162,16 @@
     const promptMeta = [
       ['Version', promptEditor.version || config.productionPrompt?.version || '—'],
       ['Source', promptEditor.source || config.productionPrompt?.source || 'production'],
-      ['Lane', `${config.pipelineMode === 'prompt_only' ? 'prompt-only iteration' : 'production guarded'}${promptEditor.overrideActive ? ' · private override' : ''}`],
+      ['Lane', `${lane.label}${promptEditor.overrideActive ? ' · private override' : ''}`],
     ].map(([key, value]) => `<span><b>${escapeHtml(key)}</b> ${escapeHtml(value)}</span>`).join('');
     const callsMarkup = calls.length ? calls.map((call) => {
       const fields = Array.isArray(call.fields) ? call.fields : [];
       const fieldRows = fields.length ? configRows(fields) : configRows((call.focusFields || []).map((key) => ({ key, value: null, status: 'pending' })));
       return `<article class="vobTestLedgerCard"><div class="vobTestLedgerHead"><div><code>${escapeHtml(call.callId || 'call')}</code><span>${escapeHtml(call.kind || 'call')} · #${escapeHtml(call.sequence || '—')}</span></div><em>${escapeHtml(call.attemptStatus || 'pending')}</em></div>${fieldRows}</article>`;
     }).join('') : '<div class="vobTestEmpty">No ledger calls are recorded for this case.</div>';
+    const callerName = caller.fullName || contextVariables.caller_full_name || `${contextVariables.caller_first_name || 'Jessica'} ${contextVariables.caller_last_initial || 'A'}`;
     target.innerHTML = `<div class="vobTestInspectorHead"><div><strong>Test lane context</strong><span>read-only case snapshot · refreshes on demand</span></div><button type="button" class="vobClose" data-vob-test-refresh>Refresh</button></div>
+      <div class="vobTestLaneSummary"><strong>ACTIVE TEST LANE · ${escapeHtml(lane.label)}</strong><span>${escapeHtml(lane.description)}</span><span>Caller identity: <b>${escapeHtml(callerName)}</b> · live phase starts after IVR and hold</span></div>
       ${configSection('Production configuration', configRows(runtimeRows.map((row) => ({ ...row, key: row.key, value: row.value }))))}
       ${configSection('Current prompt / private test override', `<div class="vobPromptMeta">${promptMeta}</div><label class="vobTestPrompt">Private test prompt<small>Production calls are unchanged. Restart the test room to apply edits.</small><textarea class="vobPromptEditor" name="promptText" rows="18">${escapeHtml(promptText)}</textarea></label><details class="vobPromptCompiled"><summary>Compiled prompt with packet context</summary><textarea class="vobPromptCompiledText" readonly rows="12">${escapeHtml(compiledPrompt)}</textarea></details><button type="button" class="vobClose" data-vob-test-reset-prompt>Reset to production prompt</button>`, true)}
       ${configSection('Packet / dynamic variables', configRows(packetFacts), true)}
@@ -156,7 +179,7 @@
       ${configSection('Ledger fields and captured answers', `<div class="vobTestLedgerCards">${callsMarkup}</div>`, true)}
       ${configSection('Answers / extracted facts', configRows(facts), false)}
       ${pipelineMarkup(config.pipeline, config.pipelineModes)}
-      ${configSection('Current test settings', `<div class="vobTestSettings"><label>Prompt<select name="promptPreset">${optionsHtml(state.catalog?.prompts, settings.promptPreset, true)}</select></label><label>Model<select name="model">${optionsHtml(state.catalog?.models, settings.model, true)}</select></label><label>Voice<select name="voice">${optionsHtml(state.catalog?.voices, settings.voice, true)}</select></label><div class="vobTestConfigNote">Changes apply when the test room restarts. Runtime stays on the production Gemma / Flux / Cartesia contract.</div><button type="button" class="vobTestPrimary" data-vob-test-restart>Restart with settings</button></div>`, false)}`;
+      ${configSection('Current test settings', `<div class="vobTestSettings"><label>Prompt<select name="promptPreset">${optionsHtml(state.catalog?.prompts, settings.promptPreset, true)}</select></label><label>Model<select name="model">${optionsHtml(state.catalog?.models, settings.model, true)}</select></label><label>Voice<select name="voice">${optionsHtml(state.catalog?.voices, settings.voice, true)}</select></label><div class="vobTestConfigNote">Changes apply when the test room restarts. Model and voice are production-pinned audit values; the lane selector is the only pipeline choice.</div><button type="button" class="vobTestPrimary" data-vob-test-restart>Restart with settings</button></div>`, false)}`;
   }
 
   async function refreshTestConfig() {
