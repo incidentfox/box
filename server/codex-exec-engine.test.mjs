@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import {
   buildCodexArgs,
+  buildOwnerCodexConfigArgs,
   buildOwnerCodexEnv,
   buildOwnerCodexScript,
   CodexExecEngine,
@@ -15,6 +16,11 @@ import {
 
 // Helper: index of the LAST `-i` flag, and the positions of the positionals.
 const lastImageFlagIdx = (a) => a.lastIndexOf('-i');
+
+// Box owner turns suppress the redundant global sessiongrep MCP by default without changing
+// terminal Codex or isolated team sandboxes. Operators can explicitly opt it back in.
+assert.deepEqual(buildOwnerCodexConfigArgs({}), ['-c', 'mcp_servers.sessiongrep.enabled=false']);
+assert.deepEqual(buildOwnerCodexConfigArgs({ BOX_SESSIONGREP_MCP: 'on' }), []);
 
 // 1. NEW turn with a prompt + images: the prompt must come BEFORE every `-i`, and the trailing
 //    `-i …` must be the end of the argv (nothing after the last image to be eaten).
@@ -162,9 +168,10 @@ assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_m
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = () => true;
+  let spawnArgs = null;
   let spawnOptions = null;
   const events = [];
-  const engine = new CodexExecEngine({ spawnImpl: (_cmd, _args, options) => { spawnOptions = options; return child; } });
+  const engine = new CodexExecEngine({ spawnImpl: (_cmd, args, options) => { spawnArgs = args; spawnOptions = options; return child; } });
   engine.run({ cwd: '/work', prompt: 'finish once', onEvent: (event) => events.push(event) });
   child.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })}\n`);
   child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } })}\n`);
@@ -172,6 +179,7 @@ assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_m
   assert.deepEqual(events.map((event) => event.type), ['text', 'context', 'turn_end']);
   assert.equal(events.at(-1).status, 'completed');
   assert.equal(spawnOptions.detached, process.platform !== 'win32');
+  assert.ok(spawnArgs.includes('mcp_servers.sessiongrep.enabled=false'), 'owner turn disables sessiongrep MCP');
 }
 
 {

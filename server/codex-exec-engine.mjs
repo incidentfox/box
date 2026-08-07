@@ -21,6 +21,16 @@ export function buildOwnerCodexScript(envFile = '') {
   return `${sourceEnv}unset OPENAI_API_KEY CODEX_API_KEY; exec codex "$@"`;
 }
 
+// Box already exposes session history through its own bounded `sessiongrep` CLI route. Starting
+// the separate sessiongrep MCP server inside every owner Codex turn is redundant, and leaked MCP
+// processes have been observed consuming multiple gigabytes before the kernel kills them. Disable
+// that one global MCP entry for Box-owned turns only; terminal Codex sessions remain unchanged.
+// Self-hosters who explicitly need the MCP tools inside Box can opt back in.
+export function buildOwnerCodexConfigArgs(base = process.env) {
+  const enabled = /^(1|true|yes|on)$/i.test(String(base.BOX_SESSIONGREP_MCP || '').trim());
+  return enabled ? [] : ['-c', 'mcp_servers.sessiongrep.enabled=false'];
+}
+
 function summarizeCommand(command) {
   return String(command || '').replace(/\s+/g, ' ').slice(0, 120);
 }
@@ -125,7 +135,10 @@ export class CodexExecEngine {
   }
 
   run({ sessionId, cwd, prompt, images = [], settings = {}, guest = false, team = false, teamWorkspace = '', teamEnv = {}, teamUser = '', onEvent }) {
-    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings });
+    // Team sandboxes carry their own explicit Codex configuration. Only owner/guest turns inherit
+    // the host's global sessiongrep MCP entry and need the Box-specific override.
+    const extraConfig = team ? [] : buildOwnerCodexConfigArgs();
+    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings, extraConfig });
 
     // Optionally source an env file before codex (set CODEX_ENV_FILE). Owner turns then
     // discard metered API credentials so Codex uses the current file-backed login.

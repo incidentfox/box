@@ -165,6 +165,7 @@ respawns it):
 | `CC_WORKSPACE` | Install-time fallback for the default directory new chats open in. You can override this later in the app's Settings sheet. |
 | `OWNER_NAME` | Your name, used in the per-session morning brief. |
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
+| `BOX_SESSIONGREP_MCP` | Set to `on` only to opt Box Codex turns into the global sessiongrep MCP; Box disables it by default because its built-in search is bounded and avoids one helper per turn. |
 | `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). Set either or both; `STT_ENGINE` picks which leads. |
 | `STT_ENGINE` | `eleven` (default — best accuracy, the only one that transcribes Mandarin) or `deepgram` (~3x faster, English only in practice). |
 | `LINEAR_TEAM_KEY` + `NEEDS_LABEL` | Name the local Board's tickets + the "needs you" label. The Board works with no Linear account (local SQLite clone) by default. |
