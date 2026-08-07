@@ -13,7 +13,7 @@ import {
   VOB_PRODUCTION_INSTRUCTIONS,
   buildVobProductionInstructions,
 } from './vob-production-prompt.mjs';
-import { buildVobPipeline } from './vob-pipeline.mjs';
+import { buildVobPipeline, buildVobPipelineModes } from './vob-pipeline.mjs';
 
 // VOB operator artifacts are deliberately kept outside the Box checkout.  This
 // module is the narrow, read-only bridge between those artifacts and the owner-only
@@ -645,6 +645,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
       compiledText: buildVobProductionInstructions({ snapshot }),
     };
     snapshot.pipeline = buildVobPipeline();
+    snapshot.pipelineModes = buildVobPipelineModes();
   }
   return snapshot;
 }

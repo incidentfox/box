@@ -164,3 +164,37 @@ export function buildVobPipeline() {
     }),
   });
 }
+
+// The guarded pipeline remains the production default. Prompt-only is an
+// intentionally small experimentation lane: it runs the same caller prompt
+// in LiveKit, but leaves post-call extraction, validation, evidence, and
+// completion decisions out of the loop so an owner can iterate quickly.
+export function buildVobPipelineModes() {
+  const guarded = buildVobPipeline();
+  return {
+    production_guarded: {
+      id: 'production_guarded',
+      label: 'Production guarded',
+      description: 'Production caller with deterministic evidence validation, ledger updates, and the close gate.',
+      deterministicStages: ['validator', 'ledger'],
+      pipeline: guarded,
+    },
+    prompt_only: {
+      id: 'prompt_only',
+      label: 'Prompt-only iteration',
+      description: 'One production caller prompt in a test lane; no extractor, validator, ledger update, or close gate.',
+      deterministicStages: [],
+      removedStages: ['extractor', 'runtimeEvidence', 'validator', 'ledger'],
+      pipeline: {
+        version: 'rise4-vob-prompt-only-2026-08-07.v1',
+        caller: {
+          id: 'caller',
+          title: 'Prompt-only VOB caller',
+          kind: 'livekit_llm',
+          deterministic: false,
+          explanation: 'The same production caller prompt runs as a single LiveKit conversation; no deterministic postprocessor runs.',
+        },
+      },
+    },
+  };
+}

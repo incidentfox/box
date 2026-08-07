@@ -1640,6 +1640,12 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .vobTestSettings textarea { min-height: 64px; resize: vertical; line-height: 1.3; }
 .vobTestSettings button { justify-self: start; }
 .vobPipelineSection { display: grid; gap: 10px; }
+.vobPipelineMode { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.vobPipelineModeHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.vobPipelineModeHead > div { min-width: 0; }
+.vobPipelineModeHead strong { display: block; color: var(--ink); font-size: 13px; }
+.vobPipelineModeHead p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.vobPipelineRemoved { margin-top: 9px; padding: 7px 9px; border: 1px solid rgba(255, 153, 102, .28); border-radius: 8px; color: var(--muted); background: rgba(255, 153, 102, .06); font-size: 11px; line-height: 1.35; }
 .vobPipelineIntro { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; line-height: 1.35; }
 .vobPipelineIntro span { min-width: 0; overflow-wrap: anywhere; }
 .vobPipelineIntro b { color: var(--ink); }

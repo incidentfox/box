@@ -63,6 +63,22 @@ def vob_test_id_from_context(ctx: JobContext, metadata: dict[str, Any] | None = 
     return ""
 
 
+def livekit_context_variable_block(values: Any) -> str:
+    """Render the short-lived case packet as explicit LiveKit context."""
+    if not isinstance(values, dict):
+        return ""
+    rows = []
+    for key, value in values.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        text = str(value if value is not None else "").strip() or "not provided"
+        rows.append(f"{name}: {text}")
+    if not rows:
+        return ""
+    return "\n\nLIVEKIT CONTEXT VARIABLES (AUTHORITATIVE CALL PACKET)\n" + "\n".join(rows)
+
+
 async def fetch_vob_test_config(runtime: "RuntimeConfig", test_id: str) -> dict[str, Any]:
     if not test_id:
         raise RuntimeError("VOB test room is missing its test id")
@@ -514,7 +530,15 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_handling=turn_handling_options(allow_interruptions=True),
         )
         wire_vob_transcripts(session, ctx.room)
-        await session.start(agent=VobProductionAgent(str(config["instructions"])), room=ctx.room)
+        instructions = str(config["instructions"])
+        settings = config.get("settings") if isinstance(config.get("settings"), dict) else {}
+        # Prompt-only test rooms receive the packet through a LiveKit-style
+        # context block at session start. The guarded lane already contains its
+        # compiled CALL DATA/EVIDENCE LEDGER snapshot and stays byte-for-byte
+        # compatible with the production caller contract.
+        if settings.get("promptPreset") == "prompt_only":
+            instructions += livekit_context_variable_block(config.get("contextVariables"))
+        await session.start(agent=VobProductionAgent(instructions), room=ctx.room)
         await ctx.connect()
         await publish_vob_event(ctx.room, {"type": "status", "status": "agent_ready"})
         # The owner is standing in for the representative. Let them deliver the
