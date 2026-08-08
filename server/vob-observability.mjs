@@ -534,6 +534,32 @@ function flattenPacket(value, prefix = '', rows = [], sourceCallId = '', depth =
   return rows;
 }
 
+/**
+ * The payer-verified benefits the EDI eligibility check obtained before dialling.
+ *
+ * These are the answers we already hold, and until now the console did not know
+ * they existed: a case with seven confirmed benefits read "No answers recorded
+ * yet", because every fact on this page came from call transcripts. The operator
+ * writes them onto the packet as rendered display lines, so this reads the most
+ * recent packet that has them rather than re-deriving anything.
+ */
+function eligibilityForCalls(caseDir, calls) {
+  for (const call of [...calls].reverse()) {
+    const path = packetPathForCall(caseDir, call);
+    if (!path) continue;
+    const packet = jsonFile(path);
+    const eligibility = packet?.eligibility;
+    if (!eligibility || typeof eligibility !== 'object') continue;
+    const verified = (Array.isArray(eligibility.verified) ? eligibility.verified : [])
+      .map((line) => String(line || '').trim().slice(0, 240))
+      .filter(Boolean)
+      .slice(0, 60);
+    if (!verified.length) continue;
+    return { checkedAt: String(eligibility.checkedAt || '').slice(0, 40) || null, verified };
+  }
+  return null;
+}
+
 function packetFactsForCalls(caseDir, calls) {
   const rows = [];
   for (const call of calls) {
@@ -624,6 +650,7 @@ export function buildVobSnapshot({ sessionId, session = null, root = DEFAULT_VOB
     status: result.status || (live ? 'in_progress' : attempts.length ? 'observed' : 'pending'),
     note: String(result.note || '').slice(0, 800) || null,
     ledger: cumulativeLedger ? [cumulativeLedger] : [],
+    eligibility: eligibilityForCalls(caseDir, calls),
     facts: factRows,
     ...(includePacketFacts ? { packetFacts } : {}),
     attempts,
