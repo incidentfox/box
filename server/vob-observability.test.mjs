@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { buildVobSnapshot, classifyEvents, findVobCase, resolveVobAudio } from './vob-observability.mjs';
 import { VOB_PRODUCTION_PROMPT_SOURCE, VOB_PRODUCTION_PROMPT_VERSION } from './vob-production-prompt.mjs';
-import { VOB_PIPELINE_VERSION } from './vob-pipeline.mjs';
+import { VOB_PIPELINE_VERSION, buildVobPipeline } from './vob-pipeline.mjs';
 
 const event = (at, type, extra = {}) => JSON.stringify({ at, type, ...extra });
 
@@ -218,4 +218,53 @@ test('resolves nested and legacy session artifacts and backfills result-only led
     rmSync(root, { recursive: true, force: true });
     rmSync(legacyRoot, { recursive: true, force: true });
   }
+});
+
+test('surfaces payer-verified eligibility benefits without waiting for a call', () => {
+  // The case that motivated this: seven benefits confirmed by the payer's own
+  // 271 before the first call connected, and a console that read "No answers
+  // recorded yet" because every fact on the page came from a transcript.
+  const root = mkdtempSync(join(tmpdir(), 'box-vob-eligibility-'));
+  const caseDir = join(root, 'case-fixture');
+  const packetDir = join(root, 'packets', 'call-1');
+  try {
+    mkdirSync(caseDir, { recursive: true });
+    mkdirSync(packetDir, { recursive: true });
+    writeFileSync(join(caseDir, 'operator-context.private.json'), JSON.stringify({ sessionId: 'eligibility-session' }));
+    writeFileSync(join(caseDir, 'operator-owner.private.json'), JSON.stringify({ sessionId: 'eligibility-session' }));
+    writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({
+      calls: [{ callId: 'livekit_eligibility-call', packetPath: '../packets/call-1/packet.private.json' }],
+    }));
+    writeFileSync(join(caseDir, 'operator-result.private.json'), JSON.stringify({}));
+    writeFileSync(join(packetDir, 'packet.private.json'), JSON.stringify({
+      patient: { memberId: 'ELIG-1' },
+      eligibility: { checkedAt: '2026-08-07T23:38:34.499Z', verified: ['Coverage: active', 'Copay: $30'] },
+    }));
+
+    // No packet read is requested here: benefits must not depend on the
+    // includePacketFacts debug flag the way the raw packet dump does.
+    const snapshot = buildVobSnapshot({ sessionId: 'eligibility-session', session: { cwd: caseDir }, root });
+    assert.equal(snapshot.eligibility.checkedAt, '2026-08-07T23:38:34.499Z');
+    assert.deepEqual(snapshot.eligibility.verified, ['Coverage: active', 'Copay: $30']);
+
+    // A packet outside the allowed roots is still refused; benefits are read
+    // through the same guarded path as every other packet field.
+    writeFileSync(join(caseDir, 'operator-ledger.private.json'), JSON.stringify({
+      calls: [{ callId: 'livekit_eligibility-call', packetPath: '/tmp/packet-outside-case.json' }],
+    }));
+    assert.equal(buildVobSnapshot({ sessionId: 'eligibility-session', session: { cwd: caseDir }, root }).eligibility, null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the pipeline description names the eligibility and merge stages that actually run', () => {
+  // The console described a call-only pipeline for a system whose first step is
+  // now a deterministic X12 270. A stale architecture diagram is worse than
+  // none: it is read as fact.
+  const pipeline = buildVobPipeline();
+  assert.equal(pipeline.eligibility.kind, 'deterministic');
+  assert.match(pipeline.eligibility.title, /270\/271/);
+  assert.equal(pipeline.merge.kind, 'deterministic');
+  assert.ok(pipeline.merge.rules.some((rule) => /union, never replace/i.test(rule)));
 });
