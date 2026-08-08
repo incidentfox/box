@@ -2880,19 +2880,114 @@ function vobPipelineStageMarkup(stage, open = false) {
   const output = stage.output ? `<div class="vobPipelineMeta"><span><b>Output</b> ${esc(stage.output.name || 'structured output')} · ${stage.output.strict ? 'strict schema' : 'schema'}</span></div>` : '';
   return `<details class="vobPipelineCard"${open ? ' open' : ''}><summary><span><strong>${esc(stage.title || 'Pipeline stage')}</strong><small>${esc(stage.kind || '')}</small></span><em class="vobPipelineBadge ${isLlm ? 'llm' : 'deterministic'}">${isLlm ? 'LLM' : 'CODE'}</em></summary><div class="vobPipelineCardBody"><div class="vobPipelineMeta"><span><b>Source</b> ${esc(stage.source || '—')}</span>${stage.model ? `<span><b>Model</b> ${esc(stage.model)}</span>` : ''}${stage.controlModel ? `<span><b>Control model</b> ${esc(stage.controlModel)}</span>` : ''}${stage.mediaModel ? `<span><b>Media model</b> ${esc(stage.mediaModel)}</span>` : ''}${stage.mediaContract ? `<span><b>Media</b> ${esc(stage.mediaContract)}</span>` : ''}${stage.promptRef ? `<span><b>Prompt</b> ${esc(stage.promptRef.version || 'production')} · ${esc(stage.promptRef.source || '')}</span>` : ''}</div><p class="vobPipelineExplain">${esc(stage.explanation || '')}</p>${noPrompt}${output}${prompt}${schema}${rules}${statuses}${closeGate}</div></details>`;
 }
+// The observability page describes what production actually ran. The prompt-only
+// lane is a setting on the test modal, not a thing that happened to this case, so
+// showing it here as a co-equal mode made every case look like it had two
+// pipelines. Only the guarded pipeline is described, and it is folded away.
 function vobPipelineMarkup(pipeline, pipelineModes) {
-  const modes = Object.values(pipelineModes || {}).length
-    ? Object.values(pipelineModes)
-    : (pipeline ? [{ id: 'current', label: 'Current pipeline', description: '', pipeline }] : []);
-  if (!modes.length) return '';
-  const cards = modes.map((mode, modeIndex) => {
-    const current = mode.pipeline || mode;
-    const stages = [current.caller, current.extractor, current.runtimeEvidence, current.validator, current.ledger].filter(Boolean);
-    const removed = Array.isArray(mode.removedStages) && mode.removedStages.length
-      ? `<div class="vobPipelineRemoved"><b>Not run:</b> ${esc(mode.removedStages.join(' · '))}</div>` : '';
-    return `<article class="vobPipelineMode"><div class="vobPipelineModeHead"><div><strong>${esc(mode.label || mode.id || 'Pipeline')}</strong><p>${esc(mode.description || '')}</p></div><span class="vobPill">${esc((mode.deterministicStages || []).length ? 'guarded' : 'prompt only')}</span></div><div class="vobPipelineIntro"><span><b>Version</b> ${esc(current.version || '—')}</span><span>${(mode.deterministicStages || []).length ? 'LLM proposals are validated before evidence can close.' : 'One LiveKit caller prompt; no deterministic postprocessor runs.'}</span></div>${removed}<div class="vobPipelineGrid">${stages.map((stage, index) => vobPipelineStageMarkup(stage, modeIndex === 0 && index < 2)).join('')}</div></article>`;
-  }).join('');
-  return `<section class="vobSection vobPipelineSection"><div class="vobSectionTitle">Decision pipeline modes <span class="vobMeta">production guardrails and the prompt-only test lane</span></div>${cards}</section>`;
+  const current = pipeline || pipelineModes?.production_guarded?.pipeline;
+  if (!current) return '';
+  const stages = [current.eligibility, current.caller, current.extractor, current.runtimeEvidence, current.merge, current.validator, current.ledger].filter(Boolean);
+  if (!stages.length) return '';
+  return `<div class="vobPipelineIntro"><span><b>Pipeline</b> ${esc(current.version || '—')}</span><span>Every model proposal is validated by deterministic code before it can become an answer.</span></div><div class="vobPipelineGrid">${stages.map((stage) => vobPipelineStageMarkup(stage, false)).join('')}</div>`;
+}
+// Ledger keys are engineering identifiers. `benefit.individual_deductible_total`
+// is precise and unreadable; the raw key stays as a tooltip for when it matters.
+//
+// These names deliberately match the ones the eligibility step renders, so a
+// benefit obtained from the payer's 271 and the same benefit confirmed by a
+// representative collapse into one row instead of appearing twice under two
+// spellings.
+const VOB_FIELD_LABELS = {
+  'plan.status': 'Coverage',
+  'plan.type': 'Plan type',
+  'plan.year_basis': 'Plan year',
+  'plan.effective_date': 'Effective date',
+  'plan.termination_date': 'Termination date',
+  'plan.referral_required': 'Referral required',
+  'plan.cob': 'Coordination of benefits',
+  'provider.network': 'Network',
+  'benefit.copay': 'Copay',
+  'benefit.copay_cadence': 'Copay cadence',
+  'benefit.coinsurance': 'Coinsurance',
+  'benefit.coinsurance_meaning': 'Coinsurance basis',
+  'benefit.deductible_applies': 'Deductible applies',
+  'benefit.limits_exclusions': 'Limits and exclusions',
+  'benefit.individual_deductible_total': 'Deductible',
+  'benefit.individual_deductible_met': 'Deductible met',
+  'benefit.family_deductible_total': 'Deductible (family)',
+  'benefit.family_deductible_met': 'Deductible met (family)',
+  'benefit.individual_oop_total': 'Out-of-pocket maximum',
+  'benefit.individual_oop_met': 'Out-of-pocket met',
+  'benefit.family_oop_total': 'Out-of-pocket maximum (family)',
+  'benefit.family_oop_met': 'Out-of-pocket met (family)',
+  'claims.address': 'Claims mailing address',
+  'claims.payer_id': 'Payer ID',
+  'call.live_representative': 'Reached a representative',
+  'rep.name': 'Representative name',
+  'rep.reference': 'Reference number',
+};
+function vobFieldLabel(key) {
+  const raw = String(key || '').trim();
+  if (VOB_FIELD_LABELS[raw]) return VOB_FIELD_LABELS[raw];
+  // Unknown keys keep their prefix: `auth.required` reads as "Auth required",
+  // never as the bare "Required" that a blanket prefix strip would produce.
+  const text = raw.replace(/^rep\./, 'representative ').replace(/[._]+/g, ' ').trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : raw;
+}
+function vobKnownAnswers(vob = {}) {
+  const rows = [];
+  const seen = new Map();
+  const push = (label, value, source, key = '') => {
+    const text = String(value == null ? '' : value).trim();
+    const name = String(label || '').trim();
+    if (!name || !text) return;
+    const dedupe = name.toLowerCase();
+    const existing = seen.get(dedupe);
+    // A representative's answer supersedes the earlier EDI value for the same
+    // field; this is the same precedence the operator's evidence merge applies.
+    if (existing) { if (source === 'call') Object.assign(existing, { value: text, source, key: key || existing.key }); return; }
+    const row = { label: name, value: text, source, key };
+    seen.set(dedupe, row);
+    rows.push(row);
+  };
+  for (const line of (vob.eligibility?.verified || [])) {
+    const split = String(line).indexOf(':');
+    if (split > 0) push(String(line).slice(0, split), String(line).slice(split + 1), 'payer record');
+    else push(String(line), 'confirmed', 'payer record');
+  }
+  for (const fact of (Array.isArray(vob.facts) ? vob.facts : [])) {
+    const status = String(fact.status || '').toLowerCase();
+    // `denied` is the payer answering in the negative — "no authorization is
+    // required" is an answer, and listing it as an open question is how a case
+    // that is actually finished reads as though it still has forty gaps.
+    if (!['confirmed', 'denied'].includes(status)) continue;
+    push(vobFieldLabel(fact.key), status === 'denied' ? (fact.value || 'No') : fact.value, 'call', fact.key);
+  }
+  return rows;
+}
+function vobOutstandingStatusLabel(status) {
+  if (status === 'unavailable') return 'payer would not say';
+  if (status === 'contradictory') return 'answers conflict';
+  return 'still needed';
+}
+function vobOutstanding(vob = {}) {
+  const known = new Set(vobKnownAnswers(vob).map((row) => row.label.toLowerCase()));
+  const fields = (vob.ledger || []).flatMap((row) => (Array.isArray(row.fields) ? row.fields : []));
+  const rows = [];
+  const seen = new Set();
+  for (const field of fields) {
+    const status = String(field.status || 'pending').toLowerCase();
+    if (['confirmed', 'denied', 'not_applicable'].includes(status)) continue;
+    const label = vobFieldLabel(field.key);
+    const dedupe = label.toLowerCase();
+    if (!label || seen.has(dedupe) || known.has(dedupe)) continue;
+    seen.add(dedupe);
+    // `unavailable` is the payer refusing to say, which is an outcome rather
+    // than an open question — worth showing, worth distinguishing.
+    rows.push({ label, key: field.key, status });
+  }
+  return rows;
 }
 function vobRenderSnapshot(vob) {
   const root = $('vobConsole');
@@ -2913,10 +3008,22 @@ function vobRenderSnapshot(vob) {
   const facts = Array.isArray(vob.facts) ? vob.facts : [];
   const status = vobStatusLabel(vob.status, vob.live);
   const slack = vob.slackUrl ? `<a class="vobLink" href="${esc(vob.slackUrl)}" target="_blank" rel="noopener">Open Slack thread ↗</a>` : '<span class="vobMuted">Slack thread not recorded</span>';
+  const known = vobKnownAnswers(vob);
+  const outstanding = vobOutstanding(vob);
+  const knownHtml = known.length
+    ? `<div class="vobKnownRows">${known.map((row) => `<div class="vobKnownRow"${row.key ? ` title="${esc(row.key)}"` : ''}><span class="vobKnownLabel">${esc(row.label)}</span><span class="vobKnownValue">${esc(row.value)}</span><span class="vobKnownSource ${row.source === 'call' ? 'call' : 'edi'}">${esc(row.source)}</span></div>`).join('')}</div>`
+    : '<div class="vobEmpty">Nothing confirmed yet — no eligibility response and no answers from a call.</div>';
+  const outstandingRow = (row) => `<div class="vobOutstandingRow"${row.key ? ` title="${esc(row.key)}"` : ''}><span>${esc(row.label)}</span><span class="vobOutstandingStatus ${row.status === 'unavailable' ? 'refused' : row.status === 'contradictory' ? 'conflict' : ''}">${esc(vobOutstandingStatusLabel(row.status))}</span></div>`;
+  // A case can legitimately have forty unanswered code-specific fields. Showing
+  // all forty is the difference between "here is what is left" and a wall.
+  const outstandingHtml = outstanding.length
+    ? `<div class="vobOutstandingRows">${outstanding.slice(0, 8).map(outstandingRow).join('')}</div>${outstanding.length > 8 ? `<details class="vobOutstandingMore"><summary>+${outstanding.length - 8} more</summary><div class="vobOutstandingRows">${outstanding.slice(8).map(outstandingRow).join('')}</div></details>` : ''}`
+    : (known.length ? '<div class="vobEmpty">Nothing outstanding — every requested field is answered.</div>' : '');
+  const eligibilityMeta = vob.eligibility?.checkedAt ? `<span class="vobMeta">payer record checked ${esc(fmtTs(vob.eligibility.checkedAt))}</span>` : '';
   const ledgerCards = ledger.length ? ledger.map((row) => `<article class="vobLedgerCard"><div class="vobLedgerHead"><div><code>${esc(vobShortId(row.callId))}</code><span class="vobMeta">${row.kind === 'cumulative' ? `${esc(row.attemptCount || row.sequence || '—')} attempts · cumulative` : `${esc(row.kind || 'call')} · #${esc(row.sequence || '—')}`}</span></div><span class="vobPill ${row.attemptStatus === 'live' ? 'live' : ''}">${esc(row.attemptStatus || 'pending')}</span></div>${vobFieldBlock(row.fields, row.focusFields)}</article>`).join('') : '<div class="vobEmpty">No ledger calls recorded yet.</div>';
   const factCards = facts.length ? facts.map((fact) => `<article class="vobFactCard"><div class="vobFactKey">${esc(fact.key)}</div><div class="vobFactValue">${esc(fact.value == null ? '—' : fact.value)}</div><div class="vobFactMeta">${esc(fact.status || 'unknown')} · source ${esc((fact.sourceCallIds || []).map(vobShortId).join(', ') || '—')}</div></article>`).join('') : '<div class="vobEmpty">No answers recorded yet.</div>';
   const prompt = vob.prompt || {};
-  const promptHtml = prompt.baseText ? `<section class="vobSection vobPromptSection"><div class="vobSectionTitle">Current production prompt <span class="vobMeta">read-only runtime template</span></div><div class="vobPromptMeta"><span><b>Version</b> ${esc(prompt.version || '—')}</span><span><b>Source</b> ${esc(prompt.source || 'production')}</span><span><b>Model</b> ${esc(prompt.model || '—')}</span></div><div class="vobPromptToolbar"><button type="button" class="vobClose" data-vob-copy-prompt>Copy prompt</button><span class="vobMuted">Production calls are never edited here.</span></div><textarea class="vobPromptEditor" readonly rows="18">${esc(prompt.baseText)}</textarea>${prompt.compiledText ? `<details class="vobPromptCompiled"><summary>Compiled prompt with packet context</summary><textarea class="vobPromptCompiledText" readonly rows="14">${esc(prompt.compiledText)}</textarea></details>` : ''}</section>` : '';
+  const promptHtml = prompt.baseText ? `<div class="vobPromptSection"><div class="vobSectionTitle">Current production prompt <span class="vobMeta">read-only runtime template</span></div><div class="vobPromptMeta"><span><b>Version</b> ${esc(prompt.version || '—')}</span><span><b>Source</b> ${esc(prompt.source || 'production')}</span><span><b>Model</b> ${esc(prompt.model || '—')}</span></div><div class="vobPromptToolbar"><button type="button" class="vobClose" data-vob-copy-prompt>Copy prompt</button><span class="vobMuted">Production calls are never edited here.</span></div><textarea class="vobPromptEditor" readonly rows="18">${esc(prompt.baseText)}</textarea>${prompt.compiledText ? `<details class="vobPromptCompiled"><summary>Compiled prompt with packet context</summary><textarea class="vobPromptCompiledText" readonly rows="14">${esc(prompt.compiledText)}</textarea></details>` : ''}</div>` : '';
   const attemptHtml = attempts.length ? attempts.map((attempt) => {
     const callId = String(attempt.callId || '');
     const audio = attempt.audio ? `<audio class="vobAudio" controls preload="metadata" data-vob-audio="${esc(callId)}" src="${esc(vobAudioUrl(callId))}"></audio><div class="vobAudioError hidden" data-vob-audio-error="${esc(callId)}" role="status">Recording could not be loaded. Try again from the audio controls.</div>` : '<div class="vobEmpty">No recording artifact yet.</div>';
@@ -2926,7 +3033,11 @@ function vobRenderSnapshot(vob) {
     return `<article class="vobAttempt" data-vob-attempt="${esc(callId)}"><div class="vobAttemptHead"><div><strong>Attempt ${esc(attempt.sequence || '—')}</strong><span class="vobMeta">${esc(attempt.kind || 'call')} · <code>${esc(vobShortId(callId))}</code></span></div><div class="vobAttemptActions">${listen}<span class="vobPill ${attempt.live ? 'live' : ''}">${esc(vobStatusLabel(attempt.status, attempt.live))}</span></div></div>${audio}<div class="vobSubhead">Call phases</div><div class="vobSegments">${segments || '<span class="vobEmpty">No phase boundaries observed yet.</span>'}</div><div class="vobSubhead">Transcript <span class="vobMeta">click a line to seek</span></div><div class="vobTranscript">${transcript || '<div class="vobEmpty">Waiting for transcript…</div>'}</div></article>`;
   }).join('') : '<div class="vobEmpty">No call attempts recorded yet.</div>';
   const topLiveListen = liveAttempts.length ? `<div class="vobHeadLive" aria-label="Active VOB calls">${liveAttempts.map((attempt) => `<button type="button" class="vobLiveListen" data-vob-live-listen="${esc(String(attempt.callId))}">Listen live${liveAttempts.length > 1 ? ` · ${esc(vobShortId(attempt.callId))}` : ''}</button>`).join('')}</div>` : '';
-  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions">${topLiveListen}<button type="button" class="vobTestStart" data-vob-test-start>Test agent with me</button><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}${promptHtml}${vobPipelineMarkup(vob.pipeline, vob.pipelineModes)}<section class="vobSection"><div class="vobSectionTitle">Current ledger <span class="vobMeta">all validated answers across every attempt</span></div><div class="vobLedgerCards">${ledgerCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Answers captured <span class="vobMeta">validated cumulative evidence</span></div><div class="vobFactCards">${factCards}</div></section><section class="vobSection"><div class="vobSectionTitle">Recordings and transcripts <span class="vobMeta">audio follows transcript selection</span></div><div class="vobAttempts">${attemptHtml}</div></section>`;
+  // Order is the whole point of this page: what we know, what is still open,
+  // then what happened on the calls. Prompts, schemas, and stage contracts are
+  // engineering detail — real, but not what someone reviewing a case is looking
+  // for, so they live in one collapsed section at the bottom.
+  root.innerHTML = `<div class="vobHead"><div><div class="vobEyebrow">VOB observability</div><h2>${esc(vob.payerName || 'Verification of benefits')}</h2><div class="vobMeta">${esc(status)}${vob.requestId ? ` · request <code>${esc(vobShortId(vob.requestId))}</code>` : ''}</div></div><div class="vobHeadActions">${topLiveListen}<button type="button" class="vobTestStart" data-vob-test-start>Test agent with me</button><button type="button" class="vobClose" data-vob-close>Back to chat</button>${slack}<span class="vobLiveDot ${vob.live ? 'on' : ''}">${vob.live ? 'updating live' : `updated ${esc(fmtTs(vob.refreshedAt))}`}</span></div></div>${vob.note ? `<details class="vobCaseNote"><summary>Case note</summary><div>${esc(vob.note)}</div></details>` : ''}<section class="vobSection"><div class="vobSectionTitle">Benefits confirmed ${eligibilityMeta}</div>${knownHtml}</section>${outstandingHtml ? `<section class="vobSection"><div class="vobSectionTitle">Still needed <span class="vobMeta">what the next call has to ask</span></div>${outstandingHtml}</section>` : ''}<section class="vobSection"><div class="vobSectionTitle">Calls <span class="vobMeta">recording and transcript per attempt · click a line to seek</span></div><div class="vobAttempts">${attemptHtml}</div></section><details class="vobSection vobInternals"><summary>Agent internals <span class="vobMeta">prompt, pipeline stages, output schemas</span></summary><div class="vobInternalsBody">${promptHtml}${vobPipelineMarkup(vob.pipeline, vob.pipelineModes)}<div class="vobSectionTitle">Raw ledger <span class="vobMeta">every requested field across attempts</span></div><div class="vobLedgerCards">${ledgerCards}</div><div class="vobSectionTitle">Raw evidence <span class="vobMeta">extracted facts with source call</span></div><div class="vobFactCards">${factCards}</div></div></details>`;
   vobRenderKey = renderKey;
   root.scrollTop = previousScrollTop;
   root.querySelector('[data-vob-close]')?.addEventListener('click', () => toggleVobConsole(false));

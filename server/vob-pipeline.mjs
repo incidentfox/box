@@ -7,7 +7,7 @@ import {
 // This is an owner-facing, PHI-free description of the Rise4 VOB decision
 // pipeline.  It intentionally describes the contracts rather than exposing
 // private operator source paths or any case data.
-export const VOB_PIPELINE_VERSION = 'rise4-vob-pipeline-2026-08-06.v1';
+export const VOB_PIPELINE_VERSION = 'rise4-vob-pipeline-2026-08-08.v2';
 
 export const RUNTIME_SCHEMA = Object.freeze({
   type: 'object',
@@ -100,6 +100,22 @@ const freeze = (value) => Object.freeze(value);
 export function buildVobPipeline() {
   return freeze({
     version: VOB_PIPELINE_VERSION,
+    // The call is no longer the first thing that happens. An X12 270 eligibility
+    // request goes to the payer's own system first, and whatever it answers is
+    // dropped from the question list before anyone dials.
+    eligibility: freeze({
+      kind: 'deterministic',
+      title: 'Payer eligibility check (X12 270/271)',
+      source: 'rise4-eligibility-step:runEligibilityStep',
+      prompt: null,
+      rules: freeze([
+        'Send a 270 to the payer before the call and read the 271 into a benefits ledger.',
+        'A failed or skipped check changes nothing: the call proceeds with the full question list.',
+        'Only fields the payer answered are dropped from what the call has to ask.',
+        'Facts obtained here are payer-verified and outrank nothing the representative later corrects.',
+      ]),
+      explanation: 'Deterministic EDI, no model. This is why a case can already show confirmed benefits before its first call connects.',
+    }),
     caller: freeze({
       kind: 'llm',
       title: 'Live caller decision',
@@ -141,6 +157,19 @@ export function buildVobPipeline() {
         'Apply IVR/hold/human-phase transitions and merge only validated evidence updates.',
       ]),
       explanation: 'There is no validator prompt. This is a deterministic postprocessor that can override an LLM proposal before it reaches LiveKit.',
+    }),
+    merge: freeze({
+      kind: 'deterministic',
+      title: 'Evidence merge across sources',
+      source: 'rise4-transcript-evidence:mergeEligibilityEvidence',
+      prompt: null,
+      rules: freeze([
+        'Union, never replace: eligibility facts fill only keys the call left missing or contradictory.',
+        'The representative always wins. A payer-side answer overrides the earlier EDI value for the same key.',
+        'Answered keys drop off the follow-up list so a later attempt does not re-ask them.',
+        'Knowledge accumulates across attempts; a later empty result cannot erase an earlier answer.',
+      ]),
+      explanation: 'What the case knows is the union of every source, recomputed after each attempt.',
     }),
     ledger: freeze({
       kind: 'deterministic',
