@@ -325,8 +325,10 @@ export function touchMember(id) {
 
 // ---- session sharing -------------------------------------------------------
 
-// A team chat must already live in the canonical shared workspace. We never turn an
-// arbitrary host checkout into a team root as a side effect of sharing it.
+// Guest-owned team chats must live in the canonical shared workspace. The owner may
+// also share an existing host-backed chat for transcript visibility, but doing so must
+// never turn that host directory into a guest-visible workspace root. Those chats stay
+// on the owner's runtime and are view-only to guests at the websocket boundary.
 export function setShared(sessionId, on, by = 'owner', cwd = '') {
   const t = loadTeam();
   const id = String(sessionId || '');
@@ -335,9 +337,16 @@ export function setShared(sessionId, on, by = 'owner', cwd = '') {
   // exists (as it does in a fresh CI/home environment).  Materialize it
   // before doing the symlink-aware containment check below.
   const effectiveCwd = cwd || ensureWorkspace();
-  if (on && !withinWorkspace(effectiveCwd)) return false;
+  const contained = withinWorkspace(effectiveCwd);
+  if (on && !contained && by !== 'owner') return false;
   if (on) {
-    t.shared[id] = { sharedAt: Date.now(), sharedBy: by, cwd: guestCwd(effectiveCwd) };
+    t.shared[id] = {
+      sharedAt: Date.now(),
+      sharedBy: by,
+      // Do not persist a host path as team metadata. The session list independently
+      // redacts non-team cwd values, and file access remains clamped to workspaceRoot.
+      cwd: contained ? guestCwd(effectiveCwd) : null,
+    };
     saveTeam(t);
   } else {
     delete t.shared[id];
