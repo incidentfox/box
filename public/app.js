@@ -323,6 +323,25 @@ async function writeClipboardText(text, label = 'Copied') {
   toast(label);
   return true;
 }
+function teamChatShareUrl(chat = cur) {
+  if (!chat || !chat.id || !chat.shared || chat.workspace !== 'team') return '';
+  const path = routeUrl({
+    view: 'chat',
+    id: chat.id,
+    title: chat.title,
+    remote: !!(chat.ep && chat.ep.remote),
+    workspace: 'team',
+  });
+  return new URL(path, location.origin).href;
+}
+async function copyTeamChatLink(chat = cur) {
+  const url = teamChatShareUrl(chat);
+  if (!url) {
+    toast(chat && chat.id ? 'Share this chat with your team first' : 'Send a message before copying a link');
+    return false;
+  }
+  return writeClipboardText(url, 'Team chat link copied');
+}
 // Client bootstrap (filled from /api/config): $HOME for path-shortening + which optional
 // integrations are wired, so we can hide the Board / Linear UI when they aren't set up.
 let CFG = { home: '', ownerName: 'you', defaultCwd: '', appSettings: { defaultCwd: '', envDefaultCwd: '', defaultAgent: 'claude', codexSandbox: 'off' }, features: { linear: false, brain: false, voice: false, codex: false, gemini: false, agy: false }, promptTemplates: [], hooks: [] };
@@ -4483,6 +4502,14 @@ function renderPresence() {
     t.textContent = `${typing.map((x) => x.name).join(', ')} ${typing.length > 1 ? 'are' : 'is'} typing…`;
     bar.appendChild(t);
   }
+  const copyLink = document.createElement('button');
+  copyLink.className = 'presCopyLink';
+  copyLink.type = 'button';
+  copyLink.title = 'Copy a link to this team chat';
+  copyLink.setAttribute('aria-label', 'Copy team chat link');
+  copyLink.innerHTML = `${ICONS.copy}<span>Copy link</span>`;
+  copyLink.onclick = () => copyTeamChatLink();
+  bar.appendChild(copyLink);
 }
 let teamChatOpen = false;
 function teamChatTime(ts) {
@@ -5397,11 +5424,14 @@ function openChatTitleSheet() {
   // On someone else's box we can rename and copy; everything that mutates THEIR box's
   // library (fork, pin, archive) is theirs to do.
   if (chatIsForeign()) {
-    return openSheet(title, [
+    const rows = [
       { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
       { ic: '', label: 'Copy', desc: 'Copy full conversation, my messages, or visible messages', fn: () => openCopySheet() },
       { ic: '', label: 'My messages', desc: 'Browse and copy just your prompts', fn: openMyMessages },
-    ]);
+    ];
+    if (cur.shared && cur.id) rows.splice(1, 0,
+      { ic: ICONS.copy, label: 'Copy team chat link', desc: 'Share this exact chat with a teammate', fn: () => copyTeamChatLink() });
+    return openSheet(title, rows);
   }
   const rows = [
     { ic: '', label: 'Rename', desc: 'Edit the chat title', fn: () => renameChat(cur) },
@@ -5417,6 +5447,8 @@ function openChatTitleSheet() {
       ? { ic: ICONS.share, label: 'Stop sharing', desc: 'Teammates lose access immediately', fn: () => toggleShareCurrentChat(false) }
       : { ic: ICONS.share, label: 'Share with team', desc: shareDesc({ cwd: cur.cwd }), fn: () => toggleShareCurrentChat(true) });
   }
+  if (cur.shared && cur.id) rows.splice(cur.shared && canToggleShare() ? 2 : 1, 0,
+    { ic: ICONS.copy, label: 'Copy team chat link', desc: 'Share this exact chat with a teammate', fn: () => copyTeamChatLink() });
   openSheet(title, rows);
 }
 $('chatTitle').onclick = openChatTitleSheet;

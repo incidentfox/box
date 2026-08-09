@@ -1369,6 +1369,9 @@ button.presShared:active { transform: scale(.94); }
 .presDot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; }
 .presMuted { color: var(--muted); font-weight: 500; }
 .presTyping { color: var(--accent); font-weight: 600; font-style: italic; }
+.presCopyLink { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 0; border-radius: 6px; background: transparent; color: var(--accent); font: inherit; font-weight: 650; cursor: pointer; }
+.presCopyLink:active { transform: scale(.94); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.presCopyLink svg { width: 13px; height: 13px; }
 .teamChatPanel { flex: none; border-bottom: 1px solid var(--line); background: var(--subtle); }
 .teamChatHead { min-height: 42px; padding: 7px 12px 6px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .teamChatHead > div { display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; }
