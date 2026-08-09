@@ -53,7 +53,7 @@ import { createVobTestConfigStore } from './vob-test-mode.mjs';
 import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
-  normalizeSessionWorkspace, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
+  normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
 } from './session-workspace.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
@@ -2825,8 +2825,13 @@ app.post('/api/sessions/:id/share', requireOwner, (req, res) => {
   const codexRecord = (loadCodex().sessions || {})[id] || null;
   const teamClaudeRecord = (loadTeamClaude().sessions || {})[id] || null;
   const workspace = on ? 'team' : 'personal';
-  const cwd = (s && s.cwd) || (codexRecord && codexRecord.cwd)
-    || (teamClaudeRecord && teamClaudeRecord.cwd) || sessionCwd(id) || DEFAULT_CWD;
+  const cwd = ownerShareCwd({
+    runtime: s,
+    codexRecord,
+    teamClaudeRecord,
+    persistedCwd: sessionCwd(id),
+    defaultCwd: DEFAULT_CWD,
+  });
 
   // Sharing controls where a conversation is listed and who may view it. It must not
   // change the runtime identity that owns the underlying Claude/Codex transcript. The
