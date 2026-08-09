@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  normalizeSessionWorkspace, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
+  normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
 } from './session-workspace.mjs';
 
 assert.equal(normalizeSessionWorkspace('team'), 'team');
@@ -13,5 +13,20 @@ assert.equal(sessionWorkspace({ id: 'rose', workspace: 'personal', teamSandbox: 
 assert.equal(sessionUsesTeamSandbox({ workspace: 'personal', teamSandbox: true }), true);
 assert.equal(sessionWorkspace({ id: 'legacy' }, { isShared: (id) => id === 'legacy' }), 'team');
 assert.equal(sessionInTeamWorkspace({ id: 'legacy' }, { isShared: () => true }), true);
+
+assert.equal(ownerShareCwd({
+  runtime: { cwd: '/home/factory/development/shared/sessions/legacy' },
+  codexRecord: { cwd: '/home/factory/development' },
+  teamClaudeRecord: null,
+  persistedCwd: null,
+  defaultCwd: '/fallback',
+}), '/home/factory/development');
+assert.equal(ownerShareCwd({
+  runtime: { cwd: '/new/session' },
+  codexRecord: null,
+  teamClaudeRecord: null,
+  persistedCwd: null,
+  defaultCwd: '/fallback',
+}), '/new/session');
 
 console.log('session-workspace tests passed');
