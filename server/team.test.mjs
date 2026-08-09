@@ -9,7 +9,7 @@ import {
   setShared, setWorkspaceRoot, splitAuthorTag, withinWorkspace, listSessionChat, appendSessionChat,
   addRoot, removeRoot, listRoots, teamRoots, rootRejection,
   listSecrets, setSecret, deleteSecret, secretsEnv, secretKeyRejection,
-  systemUserForMember,
+  systemUserForMember, loadTeam,
 } from './team.mjs';
 
 // _setTeamForTest also detaches the module from disk — nothing below touches a real team.json.
@@ -208,7 +208,16 @@ assert.equal(listRoots().length, 0);
 assert.deepEqual(teamRoots(), [scratch]);
 assert.equal(removeRoot(join(scratch, 'sub')), false);
 
-setShared('sess-repo', true, 'owner', repo);
+// The owner can share a host-backed transcript without admitting its cwd to the team.
+// Guests may view this session, but the stored team metadata contains no host path and
+// all workspace/file helpers remain clamped to the canonical shared directory.
+assert.equal(setShared('sess-repo', true, 'owner', repo), true);
+assert.equal(isShared('sess-repo'), true);
+assert.equal(loadTeam().shared['sess-repo'].cwd, null);
+assert.equal(canAccessSession(OWNER_P, 'sess-repo'), true);
+assert.equal(canAccessSession(bobP, 'sess-repo'), true);
+assert.equal(setShared('sess-guest-escape', true, bobP.id, repo), false);
+assert.equal(isShared('sess-guest-escape'), false);
 assert.equal(withinWorkspace(join(repo, 'src')), false);
 assert.equal(guestCwd(join(repo, 'src')), scratch);
 assert.equal(addRoot(repo, 'owner').ok, false);
