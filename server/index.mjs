@@ -52,6 +52,9 @@ import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
 import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 import * as team from './team.mjs';
+import {
+  normalizeSessionWorkspace, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
+} from './session-workspace.mjs';
 
 // One engine drives every session as `claude --remote-control` over node-pty, so
 // a session driven from Box is simultaneously live on desktop + the official app
@@ -449,14 +452,12 @@ function childEnv(opts = {}) {
   return buildChildEnv(process.env, { guest, extra });
 }
 
-// A session STARTED BY a guest runs with the restricted env for its whole life — an
-// agent process's env is fixed when it spawns, so this is a property of the session, not
-// of the individual turn. Any shared or teammate-owned session is a team session: it
-// always runs in the Bubblewrap workspace, even when the owner sends the turn.
+// Workspace placement and execution identity are separate. An owner chat can be shown
+// in Team while continuing under the owner's provider account; guest-created chats stay
+// sandboxed even when the guest keeps them in Personal.
 const sessionIsGuest = (s) => !!(s && (s.createdBy || (s.sessionId && team.sessionOwner(s.sessionId))));
-// `createdBy` alone may describe a pre-isolation legacy chat. Only records explicitly
-// marked sandboxed (or shared by the constrained share API) cross the hard boundary.
-const sessionIsTeam = (s) => !!(s && (s.teamSandbox || team.isShared(s.sessionId || s.key)));
+const sessionWorkspaceOf = (s) => sessionWorkspace(s, { isShared: (id) => team.isShared(id) });
+const sessionInTeamWorkspaceOf = (s) => sessionInTeamWorkspace(s, { isShared: (id) => team.isShared(id) });
 const TEAM_CHAT_CONTEXT_MAX_MESSAGES = 40;
 const TEAM_CHAT_CONTEXT_MAX_CHARS = 12_000;
 function teamChatContextForAgent(sessionId) {
@@ -634,7 +635,7 @@ function killSessionBridge(id, { force = false, procText = null } = {}) {
 function restoreSessionBridge(id) {
   if (!id || !/^[0-9a-fA-F-]{8,}$/.test(id)) return { started: false, reason: 'bad-id' };
   const s = rt(id);
-  if (sessionIsTeam(s)) return { started: false, reason: 'team-sandbox' };
+  if (sessionUsesTeamSandbox(s)) return { started: false, reason: 'team-sandbox' };
   try {
     if ((loadCodex().sessions || {})[id]) return { started: false, reason: 'codex-on-demand' };
   } catch {}
@@ -916,9 +917,33 @@ function removeTeamFavoriteEverywhere(id) {
   }
   if (changed) { writeJsonAtomic(TEAM_FAVORITES_FILE, all); invalidateSessionLists(); }
 }
-const isTeamSessionId = (id) => !!(id && (team.isShared(id) || (loadTeamClaude().sessions || {})[id]));
+const storedSessionRecord = (id) => (loadCodex().sessions || {})[id]
+  || (loadTeamClaude().sessions || {})[id]
+  || { id };
+// Team ownership is normally recorded in team.json once an engine emits its real
+// session id. A provisional `new-*` Codex chat has no real id yet, so fall back to
+// the durable registry record that was written before launch. This keeps a guest's
+// failed first launch visible and retryable without admitting another guest.
+const principalCanAccessSession = (principal, id) => {
+  if (!principal) return false;
+  if (team.canAccessSession(principal, id)) return true;
+  return principal.kind === 'guest' && storedSessionRecord(id).createdBy === principal.id;
+};
+const principalCanSeeSessionRecord = (principal, record) => {
+  if (!record) return false;
+  const teamWorkspace = sessionInTeamWorkspaceOf(record);
+  if (principal?.kind === 'guest') {
+    if (!principalCanAccessSession(principal, record.id)) return false;
+    return teamWorkspace || record.createdBy === principal.id;
+  }
+  // Guest-owned personal chats stay out of the box owner's Personal workspace
+  // and global search. Guest Team chats remain collaborative and visible.
+  return teamWorkspace || !record.createdBy;
+};
+const isTeamSessionId = (id) => !!(id && sessionInTeamWorkspaceOf(storedSessionRecord(id)));
 function archiveStoreFor(id) {
-  return isTeamSessionId(id)
+  const record = storedSessionRecord(id);
+  return (record.createdBy || sessionInTeamWorkspaceOf(record))
     ? { load: loadTeamArchived, save: saveTeamArchived, loadAt: loadTeamArchivedAt, saveAt: saveTeamArchivedAt }
     : { load: loadArchived, save: saveArchived, loadAt: loadArchivedAt, saveAt: saveArchivedAt };
 }
@@ -1495,6 +1520,11 @@ function ensureCodexSession(id, attrs = {}) {
     transcriptPath: attrs.transcriptPath || prev.transcriptPath || '',
     dtachSock: attrs.dtachSock || prev.dtachSock || '',
     category: attrs.category != null ? (normalizeSessionCategory(attrs.category) || '') : (prev.category || ''),
+    createdBy: attrs.createdBy !== undefined ? attrs.createdBy : (prev.createdBy || null),
+    teamSandbox: attrs.teamSandbox !== undefined ? !!attrs.teamSandbox : !!prev.teamSandbox,
+    workspace: normalizeSessionWorkspace(attrs.workspace)
+      || normalizeSessionWorkspace(prev.workspace)
+      || sessionWorkspaceOf({ ...prev, id }),
   };
   saveCodex(state);
   return state.sessions[id];
@@ -1538,7 +1568,9 @@ function ensureTeamClaudeSession(id, attrs = {}) {
     ...prev,
     id,
     agent: 'claude',
-    teamSandbox: true,
+    teamSandbox: attrs.teamSandbox !== undefined
+      ? !!attrs.teamSandbox
+      : (prev.teamSandbox !== undefined ? !!prev.teamSandbox : true),
     title: attrs.title || prev.title || 'Team Claude chat',
     cwd: attrs.cwd || prev.cwd || team.workspaceRoot(),
     created: prev.created || now,
@@ -1548,6 +1580,10 @@ function ensureTeamClaudeSession(id, attrs = {}) {
     parentTitle: attrs.parentTitle || prev.parentTitle || '',
     context: attrs.context || prev.context || normalizeContext({ agent: 'claude' }),
     messages: Array.isArray(prev.messages) ? prev.messages.slice(-160) : [],
+    createdBy: attrs.createdBy !== undefined ? attrs.createdBy : (prev.createdBy || null),
+    workspace: normalizeSessionWorkspace(attrs.workspace)
+      || normalizeSessionWorkspace(prev.workspace)
+      || sessionWorkspaceOf({ ...prev, id, teamSandbox: true }),
   };
   saveTeamClaude(state);
   return state.sessions[id];
@@ -2172,12 +2208,12 @@ function liveCodexSessionIds(sessions, processIds = runningCodexThreadIds(), ter
 
 function listSessions({ limit = 40, filter = 'all', workspace = 'personal', principal = null } = {}) {
   const teamWorkspace = workspace === 'team';
+  const guestWorkspace = principal && principal.kind === 'guest';
   const rc = readRcRegistry();
   const names = loadNames();
-  const archived = teamWorkspace ? loadTeamArchived() : loadArchived();
-  const archivedAt = teamWorkspace ? loadTeamArchivedAt() : loadArchivedAt();
-  const favorites = teamWorkspace ? teamFavoritesFor(principal) : loadFavorites();
-  const sharedNow = new Set(team.sharedIds());
+  const archived = (teamWorkspace || guestWorkspace) ? loadTeamArchived() : loadArchived();
+  const archivedAt = (teamWorkspace || guestWorkspace) ? loadTeamArchivedAt() : loadArchivedAt();
+  const favorites = (teamWorkspace || guestWorkspace) ? teamFavoritesFor(principal) : loadFavorites();
   const files = sessionFiles(archived, { includeArchivedMetadata: filter === 'archived' });
   const codexProcessIds = runningCodexThreadIds();
   adoptLiveCodexSessions(codexProcessIds);
@@ -2220,7 +2256,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     id: s.id, agent: 'claude', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'Team Claude chat', cwd: s.cwd || team.workspaceRoot(), preview: s.preview || '',
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
-    settings: s.settings || {}, context: s.context || null, teamSandbox: true,
+    settings: s.settings || {}, context: s.context || null,
   }));
   const geminiSessions = Object.values(loadGemini().sessions || {}).map((s) => ({
     id: s.id, agent: 'gemini', file: null, mtime: s.lastUsed || s.created || 0,
@@ -2267,8 +2303,9 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   const isVob = (id) => isVobCallSession(byId.get(id) || {});
   // A workspace is a hard list boundary. Team work never appears in the personal
   // workspace, including its archive; personal work never appears in Team.
-  const isTeamSession = (f) => !!(f && (sharedNow.has(f.id) || f.teamSandbox));
-  const inWorkspace = (f) => teamWorkspace ? isTeamSession(f) : !isTeamSession(f);
+  const isTeamSession = (f) => !!(f && sessionInTeamWorkspaceOf(f));
+  const canSee = (f) => principalCanSeeSessionRecord(principal, f);
+  const inWorkspace = (f) => canSee(f) && (teamWorkspace ? isTeamSession(f) : !isTeamSession(f));
   // Counts over all sessions. VOB calls appear in `all` and their dedicated
   // category, but remain excluded from Working/Needs input/Live to avoid double
   // counting those status tabs. Automated sessions remain separate.
@@ -2302,7 +2339,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     for (const f of items) if (inWorkspace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
     for (const id of liveIds) {
       const f = byId.get(id);
-      if ((!f || inWorkspace(f)) && !archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(f || { id, file: null, mtime: 0 }); seen.add(id); }
+      if (f && inWorkspace(f) && !archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(f); seen.add(id); }
     }
   }
   for (const f of cand) { if (chosen.length >= limit) break; if (!seen.has(f.id)) { chosen.push(f); seen.add(f.id); } }
@@ -2340,6 +2377,8 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
       // conversation is being read by someone else, which is the thing you most want to
       // know before typing into it.
       shared: isTeamSession(s),
+      team: isTeamSession(s),
+      workspace: sessionWorkspaceOf(s),
     };
   });
   // Archived view sorts most-recently-archived first (so a chat you JUST archived is
@@ -2650,10 +2689,10 @@ const GUEST_ROUTES = [
   { m: 'GET',  re: /^\/api\/img$/ },                          // already hard-scoped to UPLOAD_DIR
   { m: 'GET',  re: /^\/api\/raw$/, check: (req) => team.withinWorkspace(resolve(req.query.path || '')) },
   { m: 'GET',  re: /^\/api\/sessions$/ },
-  { m: 'GET',  re: /^\/api\/sessions\/([^/]+)\/history$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
-  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/rename$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
-  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/archive$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
-  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/favorite$/, check: (req, p, [id]) => team.canAccessSession(p, id) },
+  { m: 'GET',  re: /^\/api\/sessions\/([^/]+)\/history$/, check: (req, p, [id]) => principalCanAccessSession(p, id) },
+  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/rename$/, check: (req, p, [id]) => principalCanAccessSession(p, id) },
+  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/archive$/, check: (req, p, [id]) => principalCanAccessSession(p, id) },
+  { m: 'POST', re: /^\/api\/sessions\/([^/]+)\/favorite$/, check: (req, p, [id]) => principalCanAccessSession(p, id) },
 ];
 function guestRouteFor(req) {
   for (const r of GUEST_ROUTES) {
@@ -2782,50 +2821,35 @@ app.post('/api/sessions/:id/share', requireOwner, (req, res) => {
   const id = req.params.id;
   const on = !((req.body || {}).shared === false);
   const existing = RT.get(resolveKey(id));
-  const s = existing || (on ? rt(id) : null);
-  let cwd = '';
-  let migration = null;
-  if (on) {
-    const sourceCwd = (s && s.cwd) || sessionCwd(id);
-    try {
-      if (team.withinWorkspace(sourceCwd)) cwd = team.guestCwd(sourceCwd);
-      else {
-        migration = copySessionArtifactsToTeam(id, sourceCwd);
-        cwd = migration.cwd;
-      }
-    } catch (error) {
-      console.error(`[team] could not prepare shared copy for ${id}: ${String(error && error.message || error).slice(0, 160)}`);
-      return res.status(500).json({ error: 'Could not prepare an isolated team copy of this chat.' });
-    }
-    // A private process may have the original host directory open. Stop it before the
-    // session becomes team-visible; the next turn starts fresh in the isolated copy.
-    if (s && !team.isShared(id)) {
-      // Clear before cancelCurrent resolves the worker: a queued private prompt must
-      // never be picked up as a team turn during the handoff.
-      s.queue = [];
-      s.inflight = null;
-      cancelCurrent(s.key);
-      killAgentProcess(s.proc, 'SIGKILL');
-      killAgentProcess(s.bashProc, 'SIGKILL');
-      killAgentProcess(s.codexGoalProc, 'SIGKILL');
-      if (s.sessionId) terminateUnmanagedCodexThread(s.sessionId, 'SIGKILL');
-      killSessionBridge(id, { force: true });
-      stopTail(s);
-      s.cwd = cwd;
-      s.agent = 'codex';
-      persist(s);
-    }
-  }
+  const s = existing || rt(id);
+  const codexRecord = (loadCodex().sessions || {})[id] || null;
+  const teamClaudeRecord = (loadTeamClaude().sessions || {})[id] || null;
+  const workspace = on ? 'team' : 'personal';
+  const cwd = (s && s.cwd) || (codexRecord && codexRecord.cwd)
+    || (teamClaudeRecord && teamClaudeRecord.cwd) || sessionCwd(id) || DEFAULT_CWD;
+
+  // Sharing controls where a conversation is listed and who may view it. It must not
+  // change the runtime identity that owns the underlying Claude/Codex transcript. The
+  // old copy-and-sandbox handoff made owner Codex rollouts unresumable after Share.
+  s.workspace = workspace;
+  persist(s);
+  if (codexRecord || s.agent === 'codex') ensureCodexSession(id, {
+    cwd, workspace, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox,
+  });
+  if (teamClaudeRecord) ensureTeamClaudeSession(id, {
+    cwd, workspace, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox,
+  });
   if (!team.setShared(id, on, 'owner', cwd)) return res.status(400).json({ error: 'Could not share this session.' });
   if (!on) evictGuestsFromSession(id);
-  if (s) bcast(s, { type: 'share', shared: on, cwd: cwd || null });
+  if (s) bcast(s, { type: 'share', shared: on, team: on, workspace, cwd: cwd || null });
   if (on && cwd) console.log(`[team] shared ${id} (${cwd})`);
   invalidateSessionLists();
   res.json({
     ok: true,
     shared: on,
+    workspace,
     cwd: cwd || null,
-    artifacts: migration ? { copied: migration.copied.length, skipped: migration.skipped.length } : null,
+    artifacts: null,
   });
 });
 
@@ -2901,7 +2925,7 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
   const p = req.principal;
   const ids = new Set(team.sharedIds());
   if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) {
-    if (mid === p.id && sessionIsTeam(rt(sid))) ids.add(sid);
+    if (mid === p.id && sessionInTeamWorkspaceOf(rt(sid))) ids.add(sid);
   }
   const all = listSessions({ filter: 'all', limit: 10000, workspace: 'team', principal: p }).sessions;
   const byId = new Map(all.map((s) => [s.id, s]));
@@ -2952,7 +2976,7 @@ app.post('/api/team/leave', requireAuth, (req, res) => {
 });
 
 app.get('/api/sessions', requireAuth, (req, res) => {
-  const workspace = req.principal.kind === 'guest' ? 'team' : req.query.workspace === 'team' ? 'team' : 'personal';
+  const workspace = req.query.workspace === 'team' ? 'team' : 'personal';
   const r = cachedListSessions(req.query.filter || 'all', workspace, req.principal);
   res.json({ sessions: r.sessions, counts: r.counts, workspace,
     defaultCwd: workspace === 'team' ? team.workspaceRoot() : DEFAULT_CWD,
@@ -2964,12 +2988,13 @@ app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
   const preserve = new Set(Array.isArray(body.preserveIds) ? body.preserveIds.map(String) : []);
   const explicitIds = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : null;
   const filter = String(body.filter || 'all');
-  const workspace = req.principal.kind === 'guest' ? 'team' : body.workspace === 'team' ? 'team' : 'personal';
+  const workspace = body.workspace === 'team' ? 'team' : 'personal';
   const fullList = listSessions({ filter, limit: 10000, workspace, principal: req.principal }).sessions;
   const sessionById = new Map(fullList.map((s) => [s.id, s]));
   const candidates = explicitIds || fullList.map((s) => s.id);
-  const set = workspace === 'team' ? loadTeamArchived() : loadArchived();
-  const at = workspace === 'team' ? loadTeamArchivedAt() : loadArchivedAt(); const now = Date.now();
+  const teamStore = workspace === 'team' || req.principal.kind === 'guest';
+  const set = teamStore ? loadTeamArchived() : loadArchived();
+  const at = teamStore ? loadTeamArchivedAt() : loadArchivedAt(); const now = Date.now();
   let changed = 0, killed = 0;
   for (const raw of candidates) {
     const id = String(raw || '').trim();
@@ -2983,13 +3008,13 @@ app.post('/api/sessions/bulk-archive', requireAuth, (req, res) => {
     else { clearReapedRuntime(id); if (had) { set.delete(id); delete at[id]; changed++; } }
     if (on) { try { killed += teardownSessionRuntime(id).killed || 0; } catch {} }
   }
-  if (workspace === 'team') { saveTeamArchived(set); saveTeamArchivedAt(at); }
+  if (teamStore) { saveTeamArchived(set); saveTeamArchivedAt(at); }
   else { saveArchived(set); saveArchivedAt(at); }
   res.json({ ok: true, archived: on, changed, killed });
 });
 app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
   const id = req.params.id; const on = !(req.body && req.body.archived === false);
-  if (req.principal.kind === 'guest' && !team.canAccessSession(req.principal, id)) return res.status(403).json({ error: 'not a team session' });
+  if (req.principal.kind === 'guest' && !principalCanAccessSession(req.principal, id)) return res.status(403).json({ error: 'not your session' });
   const store = archiveStoreFor(id);
   const set = store.load(); const at = store.loadAt();
   if (on) { set.add(id); at[id] = Date.now(); } else { clearReapedRuntime(id); set.delete(id); delete at[id]; }
@@ -3004,11 +3029,12 @@ app.post('/api/sessions/:id/archive', requireAuth, (req, res) => {
 app.post('/api/sessions/:id/favorite', requireAuth, (req, res) => {
   const id = req.params.id;
   const teamSession = isTeamSessionId(id);
-  if (req.principal.kind === 'guest' && (!teamSession || !team.canAccessSession(req.principal, id))) return res.status(403).json({ error: 'not a team session' });
-  const set = teamSession ? teamFavoritesFor(req.principal) : loadFavorites();
+  if (req.principal.kind === 'guest' && !principalCanAccessSession(req.principal, id)) return res.status(403).json({ error: 'not your session' });
+  const teamStore = teamSession || req.principal.kind === 'guest';
+  const set = teamStore ? teamFavoritesFor(req.principal) : loadFavorites();
   const on = !(req.body && req.body.favorite === false);
   if (on) set.add(id); else set.delete(id);
-  if (teamSession) saveTeamFavoritesFor(req.principal, set); else saveFavorites(set);
+  if (teamStore) saveTeamFavoritesFor(req.principal, set); else saveFavorites(set);
   res.json({ ok: true, favorite: on });
 });
 // Full-text search across ALL session history (title, summary, cwd, transcript) via sessiongrep.
@@ -3033,6 +3059,8 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
         if (exclude.has(r.id) || exclude.has(`${r.provider}:${r.id}`)) continue;
         const openable = r.provider === 'codex' ? codexIds.has(r.id) : (teamClaudeIds.has(r.id) || !!findSessionFile(r.id));
         if (!openable) continue;                                           // skip laptop-only / unindexed hits
+        const record = storedSessionRecord(r.id);
+        if (!principalCanSeeSessionRecord(req.principal, record)) continue;
         const rank = sessionSearchRank(r, search.variant, queryTokens);
         const prev = byId.get(r.id);
         if (!prev || rank > prev.rank) byId.set(r.id, { ...r, rank, matchedQuery: search.variant.query, matchKind: search.variant.kind });
@@ -3042,8 +3070,9 @@ app.get('/api/session-search', requireAuth, async (req, res) => {
       id: r.id, agent: r.provider,
       title: r.title || r.snippet || r.preview || 'session',
       cwd: r.cwd, preview: sessionSearchPreview(r), age: r.age,
+      workspace: sessionWorkspaceOf(storedSessionRecord(r.id)),
       match: r.match, matchedQuery: r.matchedQuery, matchKind: r.matchKind,
-      archived: (teamClaudeIds.has(r.id) || team.isShared(r.id) ? teamArchived : archived).has(r.id),
+      archived: (sessionInTeamWorkspaceOf(storedSessionRecord(r.id)) ? teamArchived : archived).has(r.id),
     }));
     res.json({ results, searched: variants.map((v) => v.query) });
   } catch (e) {
@@ -3055,9 +3084,9 @@ app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
     const before = req.query.before != null ? parseInt(req.query.before, 10) : null;
     const h = await sessionHistory(req.params.id, { before });
     h.messages = compactHistoryMessages(h.messages || []);
-    const teamSession = isTeamSessionId(req.params.id);
-    h.archived = (teamSession ? loadTeamArchived() : loadArchived()).has(req.params.id);
-    h.favorite = (teamSession ? teamFavoritesFor(req.principal) : loadFavorites()).has(req.params.id);
+    const teamStore = isTeamSessionId(req.params.id) || req.principal.kind === 'guest';
+    h.archived = (teamStore ? loadTeamArchived() : loadArchived()).has(req.params.id);
+    h.favorite = (teamStore ? teamFavoritesFor(req.principal) : loadFavorites()).has(req.params.id);
     res.json(h);
   } catch (e) {
     res.status(500).json({ error: String(e && e.message || e) });
@@ -3120,10 +3149,10 @@ app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
       const idx = Math.max(-1, Math.min(messages.length - 1, parseInt(req.query.through, 10)));
       messages = idx >= 0 ? messages.slice(0, idx + 1) : [];
     }
-    const teamSession = isTeamSessionId(req.params.id);
+    const teamStore = isTeamSessionId(req.params.id) || req.principal.kind === 'guest';
     res.json({ ...h, messages: compactHistoryMessages(messages),
-      archived: (teamSession ? loadTeamArchived() : loadArchived()).has(req.params.id),
-      favorite: (teamSession ? teamFavoritesFor(req.principal) : loadFavorites()).has(req.params.id) });
+      archived: (teamStore ? loadTeamArchived() : loadArchived()).has(req.params.id),
+      favorite: (teamStore ? teamFavoritesFor(req.principal) : loadFavorites()).has(req.params.id) });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
@@ -4603,11 +4632,18 @@ function rt(extKey) {
     let p = {};
     try { p = JSON.parse(readFileSync(qpath(key), 'utf8')); } catch {}
     const codex = (loadCodex().sessions || {})[key] || null;
+    const teamClaude = (loadTeamClaude().sessions || {})[key] || null;
+    const stored = codex || teamClaude;
+    const hasOwn = (name) => Object.prototype.hasOwnProperty.call(p, name);
     const manualTitle = isUuid(key) ? loadNames()[key] : '';
-    RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (codex && codex.cwd) || null, agent: p.agent || (codex ? 'codex' : null),
-      parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (codex && codex.title) || '',
-      settings: normalizeSettings(p.settings || (codex && codex.settings) || {}), category: normalizeSessionCategory(p.category || (codex && codex.category)) || null,
-      context: p.context || null, createdBy: p.createdBy || null, teamSandbox: !!p.teamSandbox,
+    RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (stored && stored.cwd) || null, agent: p.agent || (codex ? 'codex' : teamClaude ? 'claude' : null),
+      parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (stored && stored.title) || '',
+      settings: normalizeSettings(p.settings || (stored && stored.settings) || {}), category: normalizeSessionCategory(p.category || (stored && stored.category)) || null,
+      context: p.context || (stored && stored.context) || null,
+      createdBy: hasOwn('createdBy') ? p.createdBy : ((stored && stored.createdBy) || null),
+      teamSandbox: hasOwn('teamSandbox') ? !!p.teamSandbox : !!(stored && stored.teamSandbox),
+      workspace: normalizeSessionWorkspace(p.workspace) || normalizeSessionWorkspace(stored && stored.workspace)
+        || sessionWorkspaceOf({ ...(stored || {}), ...p, id: key }),
       queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), typing: new Map(), curAuthor: null, proc: null, codexGoalProc: null, canceled: false });
   }
   return RT.get(key);
@@ -4617,7 +4653,7 @@ function persist(s) {
   // partway through the first turn, and it lands via five different engine paths — so
   // claim it here, on the one call every path already makes afterwards.
   if (s.createdBy && s.sessionId) { try { team.claimSession(s.sessionId, s.createdBy); } catch {} }
-  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', category: normalizeSessionCategory(s.category) || null, settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, queue: s.queue, inflight: s.inflight || null })); } catch {} }
+  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', category: normalizeSessionCategory(s.category) || null, settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, workspace: sessionWorkspaceOf(s), queue: s.queue, inflight: s.inflight || null })); } catch {} }
 function activityLabelForEvent(o, previous = '') {
   if (!o || !o.type) return '';
   if (o.type === 'turn_start') return 'Starting';
@@ -4907,7 +4943,7 @@ ${recentImgs.map(({ paths, caption }) => `- ${paths.join(', ')}${caption ? `\n  
   })();
 }
 function ensureTail(s, fromLine, codexFromOffset = null) {
-  if (sessionIsTeam(s) || !s.sessionId || s.tailStop || s._tailWait) return;
+  if (sessionUsesTeamSandbox(s) || !s.sessionId || s.tailStop || s._tailWait) return;
   if (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId]) {
     const rec = (loadCodex().sessions || {})[s.sessionId] || {};
     const rollout = findCodexRollout(CODEX_HOME, s.sessionId) || rec.transcriptPath;
@@ -4967,7 +5003,7 @@ function ensureFirstPromptLanded(s, rec, prompt, attempt = 0) {
 // chats whose sessionId resolves only after the first turn begins.
 setInterval(() => { for (const s of RT.values()) { if (s.subs.size && s.sessionId) checkWaiting(s).catch(() => {}); } }, 1200);
 async function checkWaiting(s) {
-  if (sessionIsTeam(s) || !s.sessionId || !s.subs.size) return; // team has no host RC bridge
+  if (sessionUsesTeamSandbox(s) || !s.sessionId || !s.subs.size) return; // sandbox has no host RC bridge
   const st = rcEngine.sessionState(s.sessionId);
   const waiting = !!(st && st.status === 'waiting');
   if (!waiting) {
@@ -4993,7 +5029,7 @@ async function checkWaiting(s) {
 }
 async function answerWaiting(extKey, sel) {
   const s = rt(extKey);
-  if (sessionIsTeam(s) || !s.sessionId) return;
+  if (sessionUsesTeamSandbox(s) || !s.sessionId) return;
   try {
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
@@ -5027,7 +5063,7 @@ function attachProcessGroupKiller(proc) {
 function enqueue(extKey, msg) {
   const s = rt(extKey);
   msg.qid = randomBytes(4).toString('hex');
-  if (sessionIsTeam(s)) {
+  if (sessionUsesTeamSandbox(s)) {
     msg.cwd = team.guestCwd(msg.cwd || s.cwd);
     msg.agent = ['codex', 'claude'].includes(msg.agent) ? msg.agent : (s.agent === 'claude' ? 'claude' : 'codex');
     s.cwd = msg.cwd; s.agent = msg.agent;
@@ -5547,15 +5583,15 @@ const CODEX_TURN_TIMEOUT_MS = 45 * 60 * 1000;
 // turn is mirrored to desktop + the official app, and uses the Max subscription.
 function runTurn(s, msg) {
   return new Promise((resolve) => {
-    const teamSession = sessionIsTeam(s);
-	    if (msg.mode === 'bash') {
+    const sandboxed = sessionUsesTeamSandbox(s);
+    if (msg.mode === 'bash') {
       const emit = (o) => bcast(s, o);
       // Bash mode is owner-only. It runs the raw string with no agent in the loop, so the
       // workspace clamp on `cwd` buys nothing — `cat ~/.ssh/id_ed25519` ignores cwd
       // entirely. A guest who needs a command can ask the agent to run it, which at least
       // goes through the agent's own tooling.
-      if (teamSession) {
-        bcast(s, { type: 'bash_out', text: 'Bash mode is not available in a team session. Ask a sandboxed Team agent to run the command instead.\n' });
+      if (sandboxed) {
+        bcast(s, { type: 'bash_out', text: 'Bash mode is not available in a sandboxed guest session. Ask the agent to run the command instead.\n' });
         bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
         return resolve();
       }
@@ -5565,25 +5601,26 @@ function runTurn(s, msg) {
       p.stderr.on('data', (d) => emit({ type: 'bash_out', text: d.toString() }));
       p.on('close', (code) => { s.bashProc = null; bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: code, canceled: s.canceled }); resolve(); });
       return;
-	    }
+    }
     const requestedAgent = msg.agent || s.agent || 'claude';
-    if (teamSession && !['codex', 'claude'].includes(requestedAgent)) {
-      bcast(s, { type: 'error', msg: 'Team sessions run only with sandboxed Codex or Claude.' });
+    if (sandboxed && !['codex', 'claude'].includes(requestedAgent)) {
+      bcast(s, { type: 'error', msg: 'Sandboxed guest sessions run only with Codex or Claude.' });
       bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, exit: 1 });
       return resolve();
     }
-	    if (requestedAgent === 'codex') return runCodexTurn(s, msg, resolve);
-	    if (teamSession && requestedAgent === 'claude') return runTeamClaudeTurn(s, msg, resolve);
+    if (requestedAgent === 'codex') return runCodexTurn(s, msg, resolve);
+    if (sandboxed && requestedAgent === 'claude') return runTeamClaudeTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'deepseek') return runDeepSeekTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
-	    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+    if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
     let prompt = msg.text || '';
     if (Array.isArray(msg.images) && msg.images.length) {
       const isImg = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
       prompt = msg.images.map((pp) => `[${isImg(pp) ? 'Image' : 'File'} attached at ${pp} — view it with the Read tool]`).join('\n') + '\n\n' + prompt;
     }
+    if (sessionInTeamWorkspaceOf(s) && s.sessionId) prompt += teamChatContextForAgent(s.sessionId);
 
     let done = false;
     const finish = () => {
@@ -5623,6 +5660,7 @@ function runTurn(s, msg) {
           await rec.session_p;                 // real id appears once the JSONL is created
           s.sessionId = rec.sessionId;
           ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+          if (sessionInTeamWorkspaceOf(s)) team.setShared(s.sessionId, true, 'owner', s.cwd);
           if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
           persist(s);
           // If this chat was started with an EXPLICIT title (e.g. delegating a Linear
@@ -5643,11 +5681,12 @@ function runTurn(s, msg) {
         finish();
       }
     })();
-	  });
-	}
+  });
+}
 function runCodexTurn(s, msg, resolve) {
-  const teamSession = sessionIsTeam(s);
-  if (teamSession) s.cwd = team.guestCwd(s.cwd || msg.cwd);
+  const sandboxed = sessionUsesTeamSandbox(s);
+  const inTeamWorkspace = sessionInTeamWorkspaceOf(s);
+  if (sandboxed) s.cwd = team.guestCwd(s.cwd || msg.cwd);
   if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
   // Existing/native chats may already have a rollout watcher. Pause it while this Box-owned
   // turn runs; codexEngine is the single live source until the child exits, then finish()
@@ -5674,7 +5713,7 @@ function runCodexTurn(s, msg, resolve) {
   // a resume already has s.sessionId, so it's untouched.
   if (!s.sessionId) {
     s.provKey = s.key;
-    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category });
+    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category, createdBy: s.createdBy || null, teamSandbox: sandboxed, workspace: sessionWorkspaceOf(s) });
     appendCodexMessage(s.provKey, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered });
     addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
@@ -5713,8 +5752,8 @@ function runCodexTurn(s, msg, resolve) {
       deleteRunning(s.provKey);
       if (!s.canceled) appendCodexMessage(s.provKey, 'assistant', lastError ? `⚠️ Codex didn't start: ${lastError}` : "⚠️ Codex didn't start — send again to retry.");
     }
-    if (s.sessionId && !sessionIsTeam(s)) ensureTail(s);
-    if (s.sessionId && !s.canceled && !teamSession) triggerAttentionUpdate(s);
+    if (s.sessionId && !sessionUsesTeamSandbox(s)) ensureTail(s);
+    if (s.sessionId && !s.canceled && !sandboxed) triggerAttentionUpdate(s);
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
@@ -5725,14 +5764,14 @@ function runCodexTurn(s, msg, resolve) {
   s.proc = codexEngine.run({
     sessionId: s.sessionId,
     cwd: s.cwd,
-    prompt: `${msg.text || ''}${teamSession && s.sessionId ? teamChatContextForAgent(s.sessionId) : ''}`,
+    prompt: `${msg.text || ''}${inTeamWorkspace && s.sessionId ? teamChatContextForAgent(s.sessionId) : ''}`,
     images: msg.images || [],
     settings: (s.settings || {}).codex || DEFAULT_SETTINGS.codex,
     guest: sessionIsGuest(s),
-    team: teamSession,
-    teamWorkspace: teamSession ? team.ensureWorkspace() : '',
-    teamEnv: teamSession ? team.secretsEnv({ provider: 'codex' }) : {},
-    teamUser: teamSession ? team.systemUserForMember(s.createdBy) : '',
+    team: sandboxed,
+    teamWorkspace: sandboxed ? team.ensureWorkspace() : '',
+    teamEnv: sandboxed ? team.secretsEnv({ provider: 'codex' }) : {},
+    teamUser: sandboxed ? team.systemUserForMember(s.createdBy) : '',
     onEvent: (ev) => {
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;
@@ -5744,14 +5783,14 @@ function runCodexTurn(s, msg, resolve) {
         if (provKey && provKey !== s.sessionId) {
           const wasShared = team.isShared(provKey);
           deleteRunning(provKey); migrateCodexSession(provKey, s.sessionId);
-          if (wasShared) { team.setShared(s.sessionId, true, 'owner', s.cwd); team.setShared(provKey, false); }
+          if (wasShared || inTeamWorkspace) { team.setShared(s.sessionId, true, 'owner', s.cwd); team.setShared(provKey, false); }
         }
         // A chat created from the Team tab is shared from its first durable turn.
         // Its transcript, sandboxed workspace, and companion team chat stay one unit.
-        if (teamSession) team.setShared(s.sessionId, true, 'owner', s.cwd);
+        if (inTeamWorkspace) team.setShared(s.sessionId, true, 'owner', s.cwd);
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category });
+        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category, createdBy: s.createdBy || null, teamSandbox: sandboxed, workspace: sessionWorkspaceOf(s) });
         if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered }); // provisional path already appended it
         persist(s);
         if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'codex' }); } catch {} }
@@ -5784,7 +5823,7 @@ function runCodexTurn(s, msg, resolve) {
         // the rollout (codexContext) rather than ev.info, which is the cumulative session
         // total and would inflate the meter to "999%". Fall back to ev.info if the rollout
         // isn't readable yet (e.g. brand-new session before its first token_count flush).
-        if (s.sessionId && !teamSession) s.context = updateCodexContext(s.sessionId, ev.info, codexContext(s.sessionId, (s.context || {}).model || ''));
+        if (s.sessionId && !sandboxed) s.context = updateCodexContext(s.sessionId, ev.info, codexContext(s.sessionId, (s.context || {}).model || ''));
         else s.context = contextFromCodexInfo(ev.info, s.context || {});
         persist(s);
         bcast(s, { type: 'context', context: s.context });
@@ -5816,6 +5855,7 @@ s.proc.on('close', () => finish());
 // Team Claude is intentionally separate from the owner’s remote-control Claude path:
 // it always goes through the Unix/bwrap launcher and retains its Team-only transcript.
 function runTeamClaudeTurn(s, msg, resolve) {
+  const inTeamWorkspace = sessionInTeamWorkspaceOf(s);
   s.cwd = team.guestCwd(s.cwd || msg.cwd);
   const isNew = !s.sessionId;
   const sessionId = s.sessionId || randomUUID();
@@ -5828,9 +5868,10 @@ function runTeamClaudeTurn(s, msg, resolve) {
   ensureTeamClaudeSession(sessionId, {
     cwd: s.cwd, title: s.title || initialTitle || 'Team Claude chat', settings: s.settings,
     parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', lastUsed: Date.now(),
+    createdBy: s.createdBy || null, teamSandbox: true, workspace: sessionWorkspaceOf(s),
   });
   appendTeamClaudeMessage(sessionId, 'user', userText, { parts: codexUserParts(userText, msg.images || []), qid: msg.qid, author: msg.author });
-  team.setShared(sessionId, true, 'owner', s.cwd);
+  if (inTeamWorkspace) team.setShared(sessionId, true, 'owner', s.cwd);
   persist(s);
   if (isNew) bcast(s, { type: 'session', id: sessionId, agent: 'claude', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
 
@@ -5852,7 +5893,7 @@ function runTeamClaudeTurn(s, msg, resolve) {
     const isImg = (p) => /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i.test(p || '');
     prompt = msg.images.map((p) => `[${isImg(p) ? 'Image' : 'File'} attached at ${p} — view it with the Read tool]`).join('\n') + '\n\n' + prompt;
   }
-  prompt += teamChatContextForAgent(sessionId);
+  if (inTeamWorkspace) prompt += teamChatContextForAgent(sessionId);
   s.turnTimer = setTimeout(() => {
     if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
     lastError = 'Timed out after 12 minutes';
@@ -6378,8 +6419,12 @@ wss.on('connection', (ws) => {
     const s = RT.get(resolveKey(key)) || null;
     const id = (s && s.sessionId) || key;
     // A brand-new chat has no session id yet; it is claimed for this guest on creation.
-    if (!s || !s.sessionId) return String(key || '').startsWith('new-') || team.canAccessSession(ws.principal, id);
-    return team.canAccessSession(ws.principal, id);
+    // Once a provisional key has an owner, a second guest may not subscribe to it.
+    if (!s || !s.sessionId) {
+      if (s && s.createdBy) return s.createdBy === ws.principal.id;
+      return String(key || '').startsWith('new-') || principalCanAccessSession(ws.principal, id);
+    }
+    return principalCanAccessSession(ws.principal, id);
   };
   const deny = () => { try { ws.send(JSON.stringify({ type: 'error', msg: 'not shared with you' })); } catch {} };
   ws.on('message', (raw) => {
@@ -6388,31 +6433,42 @@ wss.on('connection', (ws) => {
     if (m.type === 'subscribe') {
       unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
       broadcastPresence(s);
-      if (s.sessionId && !sessionIsTeam(s)) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
-      if (s.sessionId && !s.context && !sessionIsTeam(s)) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
-      const teamSession = s.sessionId && sessionIsTeam(s);
+      if (s.sessionId && !sessionUsesTeamSandbox(s)) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
+      if (s.sessionId && !s.context && !sessionUsesTeamSandbox(s)) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
+      const teamSession = s.sessionId && sessionInTeamWorkspaceOf(s);
+      const guestStore = isGuest;
       ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null,
-        archived: s.sessionId ? (teamSession ? loadTeamArchived() : loadArchived()).has(s.sessionId) : false,
-        favorite: s.sessionId ? (teamSession ? teamFavoritesFor(ws.principal) : loadFavorites()).has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
+        archived: s.sessionId ? (teamSession || guestStore ? loadTeamArchived() : loadArchived()).has(s.sessionId) : false,
+        favorite: s.sessionId ? (teamSession || guestStore ? teamFavoritesFor(ws.principal) : loadFavorites()).has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
         me: team.authorOf(ws.principal), curAuthor: s.curAuthor || null,
         shared: !!teamSession,
-        teamChat: s.sessionId && sessionIsTeam(s) ? team.listSessionChat(s.sessionId) : [],
+        workspace: sessionWorkspaceOf(s),
+        teamChat: s.sessionId && sessionInTeamWorkspaceOf(s) ? team.listSessionChat(s.sessionId) : [],
         viewers: principalsOf(s), typing: typingNow(s) }));
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       const s0 = rt(m.key);
-      if (isGuest && s0.sessionId && !sessionIsTeam(s0)) {
-        try { ws.send(JSON.stringify({ type: 'error', msg: 'This legacy chat must be imported into the shared workspace before it can run.' })); } catch {}
+      if (isGuest && s0.sessionId && !sessionUsesTeamSandbox(s0)) {
+        try { ws.send(JSON.stringify({ type: 'error', msg: 'This owner chat is view-only for team members. Fork it to continue in your own workspace.' })); } catch {}
         return;
       }
-      if (!s0.sessionId && (isGuest || m.team === true)) {
-        if (isGuest) s0.createdBy = ws.principal.id;
-        s0.teamSandbox = true;
-        s0.agent = ['codex', 'claude'].includes(m.agent) ? m.agent : 'codex';
-        s0.cwd = team.guestCwd(m.cwd || s0.cwd);
+      if (!s0.sessionId) {
+        s0.workspace = normalizeSessionWorkspace(m.workspace) || (m.team === true ? 'team' : 'personal');
+        if (isGuest) {
+          s0.createdBy = ws.principal.id;
+          s0.teamSandbox = true;
+          s0.agent = ['codex', 'claude'].includes(m.agent) ? m.agent : 'codex';
+          s0.cwd = team.guestCwd(m.cwd || s0.cwd);
+        } else {
+          s0.createdBy = null;
+          s0.teamSandbox = false;
+          s0.agent = m.agent || s0.agent || 'claude';
+          s0.cwd = m.cwd || s0.cwd || DEFAULT_CWD;
+        }
         persist(s0);
       }
-      const teamSession = sessionIsTeam(s0);
+      const teamSession = sessionInTeamWorkspaceOf(s0);
+      const sandboxed = sessionUsesTeamSandbox(s0);
       const shared = teamSession;
       // In a SHARED session the sender's name is folded into the prompt itself, so the
       // agent knows who it's answering and the durable JSONL transcript records
@@ -6423,7 +6479,7 @@ wss.on('connection', (ws) => {
       enqueue(m.key, {
         text: shared ? team.attributePrompt(rawText, ws.principal) : rawText,
         displayText: m.displayText != null ? m.displayText : (shared ? rawText : undefined),
-        author, images: m.images || [], mode: m.mode || 'normal', agent: teamSession ? (['codex', 'claude'].includes(s0.agent) ? s0.agent : 'codex') : (m.agent || 'claude'),
+        author, images: m.images || [], mode: m.mode || 'normal', agent: sandboxed ? (['codex', 'claude'].includes(s0.agent) ? s0.agent : 'codex') : (m.agent || s0.agent || 'claude'),
         // Who sent THIS turn, as opposed to who owns the session — bash mode is refused
         // per-turn, so a guest can't shell out through a chat the owner started.
         byGuest: isGuest,
@@ -6431,14 +6487,14 @@ wss.on('connection', (ws) => {
         // cwd the client asks for; the clamp is here on the server, never in the UI. Since
         // sharing a chat admits its folder, this normally leaves a shared chat exactly where
         // the owner left it — the clamp only bites on a directory nobody shared.
-        cwd: teamSession ? team.guestCwd(m.cwd || s0.cwd) : m.cwd,
+        cwd: sandboxed ? team.guestCwd(m.cwd || s0.cwd) : (m.cwd || s0.cwd),
         force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
         category: normalizeSessionCategory(m.category) || undefined,
       });
       if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
     } else if (m.type === 'team_chat') {
       const s = rt(m.key);
-      if (!s.sessionId || !sessionIsTeam(s) || !team.canAccessSession(ws.principal, s.sessionId)) return deny();
+      if (!s.sessionId || !sessionInTeamWorkspaceOf(s) || !principalCanAccessSession(ws.principal, s.sessionId)) return deny();
       const message = team.appendSessionChat(s.sessionId, m.text, ws.principal);
       if (!message) { try { ws.send(JSON.stringify({ type: 'error', msg: 'Team chat message cannot be empty.' })); } catch {} return; }
       bcast(s, { type: 'team_chat', message });
@@ -6455,13 +6511,15 @@ wss.on('connection', (ws) => {
       s.settings = normalizeSettings(m.settings || s.settings || {});
       // A guest must not be able to relocate a session out of the team's folders by
       // pushing a settings frame — clamp before the directory check, not after.
-      const teamSession = sessionIsTeam(s);
+      const teamSession = sessionUsesTeamSandbox(s);
       const nextCwd = teamSession ? team.guestCwd(expandUserPath(m.cwd || s.cwd)) : (isGuest ? team.guestCwd(expandUserPath(m.cwd)) : expandUserPath(m.cwd));
       if (nextCwd && validateDirectory(nextCwd)) s.cwd = nextCwd;
       if (teamSession && !['codex', 'claude'].includes(s.agent)) s.agent = 'codex';
       persist(s);
-      if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
-      if (s.sessionId && s.agent === 'claude' && teamSession) ensureTeamClaudeSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      const workspace = sessionWorkspaceOf(s);
+      const attrs = { cwd: s.cwd, settings: s.settings, lastUsed: Date.now(), createdBy: s.createdBy || null, teamSandbox: teamSession, workspace };
+      if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, attrs);
+      if (s.sessionId && s.agent === 'claude' && teamSession) ensureTeamClaudeSession(s.sessionId, attrs);
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'deepseek') ensureDeepSeekSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
