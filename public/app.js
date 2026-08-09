@@ -245,17 +245,17 @@ function renderRoute(s) {
         // `remote` chats live on the box we joined — re-resolve the endpoint here so a
         // reload or Back/Forward lands on the same server the chat was opened against.
         if (s.remote && !teamEp() && !isGuestHere()) { openSessions(); break; }
-        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, shared: !!s.remote || s.workspace === 'team', team: !!s.remote || s.workspace === 'team' });
+        if (s.id) openChat({ id: s.id, title: s.title, agent: s.agent, ep: s.remote ? teamApiEp() : null, workspace: s.workspace, shared: !!s.remote || s.workspace === 'team', team: !!s.remote || s.workspace === 'team' });
         else if (s.new) {
           const teamNew = !!s.team || !!s.remote || s.workspace === 'team';
-          openChat({ id: null, title: 'New chat', cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent: teamNew ? (s.agent === 'claude' ? 'claude' : 'codex') : configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, shared: teamNew, team: teamNew });
+          openChat({ id: null, title: 'New chat', cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent: teamNew ? (s.agent === 'claude' ? 'claude' : 'codex') : configuredDefaultAgent(), ep: s.remote ? teamApiEp() : null, workspace: teamNew ? 'team' : 'personal', shared: teamNew, team: teamNew });
         }
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); }
         else openSessions();
         break;
       case 'chatAttn':
         if (s.id && cur.id === s.id && chatVisible()) { if (!attnMode) showAttention(); }
-        else if (s.id) { openChat({ id: s.id, title: s.title, agent: s.agent }).then(() => showAttention()); }
+        else if (s.id) { openChat({ id: s.id, title: s.title, agent: s.agent, workspace: s.workspace, shared: s.workspace === 'team', team: s.workspace === 'team' }).then(() => showAttention()); }
         else if (s.key && cur.key === s.key) { show('chat'); if (!ws || ws.readyState > 1) connectWS(); if (!attnMode) showAttention(); }
         else openSessions();
         break;
@@ -841,9 +841,9 @@ async function login() {
   let role = 'owner';
   try { role = (await r.json()).role || 'owner'; } catch {}
   TOKEN = token; LS.setItem('cc_token', token);
-  // A guest token opens the same URL into the reduced, team-scoped app — a deep link to
-  // this box's session list would only 403, so guests land on Team.
-  const initialRoute = role === 'guest' ? { view: 'sessions', filter: 'all', workspace: 'team' } : ((history.state && history.state.returnTo) || routeFromLocation());
+  const initialRoute = role === 'guest'
+    ? { view: 'sessions', filter: 'all', workspace: LS.getItem('box_workspace') === 'personal' ? 'personal' : 'team' }
+    : ((history.state && history.state.returnTo) || routeFromLocation());
   navTo(initialRoute, { replace: true });
   loadConfig(); renderRoute(initialRoute);
 }
@@ -865,29 +865,29 @@ const TEAM_STATUS_TABS = [['all', 'Active'], ['favorites', 'Favorites'], ['needs
 const AUTO_SUBS = [['healer', 'Healer'], ['scheduled', 'Scheduled'], ['other-auto', 'Other']];
 const STATUS_LABEL = { working: 'Working', needs_input: 'Needs input', live: 'Connected', archived: 'Archived' };  // idle has no label
 
-const activeWorkspace = () => isGuestHere() ? 'team' : currentWorkspace;
+const activeWorkspace = () => currentWorkspace;
 function renderWorkspaceButton() {
   const btn = $('workspaceBtn'); if (!btn) return;
   const team = activeWorkspace() === 'team';
   btn.textContent = team ? 'Team' : 'Personal';
-  btn.title = isGuestHere() ? 'Team workspace' : `Switch workspace (currently ${team ? 'Team' : 'Personal'})`;
+  btn.title = `Switch workspace (currently ${team ? 'Team' : 'Personal'})`;
 }
 function setWorkspace(workspace) {
   currentWorkspace = workspace === 'team' ? 'team' : 'personal';
-  if (!isGuestHere()) LS.setItem('box_workspace', currentWorkspace);
+  LS.setItem('box_workspace', currentWorkspace);
   return openSessions('all', currentWorkspace);
 }
 async function openSessions(filter = 'all', workspace = activeWorkspace()) {
   if (filter === 'shared' || filter === 'team') { workspace = 'team'; filter = 'all'; }
-  workspace = isGuestHere() ? 'team' : (workspace === 'team' ? 'team' : 'personal');
+  workspace = workspace === 'team' ? 'team' : 'personal';
   currentWorkspace = workspace;
-  if (!isGuestHere()) LS.setItem('box_workspace', workspace);
+  LS.setItem('box_workspace', workspace);
   navTo({ view: 'sessions', filter, workspace }); show('sessions'); await fetchSessions(filter, workspace);
 }
 let lastSessionRenderSig = '';
 async function fetchSessions(filter, workspace = activeWorkspace()) {
   if (filter === 'shared' || filter === 'team') { workspace = 'team'; filter = 'all'; }
-  workspace = isGuestHere() ? 'team' : (workspace === 'team' ? 'team' : 'personal');
+  workspace = workspace === 'team' ? 'team' : 'personal';
   currentWorkspace = workspace;
   curFilter = filter || 'all';
   const d = await (await api('/api/sessions?filter=' + encodeURIComponent(curFilter) + '&workspace=' + workspace)).json();
@@ -1166,7 +1166,7 @@ function attachSwipeActions(card, front, s) {
     if (bulkMode) { e.preventDefault(); e.stopPropagation(); toggleBulkSelection(s.id, !bulkSelected.has(s.id)); return; }
     if (open) { e.preventDefault(); e.stopPropagation(); close(); return; }   // tap front to dismiss
     if (moved && horiz) { e.preventDefault(); return; }                       // was a swipe, not a tap
-    openChat({ ...s, team: activeWorkspace() === 'team' || !!s.team, shared: activeWorkspace() === 'team' || !!s.shared });
+    openChat({ ...s, workspace: s.workspace || activeWorkspace(), team: (s.workspace || activeWorkspace()) === 'team', shared: (s.workspace || activeWorkspace()) === 'team' });
   });
   return { close, isOpen: () => open };
 }
@@ -1561,8 +1561,8 @@ $('newBtn').onclick = () => {
   const rows = order.map((agent) => ({
     ic: agentIcon(agent),
     label: agentLabel(agent),
-    desc: teamNew ? 'Shared team workspace · OS-sandboxed' : (agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0]),
-    fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent, shared: teamNew, team: teamNew }); },
+    desc: teamNew ? 'Shared with your team' : (agent === def ? `Default · ${labels[agent][0]}` : labels[agent][0]),
+    fn: () => { setAgent(agent); openChat({ id: null, title: labels[agent][1], cwd: teamNew ? (teamWorkspaceRoot() || defaultCwd) : defaultCwd, agent, workspace: teamNew ? 'team' : 'personal', shared: teamNew, team: teamNew }); },
   }));
   openSheet('New chat', rows);
 };
@@ -1571,7 +1571,6 @@ if ($('homeLink')) $('homeLink').onclick = (e) => {
   openSessions('all');
 };
 if ($('workspaceBtn')) $('workspaceBtn').onclick = () => {
-  if (isGuestHere()) return toast('You are in the Team workspace');
   const now = activeWorkspace();
   openSheet('Choose workspace', [
     { ic: '⌂', label: 'Personal', desc: 'Your private sessions, archive, and favorites', fn: () => now === 'personal' ? closeSheet() : setWorkspace('personal') },
@@ -1646,7 +1645,7 @@ function sessResultRow(s) {
   row.querySelector('.sresAge').textContent = s.age || '';
   row.querySelector('.sresMeta').textContent = [shortCwd(s.cwd), searchMatchLabel(s)].filter(Boolean).join(' · ');
   if (s.preview) row.querySelector('.sresSnip').textContent = stripMd(s.preview);
-  row.onclick = () => { sessSearchClose(); openChat({ id: s.id, title: s.title, agent, cwd: s.cwd }); };
+  row.onclick = () => { sessSearchClose(); openChat({ id: s.id, title: s.title, agent, cwd: s.cwd, workspace: s.workspace, shared: s.workspace === 'team', team: s.workspace === 'team' }); };
   return row;
 }
 function searchMatchLabel(s) {
@@ -2058,7 +2057,7 @@ function renderIssueSessions(list) {
     row.querySelector('.sessTitle').textContent = s.title;
     row.querySelector('.sessSub').textContent = `${s.agent}${s.category === 'auto' ? ' · auto' : ''} · ${s.mentions}× · ${relTime(s.mtime)}${deleg ? ' · 🤖 delegated' : ''}`;
     if (deleg) row.classList.add('sessDeleg');
-    row.onclick = () => openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
+    row.onclick = () => openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent, workspace: s.workspace, shared: s.workspace === 'team', team: s.workspace === 'team' });
     sec.appendChild(row);
   }
   $('issueScroll').appendChild(sec);
@@ -2318,7 +2317,7 @@ async function resumeIssueSession(s, d) {
     branchSlug: d.identifier.toLowerCase(),
     agentBranch: agentBranch(s.agent),
   });
-  await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent });
+  await openChat({ id: s.id, title: s.title, cwd: s.cwd, agent: s.agent, workspace: s.workspace, shared: s.workspace === 'team', team: s.workspace === 'team' });
   enqueueText(cont);
   await recordDelegation(d.identifier, { agent: s.agent, kind: 'resume', sessionId: s.id, sessionTitle: s.title });
   toast(`Resumed ${d.identifier} in ${AGENT_LABEL[s.agent] || s.agent}`);
@@ -2560,12 +2559,13 @@ async function openChat(s) {
   if (historyAbortController) historyAbortController.abort();
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', category: s.category || '', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id,
+  const workspace = s.workspace === 'team' || s.team || s.shared ? 'team' : 'personal';
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', category: s.category || '', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id, workspace,
     // A chat opened from the Team screen runs on the HOST's box: every request and the
     // live socket for it must target that endpoint for as long as it stays open.
-    ep: s.ep || null, shared: !!s.shared || !!s.team, team: !!s.team, teamChat: [] };
+    ep: s.ep || null, shared: workspace === 'team', team: workspace === 'team', teamChat: [] };
   syncCurrentCard();   // move the sidebar highlight onto the chat we're opening (desktop sidebar persists across nav)
-  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote), team: cur.team, workspace: cur.team ? 'team' : activeWorkspace() });
+  navTo({ view: 'chat', id: cur.id, title: cur.title, agent: cur.agent, key: cur.key, archived: cur.archived, remote: !!(cur.ep && cur.ep.remote), team: cur.team, workspace: cur.workspace });
   images = []; renderAttach(); renderQueue([]); setMode('normal'); setAgent(cur.agent);
   restoreDraft();   // per-chat composer text (replaces whatever was left from the previous chat)
   setChatTitle(cur.title);
@@ -3826,7 +3826,7 @@ function onServer(o) {
   // The broadcast is what tells OTHER viewers (and other tabs) that sharing changed, so it
   // repaints the list too — otherwise the Team badge and the Shared tab count stay stale
   // until the next poll. The person who tapped gets their own toast from doShare().
-  else if (o.type === 'share') { cur.shared = !!o.shared; cur.team = cur.team || !!o.shared; renderPresence(); renderTeamChat(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
+  else if (o.type === 'share') { cur.workspace = o.workspace === 'team' || o.shared ? 'team' : 'personal'; cur.shared = cur.workspace === 'team'; cur.team = cur.shared; renderPresence(); renderTeamChat(); toast(o.shared ? 'Shared with your team' : 'No longer shared'); refreshSessionsSoon(150); }
   else if (o.type === 'revoked') { onTeamAccessLost(); }
 }
 function onSync(o) {
@@ -3836,7 +3836,11 @@ function onSync(o) {
   // Identity + presence for a shared chat. `me` is per-connection and authoritative —
   // it's how the same transcript can say "(you)" on the host's box and on a guest's.
   if (o.me) cur.me = o.me;
-  if (typeof o.shared === 'boolean') { cur.shared = o.shared || !!cur.team; cur.team = cur.team || o.shared; }
+  if (o.workspace === 'team' || o.workspace === 'personal') {
+    cur.workspace = o.workspace; cur.shared = o.workspace === 'team'; cur.team = cur.shared;
+  } else if (typeof o.shared === 'boolean') {
+    cur.shared = o.shared; cur.team = o.shared; cur.workspace = o.shared ? 'team' : 'personal';
+  }
   if (Array.isArray(o.teamChat)) cur.teamChat = o.teamChat;
   cur.viewers = o.viewers || []; cur.typing = o.typing || [];
   renderPresence(); renderTeamChat();
@@ -4033,7 +4037,7 @@ function enqueueText(text, opts = {}) {
     const s = allSessions.find((x) => x.id === cur.id); if (s) s.archived = false;
     fetchSessions(curFilter === 'archived' ? 'all' : curFilter);
   }
-  const payload = { type: 'enqueue', key: cur.key, text, images: opts.images || [], mode: cur.mode, agent: cur.agent || 'claude', cwd: cur.cwd, team: !!cur.team };
+  const payload = { type: 'enqueue', key: cur.key, text, images: opts.images || [], mode: cur.mode, agent: cur.agent || 'claude', cwd: cur.cwd, workspace: cur.workspace, team: cur.workspace === 'team' };
   if (opts.force) payload.force = true;  // take-over: spawn the box's bridge even though a foreign owner is live
   if (opts.displayText != null) payload.displayText = opts.displayText;
   if (opts.parentId || cur.parentId) payload.parentId = opts.parentId || cur.parentId;
@@ -4081,7 +4085,7 @@ async function handleNativeSlash(text) {
   if (name === 'archive') { if (cur.id) openArchiveConfirm({ id: cur.id, title: cur.title, archived: cur.archived }, { leaveChat: true }); else toast('Nothing to archive yet'); return true; }
   if (name === 'delete') { confirmDeleteCodexThread(); return true; }
   if (name === 'resume' || name === 'exit') { openSessions('all'); return true; }
-  if (name === 'new' || name === 'clear') { openChat({ id: null, title: 'New Codex chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings }); return true; }
+  if (name === 'new' || name === 'clear') { openChat({ id: null, title: 'New Codex chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings, workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' }); return true; }
   if (name === 'fork') { confirmFork(); return true; }
   if (name === 'side') { if (args) await runBtw(args); else putComposer('/side '); return true; }
   if (name === 'mention' || name === 'ide') { putComposer(args ? `@${args} ` : '@'); setTimeout(onType, 30); return true; }
@@ -4734,6 +4738,8 @@ async function continueWithAgent(targetAgent) {
     title: cur.title || 'Box chat',
     cwd: h.cwd || cur.cwd || defaultCwd,
     agent: agentType(cur.agent),
+    workspace: cur.workspace,
+    ep: cur.ep,
   };
   // Don't stack "Codex: Claude: …" titles across repeated switches.
   const baseTitle = source.title.replace(/^(Claude|Codex|Gemini|Antigravity):\s*/, '');
@@ -4742,7 +4748,7 @@ async function continueWithAgent(targetAgent) {
   const prompt = buildSwitchPrompt(source, targetAgent, messages);
   // carry = the prior transcript, rendered into the new chat so it reads as ONE continuous
   // conversation; the target agent also gets it as context via the seed prompt.
-  await openChat({ id: null, title, cwd: source.cwd, agent: targetAgent, settings: normalizeSettings(h.settings || cur.settings), parentId: source.id, parentTitle: source.title, carry: messages, carryFrom: AGENT_LABEL[source.agent] });
+  await openChat({ id: null, title, cwd: source.cwd, agent: targetAgent, settings: normalizeSettings(h.settings || cur.settings), parentId: source.id, parentTitle: source.title, carry: messages, carryFrom: AGENT_LABEL[source.agent], workspace: source.workspace, ep: source.ep, team: source.workspace === 'team', shared: source.workspace === 'team' });
   cur.firstUser = `Continued from ${source.title}`;
   enqueueText(prompt, { parentId: source.id, parentTitle: source.title, title, displayText: `↪ Continued in ${AGENT_LABEL[targetAgent]} — full prior context carried over` });
   toast(`Continuing in ${AGENT_LABEL[targetAgent]}`);
@@ -4753,10 +4759,10 @@ async function forkCurrent(opts = {}) {
   try { h = await loadConversationSnapshot(opts.throughIndex); }
   catch { return toast('Could not load parent history'); }
   const agent = agentType(cur.agent);
-  const parent = { id: cur.id, title: cur.title || 'Parent chat', cwd: h.cwd || cur.cwd || defaultCwd, settings: normalizeSettings(h.settings || cur.settings), agent };
+  const parent = { id: cur.id, title: cur.title || 'Parent chat', cwd: h.cwd || cur.cwd || defaultCwd, settings: normalizeSettings(h.settings || cur.settings), agent, workspace: cur.workspace, ep: cur.ep };
   const childTitle = (`Fork: ${parent.title}`).slice(0, 80);
   const prompt = buildForkPrompt(parent, h.messages || []);
-  await openChat({ id: null, title: childTitle, cwd: parent.cwd, agent, settings: parent.settings, parentId: parent.id, parentTitle: parent.title });
+  await openChat({ id: null, title: childTitle, cwd: parent.cwd, agent, settings: parent.settings, parentId: parent.id, parentTitle: parent.title, workspace: parent.workspace, ep: parent.ep, team: parent.workspace === 'team', shared: parent.workspace === 'team' });
   cur.firstUser = `Forked from ${parent.title}`;
   enqueueText(prompt, { parentId: parent.id, parentTitle: parent.title, title: childTitle, displayText: `Forked from ${parent.title}` });
   toast(opts.throughIndex != null ? 'Forked from that point' : 'Fork created');
@@ -4790,10 +4796,12 @@ async function runBtw(question) {
     cwd: (h && h.cwd) || cur.cwd || defaultCwd,
     settings: normalizeSettings((h && h.settings) || cur.settings),
     agent: agentType(cur.agent),
+    workspace: cur.workspace,
+    ep: cur.ep,
   };
   const title = (`BTW: ${question}`).replace(/\s+/g, ' ').slice(0, 80);
   const prompt = buildBtwPrompt(parent, (h && h.messages) || [], question);
-  await openChat({ id: null, title, cwd: parent.cwd, agent: parent.agent, settings: parent.settings, parentId: parent.id || null, parentTitle: parent.title });
+  await openChat({ id: null, title, cwd: parent.cwd, agent: parent.agent, settings: parent.settings, parentId: parent.id || null, parentTitle: parent.title, workspace: parent.workspace, ep: parent.ep, team: parent.workspace === 'team', shared: parent.workspace === 'team' });
   cur.firstUser = `/btw ${question}`;
   enqueueText(prompt, { parentId: parent.id || null, parentTitle: parent.title, title, displayText: `/btw ${question}` });
   toast('BTW side thread started');
@@ -4889,7 +4897,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'side') return putComposer('/side ');
   if (cmd.action === 'fork') return confirmFork();
   if (cmd.action === 'btw') { $('input').value = '/btw '; autoGrow(); refreshButton(); focusComposerSoon(); return; }
-  if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings });
+  if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings, workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' });
   if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
   if (cmd.action === 'review') return reviewCurrent();
   if (cmd.kind === 'skill' && (cur.agent === 'codex' || cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(`Use the ${cmd.name} skill.`);
@@ -5539,7 +5547,7 @@ function openArchiveConfirm(s, opts = {}) {
         // just deselect (a fresh new chat has no id, so syncCurrentCard clears the
         // highlight) and drop an empty new chat into the right pane. Mobile has no
         // side-by-side layout, so dropping back to the list is the expected result there.
-        if (isDesktopShell()) openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent });
+        if (isDesktopShell()) openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' });
         else openSessions();
       }
     } },
@@ -6794,12 +6802,16 @@ if ('serviceWorker' in navigator) {
 }
 const requestedRoute = routeFromLocation();
 if (TOKEN) {
+  // Older guest builds never stored a workspace choice because they were Team-only.
+  // Keep those existing users on Team after this upgrade; once they explicitly switch,
+  // their Personal/Team choice is durable like the owner's.
+  const savedWorkspaceBeforeConfig = LS.getItem('box_workspace');
   const initialRoute = requestedRoute;
   navTo(initialRoute, { replace: true });
-  // We don't yet know whether this token is the owner's or a guest's — /api/config answers
-  // that. Guests are constrained to the Team workspace, so ensure their first feed is Team once it lands.
   loadConfig().then(() => {
-    if (isGuestHere() && document.body.dataset.view !== 'chat') openSessions('all', 'team');
+    if (isGuestHere() && savedWorkspaceBeforeConfig !== 'team' && savedWorkspaceBeforeConfig !== 'personal' && document.body.dataset.view !== 'chat') {
+      openSessions('all', 'team');
+    }
   }).catch(() => {});
   renderRoute(initialRoute);
 }
