@@ -7,6 +7,18 @@ export const VOB_PRODUCTION_PROMPT_VERSION = 'rise4-vob-2026-07-31.v145-prioriti
 export const VOB_PRODUCTION_PROMPT_SOURCE = 'rise4-runtime-output-gate:COMPACT_RUNTIME_INSTRUCTIONS';
 export const VOB_PRODUCTION_MODEL = 'gpt-5.6-luna';
 
+// This is the production caller identity used when a packet does not carry an
+// explicit caller. Keep the fallback in one place so test rooms and payer calls
+// cannot silently disagree about who is speaking.
+export const VOB_PRODUCTION_CALLER = Object.freeze({
+  fullName: 'Jessica A',
+  firstName: 'Jessica',
+  lastName: 'not provided',
+  lastInitial: 'A',
+  lastInitialPhonetic: 'A as in Apple',
+  title: 'insurance coordinator',
+});
+
 export const VOB_PRODUCTION_RUNTIME_VARIABLES = Object.freeze([
   'caller_first_name', 'caller_last_name', 'caller_full_name', 'caller_last_initial', 'caller_last_initial_phonetic', 'caller_title',
   'practice_name', 'payer_name', 'provider_name', 'provider_address', 'rendering_npi', 'rendering_npi_spoken', 'group_npi', 'group_npi_spoken', 'tax_id', 'tax_id_spoken', 'rendering_state', 'provider_contract_status',
@@ -106,10 +118,20 @@ export function buildVobContextVariables(snapshot = {}) {
     benefit_channel: ['benefit_channel', 'service.benefit_channel'],
     live_rep_purpose: ['live_rep_purpose', 'call.purpose'],
   };
+  const callerFullName = factValue(facts, ['caller.full_name', 'caller_full_name']) || VOB_PRODUCTION_CALLER.fullName;
+  const callerNameParts = callerFullName.split(/\s+/).filter(Boolean);
+  const callerLastNameFromFullName = callerNameParts.length > 1 ? callerNameParts.at(-1) : '';
+  const callerFirstName = factValue(facts, ['caller.first_name', 'caller_first_name']) || callerNameParts[0] || VOB_PRODUCTION_CALLER.firstName;
+  const callerLastName = factValue(facts, ['caller.last_name', 'caller_last_name']) || callerLastNameFromFullName || VOB_PRODUCTION_CALLER.lastName;
+  const callerLastInitial = factValue(facts, ['caller.last_initial', 'caller_last_initial']) || (callerLastName === VOB_PRODUCTION_CALLER.lastName ? VOB_PRODUCTION_CALLER.lastInitial : callerLastName.slice(0, 1).toUpperCase());
+  const callerLastInitialPhonetic = factValue(facts, ['caller.last_initial_phonetic', 'caller_last_initial_phonetic']) || (callerLastInitial === VOB_PRODUCTION_CALLER.lastInitial ? VOB_PRODUCTION_CALLER.lastInitialPhonetic : `${callerLastInitial} as in ${callerLastInitial}`);
   const values = {
-    caller_first_name: factValue(facts, ['caller.first_name', 'caller_first_name']),
-    caller_last_name: factValue(facts, ['caller.last_name', 'caller_last_name']),
-    caller_full_name: factValue(facts, ['caller.full_name', 'caller_full_name']),
+    caller_first_name: callerFirstName,
+    caller_last_name: callerLastName,
+    caller_full_name: callerFullName,
+    caller_last_initial: callerLastInitial,
+    caller_last_initial_phonetic: callerLastInitialPhonetic,
+    caller_title: factValue(facts, ['caller.title', 'caller_title']) || VOB_PRODUCTION_CALLER.title,
     payer_name: clean(snapshot?.payerName) || factValue(facts, aliases.payer_name),
     live_rep_purpose: factValue(facts, aliases.live_rep_purpose) || 'eligibility and benefits',
     followup_focus_fields: [...new Set((Array.isArray(snapshot?.ledger) ? snapshot.ledger : []).flatMap((call) => (Array.isArray(call?.fields) ? call.fields : []).filter((field) => field?.status !== 'captured').map((field) => clean(field?.key, 180)).filter(Boolean)))].join(', '),

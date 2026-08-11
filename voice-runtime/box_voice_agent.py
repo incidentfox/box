@@ -76,7 +76,11 @@ def livekit_context_variable_block(values: Any) -> str:
         rows.append(f"{name}: {text}")
     if not rows:
         return ""
-    return "\n\nLIVEKIT CONTEXT VARIABLES (AUTHORITATIVE CALL PACKET)\n" + "\n".join(rows)
+    return (
+        "\n\nLIVEKIT CONTEXT VARIABLES (AUTHORITATIVE CALL PACKET)\n"
+        + "\n".join(rows)
+        + "\nUse these packet values as authoritative, including caller identity; do not say a supplied member, provider, or caller value is unavailable."
+    )
 
 
 async def fetch_vob_test_config(runtime: "RuntimeConfig", test_id: str) -> dict[str, Any]:
