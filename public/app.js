@@ -58,7 +58,7 @@ function onTeamAccessLost() {
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-luna', reasoningEffort: 'xhigh', sandbox: 'off', serviceTier: '', personality: '' },
+  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },
   agy: { model: '' },
@@ -2579,7 +2579,13 @@ async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   const workspace = s.workspace === 'team' || s.team || s.shared ? 'team' : 'personal';
-  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', category: s.category || '', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || cur.settings), context: s.context || null, firstUser: null, hadHistory: !!s.id, workspace,
+  // A BRAND-NEW chat starts from DEFAULT_SETTINGS, not from whatever the chat you were
+  // just in happened to use — otherwise one manual model/effort pick leaks into every
+  // chat you open afterwards and the configured default never actually applies. Callers
+  // that mean to carry settings forward (fork, branch, child, /new) pass s.settings.
+  // An existing chat (s.id) keeps cur.settings only as a placeholder until its own
+  // settings arrive with the history load below.
+  cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', category: s.category || '', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || (s.id ? cur.settings : null)), context: s.context || null, firstUser: null, hadHistory: !!s.id, workspace,
     // A chat opened from the Team screen runs on the HOST's box: every request and the
     // live socket for it must target that endpoint for as long as it stays open.
     ep: s.ep || null, shared: workspace === 'team', team: workspace === 'team', teamChat: [] };
@@ -4281,7 +4287,7 @@ $('modeChip').onclick = () => openSheet('Mode', [
 function refreshAgentChip() {
   const agent = agentType(cur.agent);
   const cfg = (cur.settings || {})[agent];
-  const rawModel = (cfg && cfg.model) || (agent === 'codex' ? 'gpt-5.6-luna' : agent === 'gemini' ? 'gemini-3.5-flash' : agent === 'agy' ? '' : agent === 'mac' ? 'gpt-5.6-sol' : 'claude-opus-5');
+  const rawModel = (cfg && cfg.model) || ((DEFAULT_SETTINGS[agent] || {}).model ?? 'claude-opus-5');
   const effort = (agent === 'codex' || agent === 'mac' || agent === 'deepseek') ? (cfg && cfg.reasoningEffort) : (agent === 'claude' ? (cfg && cfg.effort) : '');
   const modelName = agent === 'agy' && !rawModel ? 'Antigravity' : agentModelLabel(agent, rawModel);
   $('agentLabel').textContent = effort ? `${modelName} · ${effort}` : modelName;
