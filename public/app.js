@@ -4973,16 +4973,31 @@ const AGY_MODELS = [
   { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro Low', desc: 'Faster Pro route through agy' },
   { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro High', desc: 'Stronger Pro route through agy' },
 ];
+// Ordered cheapest → deepest; a model supports a prefix of this list.
 const CODEX_EFFORTS = [
   { id: 'low', label: 'Low', desc: 'Fastest' },
   { id: 'medium', label: 'Medium', desc: 'Balanced' },
   { id: 'high', label: 'High', desc: 'Deeper reasoning' },
-  { id: 'xhigh', label: 'XHigh', desc: 'Maximum depth' },
-  { id: 'max', label: 'Max', desc: 'Hardest tasks' },
+  { id: 'xhigh', label: 'XHigh', desc: 'Extra reasoning depth' },
+  { id: 'max', label: 'Max', desc: 'Maximum reasoning depth' },
+  { id: 'ultra', label: 'Ultra', desc: 'Maximum reasoning + automatic task delegation' },
 ];
-const codexEffortsForModel = (model) => String(model || '').startsWith('gpt-5.6')
-  ? CODEX_EFFORTS.filter((effort) => effort.id !== 'max')
-  : CODEX_EFFORTS;
+// Mirrors `supported_reasoning_levels` in Codex's own ~/.codex/models_cache.json: only the
+// GPT-5.6 family goes past xhigh, and `ultra` is Sol/Terra only. This used to be inverted —
+// it hid Max on 5.6 (where it works) and offered it on 5.5/5.4 (where it does not), so a
+// chat on Max showed NO effort selected and older models could be sent an effort they
+// reject. Codex takes whatever we pass, so the picker has to match the model.
+const codexEffortsForModel = (model) => {
+  const m = String(model || '');
+  const deepest = !m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max');
+  return CODEX_EFFORTS.slice(0, CODEX_EFFORTS.findIndex((e) => e.id === deepest) + 1);
+};
+// Switching models can strand an effort the new model doesn't take (Sol on Ultra → 5.5).
+// Fall back to the deepest that model does support rather than silently sending a bad value.
+const clampCodexEffort = (model, effort) => {
+  const allowed = codexEffortsForModel(model);
+  return allowed.some((e) => e.id === effort) ? effort : allowed[allowed.length - 1].id;
+};
 const CLAUDE_MODELS = [
   { id: 'claude-opus-5[1m]', label: 'Opus 5 · 1M', desc: 'Default — explicit 1M context' },
   { id: 'opus', label: 'Opus 4.8', desc: 'Previous Opus' },
@@ -5008,7 +5023,7 @@ function openModelSheet() {
     rows.push({ ic: '', label: 'Model', desc: 'Applies to the next Codex turn in this Box chat', fn: () => openModelSheet() });
     for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
       cur.settings.codex.model = m.id;
-      if (m.id.startsWith('gpt-5.6') && cur.settings.codex.reasoningEffort === 'max') cur.settings.codex.reasoningEffort = 'xhigh';
+      cur.settings.codex.reasoningEffort = clampCodexEffort(m.id, cur.settings.codex.reasoningEffort);
       sendSettings(); toast(`Codex model: ${m.label}`); openModelSheet();
     }));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
@@ -5042,7 +5057,7 @@ function openModelSheet() {
     rows.push({ ic: '', label: 'Model', desc: 'Codex model used on the next Computer Use turn (runs on your Mac)', fn: () => openModelSheet() });
     for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
       cur.settings.mac.model = m.id;
-      if (m.id.startsWith('gpt-5.6') && cur.settings.mac.reasoningEffort === 'max') cur.settings.mac.reasoningEffort = 'xhigh';
+      cur.settings.mac.reasoningEffort = clampCodexEffort(m.id, cur.settings.mac.reasoningEffort);
       sendSettings(); toast(`Computer Use model: ${m.label}`); openModelSheet();
     }));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
