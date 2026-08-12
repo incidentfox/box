@@ -35,9 +35,11 @@ URL_FILE="$STATE_DIR/url.txt"
 SERVER_UNIT_PREFIX="${BOX_SERVER_UNIT_PREFIX:-box-app-server}"
 SERVER_UNIT_FILE="$STATE_DIR/server-unit"
 # Keep Box from consuming the host when an agent or tool subprocess grows without
-# bound. MemoryHigh applies reclaim/backpressure before the hard limit; MemoryMax
-# and MemorySwapMax are last-resort fuses. Override these in .env for larger hosts.
-SERVER_MEMORY_HIGH="${BOX_SERVER_MEMORY_HIGH:-6G}"
+# bound. The server and its descendants share this cgroup, so a finite MemoryHigh
+# throttles the HTTP server when any child crosses it and can make every route hang
+# while the host still has free RAM. Leave the shared soft throttle disabled;
+# MemoryMax and MemorySwapMax remain last-resort fuses.
+SERVER_MEMORY_HIGH="${BOX_SERVER_MEMORY_HIGH:-infinity}"
 SERVER_MEMORY_MAX="${BOX_SERVER_MEMORY_MAX:-10G}"
 SERVER_MEMORY_SWAP_MAX="${BOX_SERVER_MEMORY_SWAP_MAX:-2G}"
 
