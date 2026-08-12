@@ -39,8 +39,8 @@ BOX_PR_AUTO_MERGE=1
 BOX_PR_REAL_MODEL=trusted       # trusted | always | never
 BOX_PR_TRUSTED_AUTHORS=alice,bob
 BOX_PR_PROCESS_UNTRUSTED_FORKS=0
-BOX_PR_REVIEW_MODEL=gpt-4.1-mini
-BOX_PR_SMOKE_MODEL=gpt-4.1-mini
+BOX_PR_REVIEW_MODEL=gpt-5.6-luna
+BOX_PR_SMOKE_MODEL=gpt-5.6-luna
 BOX_PR_EVENT_EMITTER=/home/factory/development/software-factory/harness/emit-event.mjs
 BOX_PR_DRY_RUN=1
 ```
