@@ -9,6 +9,13 @@ const servicePath = join(serviceDir, 'box-pr-autopilot.service');
 const timerPath = join(serviceDir, 'box-pr-autopilot.timer');
 const envPath = join(homedir(), '.config', 'box', 'pr-autopilot.env');
 const node = process.execPath;
+const toolPath = [
+  join(homedir(), '.npm-global', 'bin'),
+  join(homedir(), '.local', 'bin'),
+  '/usr/local/bin',
+  '/usr/bin',
+  '/bin',
+].join(':');
 
 mkdirSync(serviceDir, { recursive: true });
 
@@ -26,6 +33,7 @@ Environment=BOX_PR_AUTO_MERGE=1
 Environment=BOX_PR_REAL_MODEL=trusted
 Environment=BOX_PR_REVIEW_MODEL=gpt-5.6-luna
 Environment=BOX_PR_SMOKE_MODEL=gpt-5.6-luna
+Environment=PATH=${toolPath}
 ExecStart=${node} scripts/pr-autopilot.mjs --once
 `, 'utf8');
 
