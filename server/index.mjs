@@ -49,6 +49,7 @@ import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
+import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
 import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 import * as team from './team.mjs';
@@ -3104,15 +3105,11 @@ app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
 function vobRequestIdsForSession(sessionId) {
   const rollout = findCodexRollout(CODEX_HOME, sessionId);
   if (!rollout) return [];
-  try {
-    const text = readFileSync(rollout, 'utf8');
-    // The first request id in the rollout is the case that launched this
-    // session. Later ids are commonly mentioned in copied logs or follow-up
-    // context and must not make the resolver consider unrelated cases.
-    return [...new Set(text.match(/\brise4_[a-f0-9]{32}\b/gi) || [])].slice(0, 1);
-  } catch {
-    return [];
-  }
+  // The first request id in the rollout is the case that launched this
+  // session. Later ids are commonly mentioned in copied logs or follow-up
+  // context and must not make the resolver consider unrelated cases.
+  const requestId = firstVobRequestIdInRollout(rollout);
+  return requestId ? [requestId] : [];
 }
 
 // Owner-only VOB observability. The artifacts contain payer-call evidence and may
