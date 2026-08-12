@@ -27,7 +27,7 @@ const WORK_DIR = resolve(v['work-dir'] || process.env.BOX_PR_WORK_DIR || join(ho
 const STATE_FILE = resolve(v['state-file'] || process.env.BOX_PR_STATE_FILE || join(homedir(), '.cc-mobile', 'box-pr-autopilot.json'));
 const AUTO_MERGE = String(v['auto-merge'] || process.env.BOX_PR_AUTO_MERGE || '1') !== '0';
 const REAL_MODEL_POLICY = String(v['real-model'] || process.env.BOX_PR_REAL_MODEL || 'trusted');
-const REVIEW_MODEL = v['review-model'] || process.env.BOX_PR_REVIEW_MODEL || 'gpt-4.1-mini';
+const REVIEW_MODEL = v['review-model'] || process.env.BOX_PR_REVIEW_MODEL || 'gpt-5.6-luna';
 const SMOKE_MODEL = v['smoke-model'] || process.env.BOX_PR_SMOKE_MODEL || REVIEW_MODEL;
 const TRUSTED_AUTHORS = new Set(String(v['trusted-authors'] || process.env.BOX_PR_TRUSTED_AUTHORS || '').split(',').map((s) => s.trim()).filter(Boolean));
 const EVENT_EMITTER = process.env.BOX_PR_EVENT_EMITTER || '/home/factory/development/software-factory/harness/emit-event.mjs';

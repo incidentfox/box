@@ -24,8 +24,8 @@ EnvironmentFile=-${envPath}
 Environment=BOX_PR_REPO=incidentfox/box
 Environment=BOX_PR_AUTO_MERGE=1
 Environment=BOX_PR_REAL_MODEL=trusted
-Environment=BOX_PR_REVIEW_MODEL=gpt-4.1-mini
-Environment=BOX_PR_SMOKE_MODEL=gpt-4.1-mini
+Environment=BOX_PR_REVIEW_MODEL=gpt-5.6-luna
+Environment=BOX_PR_SMOKE_MODEL=gpt-5.6-luna
 ExecStart=${node} scripts/pr-autopilot.mjs --once
 `, 'utf8');
 
