@@ -23,10 +23,18 @@ export function createCodexRpc({ spawnImpl = spawn, timeoutMs = 10000 } = {}) {
         else { try { child.kill(); } catch {} }
         if (err) reject(err); else resolve(value);
       };
-      const send = (value) => child.stdin.write(`${JSON.stringify(value)}\n`);
+      const send = (value) => {
+        if (settled) return;
+        try {
+          child.stdin.write(`${JSON.stringify(value)}\n`, (err) => { if (err) finish(err); });
+        } catch (err) {
+          finish(err);
+        }
+      };
       const timer = setTimeout(() => finish(new Error(`Codex app-server timed out during ${method}`)), timeoutMs);
 
       child.stderr.on('data', (chunk) => { stderr = (stderr + String(chunk)).slice(-4000); });
+      child.stdin.on('error', (err) => finish(err));
       child.on('error', (err) => finish(err));
       child.on('exit', (code) => {
         if (!settled) finish(new Error(`Codex app-server exited ${code}${stderr ? `: ${stderr.trim()}` : ''}`));
