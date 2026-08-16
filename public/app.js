@@ -27,7 +27,7 @@ function saveTeam(t) {
 // in with is itself a guest token (a teammate who has no server of their own and just
 // opens the host's URL).
 const teamApiEp = () => teamEp() || LOCAL_EP;
-const teamWorkspaceRoot = () => (TEAM && TEAM.workspaceRoot) || (CFG && CFG.workspaceRoot) || '';
+const teamWorkspaceRoot = () => (TEAM && TEAM.workspaceRoot) || (CFG && CFG.team && CFG.team.workspaceRoot) || (CFG && CFG.workspaceRoot) || '';
 // True when this browser is signed in as a guest of the box it's talking to — the whole
 // app then runs in the reduced, workspace-scoped shape the server enforces anyway.
 const isGuestHere = () => !!(CFG && CFG.guest);
@@ -891,9 +891,14 @@ function renderWorkspaceButton() {
   btn.textContent = team ? 'Team' : 'Personal';
   btn.title = `Switch workspace (currently ${team ? 'Team' : 'Personal'})`;
 }
-function setWorkspace(workspace) {
+function rememberWorkspace(workspace) {
   currentWorkspace = workspace === 'team' ? 'team' : 'personal';
   LS.setItem('box_workspace', currentWorkspace);
+  renderWorkspaceButton();
+  return currentWorkspace;
+}
+function setWorkspace(workspace) {
+  rememberWorkspace(workspace);
   return openSessions('all', currentWorkspace);
 }
 async function openSessions(filter = 'all', workspace = activeWorkspace()) {
@@ -2579,6 +2584,7 @@ async function openChat(s) {
   const renderSeq = ++chatRenderSeq;
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   const workspace = s.workspace === 'team' || s.team || s.shared ? 'team' : 'personal';
+  rememberWorkspace(workspace);
   // A BRAND-NEW chat starts from DEFAULT_SETTINGS, not from whatever the chat you were
   // just in happened to use — otherwise one manual model/effort pick leaks into every
   // chat you open afterwards and the configured default never actually applies. Callers

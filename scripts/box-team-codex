@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Root-owned, sudo-whitelisted launcher for Box Team guest turns.  It accepts only
-# agent arguments after `--` and builds every Bubblewrap mount itself.
+# Root-owned, sudo-whitelisted launcher for Box Team guest turns. It accepts only
+# agent arguments after `--` and builds every Bubblewrap mount itself, including
+# optional private snapshots of the owner's file-backed agent logins.
 set -euo pipefail
 
 CONFIG=/etc/box-team-sandbox.conf
@@ -12,7 +13,7 @@ BWRAP=/usr/bin/bwrap
 : "${WORKSPACE:?missing WORKSPACE in $CONFIG}"
 
 user= workspace= cwd= runtime=codex
-env_args=()
+env_pairs=()
 while (($#)); do
   case "$1" in
     --runtime) runtime=${2:?}; shift 2 ;;
@@ -22,7 +23,7 @@ while (($#)); do
     --env)
       key=${2:?}; value=${3:?}
       [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 64
-      env_args+=(--setenv "$key" "$value")
+      env_pairs+=("$key" "$value")
       shift 3 ;;
     --) shift; break ;;
     *) exit 64 ;;
@@ -47,6 +48,60 @@ case "$runtime" in
 esac
 [[ -x "$runtime_host" && -x "$BWRAP" ]] || exit 69
 
+shared_auth=false
+read -r -a shared_auth_users <<< "${SHARED_AUTH_USERS:-}"
+for shared_auth_user in "${shared_auth_users[@]}"; do
+  if [[ "$shared_auth_user" == "$user" ]]; then
+    shared_auth=true
+    break
+  fi
+done
+
+auth_mount_args=()
+if [[ "$shared_auth" == true ]]; then
+  [[ "${SHARED_AUTH_HOME:-}" == /* ]] || exit 69
+  shared_auth_home=$(realpath -e "$SHARED_AUTH_HOME")
+  case "$runtime" in
+    codex)
+      auth_source="$shared_auth_home/.codex/auth.json"
+      auth_guest_dir=/home/team/.codex
+      auth_guest_file="$auth_guest_dir/auth.json"
+      ;;
+    claude)
+      auth_source="$shared_auth_home/.claude/.credentials.json"
+      auth_guest_dir=/home/team/.claude
+      auth_guest_file="$auth_guest_dir/.credentials.json"
+      ;;
+  esac
+  [[ -f "$auth_source" && -r "$auth_source" ]] || exit 69
+
+  # The guest gets a refreshable private copy, never a writable mount of the owner's
+  # credential. Root-owned parent directories prevent replacement by another process.
+  auth_dir="/run/box-team-auth/$user/$runtime"
+  install -d -m 0711 -o root -g root /run/box-team-auth "/run/box-team-auth/$user" "$auth_dir"
+  auth_file="$auth_dir/$(basename "$auth_guest_file")"
+  auth_tmp=$(mktemp "$auth_dir/.auth.XXXXXX")
+  trap 'rm -f "$auth_tmp"' EXIT
+  install -m 0600 -o "$user" -g "$user_group" "$auth_source" "$auth_tmp"
+  mv -f "$auth_tmp" "$auth_file"
+  trap - EXIT
+  auth_mount_args=(--dir "$auth_guest_dir" --bind "$auth_file" "$auth_guest_file")
+fi
+
+env_args=()
+for ((i = 0; i < ${#env_pairs[@]}; i += 2)); do
+  key=${env_pairs[i]}
+  value=${env_pairs[i + 1]}
+  if [[ "$shared_auth" == true ]]; then
+    case "$runtime:$key" in
+      codex:OPENAI_API_KEY|codex:CODEX_API_KEY|claude:ANTHROPIC_API_KEY|claude:CLAUDE_CODE_OAUTH_TOKEN|claude:CLAUDE_OAUTH_TOKEN)
+        continue
+        ;;
+    esac
+  fi
+  env_args+=(--setenv "$key" "$value")
+done
+
 exec /usr/sbin/runuser -u "$user" -- "$BWRAP" \
   --die-with-parent --new-session --unshare-all --share-net --clearenv \
   --setenv HOME /home/team --setenv PATH /opt/box-tools/node-global/bin:/usr/local/bin:/usr/bin:/bin \
@@ -56,5 +111,6 @@ exec /usr/sbin/runuser -u "$user" -- "$BWRAP" \
   --dir /etc --dir /etc/ssl --ro-bind /etc/resolv.conf /etc/resolv.conf \
   --ro-bind /etc/hosts /etc/hosts --ro-bind /etc/ssl/certs /etc/ssl/certs \
   --bind "$root" /workspace --dir /home --dir /home/team --bind "$runtime_home" /home/team \
+  "${auth_mount_args[@]}" \
   --proc /proc --dev /dev --tmpfs /tmp --chdir "/workspace${requested#"$root"}" \
   -- "$runtime_bin" "$@"

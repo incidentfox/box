@@ -45,6 +45,12 @@ try {
   const helper = readFileSync(join(root, 'scripts/box-team-codex'), 'utf8');
   assert.match(helper, /--setenv HOME \/home\/team/);
   assert.match(helper, /--bind "\$runtime_home" \/home\/team/);
+  assert.match(helper, /SHARED_AUTH_USERS/);
+  assert.match(helper, /\.codex\/auth\.json/);
+  assert.match(helper, /\.claude\/\.credentials\.json/);
+  assert.match(helper, /codex:OPENAI_API_KEY\|codex:CODEX_API_KEY/);
+  assert.match(helper, /claude:ANTHROPIC_API_KEY\|claude:CLAUDE_CODE_OAUTH_TOKEN\|claude:CLAUDE_OAUTH_TOKEN/);
+  assert.match(helper, /--bind "\$auth_file" "\$auth_guest_file"/);
   assert.match(helper, /codex-linux-x64\/vendor\/x86_64-unknown-linux-musl\/bin\/codex/);
 } finally {
   if (original === undefined) delete process.env.BOX_TEAM_BWRAP; else process.env.BOX_TEAM_BWRAP = original;
