@@ -698,8 +698,10 @@ function makeFileReadCache(fn) {
   return (file, ...rest) => cachedFileRead(cache, file, () => fn(file, ...rest));
 }
 const cachedCodexRolloutState = makeFileReadCache(codexRolloutState);
+const SESSION_TITLE_MAX_BYTES = 512 * 1024; // 512KB — title is always in the first few lines
 function sessionTitle(file) {
   try {
+    if (statSync(file).size > SESSION_TITLE_MAX_BYTES) return '';
     const lines = readFileSync(file, 'utf8').split('\n');
     for (const line of lines.slice(0, 60)) {
       if (!line.trim()) continue;
@@ -1619,9 +1621,11 @@ function codexUserParts(text, attachments = []) {
   }
   return parts.length ? parts : [{ t: 'text', text: '' }];
 }
+const CODEX_FULL_READ_MAX_BYTES = 50 * 1024 * 1024; // 50MB — skip attachment/tool scans on giant sessions
 function codexRolloutUserAttachments(id) {
   const file = findCodexRollout(CODEX_HOME, id);
   if (!file) return [];
+  try { if (statSync(file).size > CODEX_FULL_READ_MAX_BYTES) return []; } catch { return []; }
   const out = [];
   try {
     for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -1651,6 +1655,7 @@ function enrichCodexUserAttachments(id, messages) {
 function codexRolloutToolResults(id) {
   const file = findCodexRollout(CODEX_HOME, id);
   if (!file) return [];
+  try { if (statSync(file).size > CODEX_FULL_READ_MAX_BYTES) return []; } catch { return []; }
   const calls = new Map(), results = [];
   try {
     for (const line of readFileSync(file, 'utf8').split('\n')) {
