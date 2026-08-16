@@ -414,7 +414,7 @@ function teamSessionRow(s, ep, { remote = false, owner = false } = {}) {
       renderTeam();
     }));
   }
-  row.onclick = () => openChat({ id: s.id, title: s.title, agent: s.agent, cwd: s.cwd || '', ep, shared: true });
+  row.onclick = () => openChat({ id: s.id, title: s.title, agent: s.agent, cwd: s.cwd || '', ep, workspace: 'team', shared: true, team: true });
   return row;
 }
 
