@@ -4,8 +4,12 @@ import { existsSync, realpathSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
 const BWRAP = process.env.BOX_TEAM_BWRAP || '/usr/bin/bwrap';
+const CODEX_NATIVE = '/home/factory/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex';
+const CODEX_NATIVE_SANDBOX = '/opt/box-tools/node-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex';
 const RUNTIMES = {
-  codex: { host: '/home/factory/.npm-global/bin/codex', sandbox: '/opt/box-tools/node-global/bin/codex' },
+  // Invoke the packaged native binary directly. The npm launcher tries to create
+  // aliases beside itself, which is intentionally read-only inside Bubblewrap.
+  codex: { host: CODEX_NATIVE, sandbox: CODEX_NATIVE_SANDBOX },
   // Use the real CLI binary, not /usr/bin/claude: that path is this host's
   // account-broker wrapper and would read host account configuration before
   // reaching the sandboxed process.
@@ -22,6 +26,20 @@ function inside(child, root) {
   return r === '' || (!r.startsWith(`..${sep}`) && r !== '..' && !r.includes(`..${sep}`));
 }
 
+// Codex receives its working directory twice: Bubblewrap's --chdir and Codex's
+// own -C/--cd argument. Translate the latter into the sandbox namespace too.
+export function translateRuntimeArgs(args = [], { runtime = 'codex', sandboxCwd = '/workspace' } = {}) {
+  const translated = [...args];
+  if (runtime !== 'codex') return translated;
+  for (let i = 0; i < translated.length - 1; i += 1) {
+    if (translated[i] === '-C' || translated[i] === '--cd') {
+      translated[i + 1] = sandboxCwd;
+      i += 1;
+    }
+  }
+  return translated;
+}
+
 export function teamSandboxAvailable(runtime = 'codex') {
   return existsSync(BWRAP) && existsSync(runtimeSpec(runtime).host);
 }
@@ -34,6 +52,7 @@ export function buildTeamSandbox({ workspaceRoot, cwd, args = [], env = {}, runt
   const workdir = inside(requested, root) ? requested : root;
   const rel = relative(root, workdir);
   const sandboxCwd = rel ? `/workspace/${rel}` : '/workspace';
+  const sandboxArgs = translateRuntimeArgs(args, { runtime, sandboxCwd });
   const cleanEnv = {
     HOME: '/workspace/.box-runtime',
     PATH: '/opt/box-tools/node-global/bin:/usr/local/bin:/usr/bin:/bin',
@@ -53,7 +72,7 @@ export function buildTeamSandbox({ workspaceRoot, cwd, args = [], env = {}, runt
       '--ro-bind', '/etc/hosts', '/etc/hosts', '--ro-bind', '/etc/ssl/certs', '/etc/ssl/certs',
       '--bind', root, '/workspace', '--dir', '/home', '--dir', '/home/team',
       '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', sandboxCwd,
-      '--', spec.sandbox, ...args,
+      '--', spec.sandbox, ...sandboxArgs,
     ],
     cwd: root,
     env: {},
@@ -69,10 +88,13 @@ export function buildUnixTeamSandbox({ workspaceRoot, cwd, args = [], env = {}, 
   const root = realpathSync(workspaceRoot);
   const requested = resolve(cwd || root);
   const workdir = inside(requested, root) ? requested : root;
+  const rel = relative(root, workdir);
+  const sandboxCwd = rel ? `/workspace/${rel}` : '/workspace';
+  const sandboxArgs = translateRuntimeArgs(args, { runtime, sandboxCwd });
   const envArgs = Object.entries(env).flatMap(([key, value]) => ['--env', String(key), String(value)]);
   return {
     command: 'sudo',
-    args: ['-n', '/usr/local/sbin/box-team-codex', '--runtime', runtime, '--user', user, '--workspace', root, '--cwd', workdir, ...envArgs, '--', ...args],
+    args: ['-n', '/usr/local/sbin/box-team-codex', '--runtime', runtime, '--user', user, '--workspace', root, '--cwd', workdir, ...envArgs, '--', ...sandboxArgs],
     cwd: root,
     env: {},
   };

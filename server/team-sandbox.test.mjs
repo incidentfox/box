@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { buildTeamSandbox } from './team-sandbox.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { buildTeamSandbox, buildUnixTeamSandbox, translateRuntimeArgs } from './team-sandbox.mjs';
 
 // This is intentionally structural: the production host test executes bwrap below.
 const original = process.env.BOX_TEAM_BWRAP;
@@ -7,7 +9,7 @@ process.env.BOX_TEAM_BWRAP = '/usr/bin/bwrap';
 try {
   // The test runner's cwd is real and exists; use the repository root as a safe stand-in.
   const root = process.cwd();
-  const out = buildTeamSandbox({ workspaceRoot: root, cwd: '/etc', args: ['exec', '--json'], env: { OPENAI_API_KEY: 'team-only' } });
+  const out = buildTeamSandbox({ workspaceRoot: root, cwd: '/etc', args: ['exec', '--json', '-C', '/host-only/path'], env: { OPENAI_API_KEY: 'team-only' } });
   assert.equal(out.command, '/usr/bin/bwrap');
   assert.ok(out.args.includes('--clearenv'));
   assert.ok(out.args.includes('--unshare-all'));
@@ -18,6 +20,32 @@ try {
   assert.equal(out.args[bindAt + 2], '/workspace');
   assert.ok(!out.args.includes('/home/factory/development/box-selfhost'));
   assert.equal(out.args[out.args.indexOf('OPENAI_API_KEY') + 1], 'team-only');
+  assert.equal(out.args[out.args.indexOf('-C') + 1], '/workspace');
+
+  const nested = join(root, 'server');
+  const unix = buildUnixTeamSandbox({
+    workspaceRoot: root,
+    cwd: nested,
+    user: 'box-rose',
+    args: ['exec', '--json', '-C', nested, 'keep this host path unchanged: ' + nested],
+  });
+  assert.equal(unix.command, 'sudo');
+  assert.equal(unix.args[unix.args.indexOf('-C') + 1], '/workspace/server');
+  assert.equal(unix.args.at(-1), 'keep this host path unchanged: ' + nested);
+
+  assert.deepEqual(
+    translateRuntimeArgs(['resume', 'thread-id'], { runtime: 'codex', sandboxCwd: '/workspace/server' }),
+    ['resume', 'thread-id'],
+  );
+  assert.deepEqual(
+    translateRuntimeArgs(['-C', nested], { runtime: 'claude', sandboxCwd: '/workspace/server' }),
+    ['-C', nested],
+  );
+
+  const helper = readFileSync(join(root, 'scripts/box-team-codex'), 'utf8');
+  assert.match(helper, /--setenv HOME \/home\/team/);
+  assert.match(helper, /--bind "\$runtime_home" \/home\/team/);
+  assert.match(helper, /codex-linux-x64\/vendor\/x86_64-unknown-linux-musl\/bin\/codex/);
 } finally {
   if (original === undefined) delete process.env.BOX_TEAM_BWRAP; else process.env.BOX_TEAM_BWRAP = original;
 }

@@ -4,7 +4,8 @@
 set -euo pipefail
 
 CONFIG=/etc/box-team-sandbox.conf
-CODEX=/home/factory/.npm-global/bin/codex
+CODEX=/home/factory/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+CODEX_SANDBOX=/opt/box-tools/node-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
 CLAUDE=/usr/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude
 BWRAP=/usr/bin/bwrap
 [[ -r "$CONFIG" ]] && source "$CONFIG"
@@ -30,12 +31,17 @@ done
 [[ $# -gt 0 && "$user" =~ ^box-[a-z][a-z0-9-]{0,30}$ ]] || exit 64
 id "$user" >/dev/null
 id -nG "$user" | tr ' ' '\n' | grep -qx box-team
+user_home=$(getent passwd "$user" | cut -d: -f6)
+[[ "$user_home" == "/home/$user" && -d "$user_home" ]] || exit 69
+user_group=$(id -gn "$user")
+runtime_home="$user_home/.box-runtime"
+install -d -m 0700 -o "$user" -g "$user_group" "$runtime_home"
 root=$(realpath -e "$WORKSPACE")
 [[ "$workspace" == "$root" ]] || exit 64
 requested=$(realpath -m "$cwd")
 [[ "$requested" == "$root" || "$requested" == "$root"/* ]] || exit 64
 case "$runtime" in
-  codex) runtime_host=$CODEX; runtime_bin=/opt/box-tools/node-global/bin/codex ;;
+  codex) runtime_host=$CODEX; runtime_bin=$CODEX_SANDBOX ;;
   claude) runtime_host=$CLAUDE; runtime_bin=$CLAUDE ;;
   *) exit 64 ;;
 esac
@@ -43,12 +49,12 @@ esac
 
 exec /usr/sbin/runuser -u "$user" -- "$BWRAP" \
   --die-with-parent --new-session --unshare-all --share-net --clearenv \
-  --setenv HOME /workspace/.box-runtime --setenv PATH /opt/box-tools/node-global/bin:/usr/local/bin:/usr/bin:/bin \
+  --setenv HOME /home/team --setenv PATH /opt/box-tools/node-global/bin:/usr/local/bin:/usr/bin:/bin \
   --setenv TMPDIR /tmp --setenv LANG C.UTF-8 "${env_args[@]}" \
   --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
   --ro-bind /home/factory/.npm-global /opt/box-tools/node-global \
   --dir /etc --dir /etc/ssl --ro-bind /etc/resolv.conf /etc/resolv.conf \
   --ro-bind /etc/hosts /etc/hosts --ro-bind /etc/ssl/certs /etc/ssl/certs \
-  --bind "$root" /workspace --dir /home --dir /home/team \
+  --bind "$root" /workspace --dir /home --dir /home/team --bind "$runtime_home" /home/team \
   --proc /proc --dev /dev --tmpfs /tmp --chdir "/workspace${requested#"$root"}" \
   -- "$runtime_bin" "$@"

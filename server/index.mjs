@@ -2936,7 +2936,9 @@ app.get('/api/team/sessions', requireAuth, (req, res) => {
   const p = req.principal;
   const ids = new Set(team.sharedIds());
   if (p.kind === 'guest') for (const [sid, mid] of Object.entries(team.loadTeam().owned)) {
-    if (mid === p.id && sessionInTeamWorkspaceOf(rt(sid))) ids.add(sid);
+    // A dormant session may not have a hydrated runtime yet. Its durable record
+    // is the source of truth for whether it belongs in Team.
+    if (mid === p.id && sessionInTeamWorkspaceOf(storedSessionRecord(sid))) ids.add(sid);
   }
   const all = listSessions({ filter: 'all', limit: 10000, workspace: 'team', principal: p }).sessions;
   const byId = new Map(all.map((s) => [s.id, s]));
