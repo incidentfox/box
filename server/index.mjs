@@ -2561,6 +2561,8 @@ async function sessionHistory(id, { before = null } = {}) {
     const messages = rolloutFile ? rollout.messages : loadCodexMessages(id, codex);
     return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: rollout.hasMore, cursor: rollout.cursor, liveCursor: rollout.liveCursor, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }), historyCompaction: before == null ? readCodexCompactionInfo(rolloutFile) : null };
   }
+  const teamClaude = (loadTeamClaude().sessions || {})[id];
+  if (teamClaude) return { messages: (teamClaude.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: teamClaude.cwd || team.workspaceRoot(), agent: 'claude', settings: normalizeSettings(teamClaude.settings || {}), parentId: teamClaude.parentId || null, parentTitle: teamClaude.parentTitle || '', context: normalizeContext(teamClaude.context || { agent: 'claude' }) };
   const gemini = (loadGemini().sessions || {})[id];
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const deepseek = (loadDeepSeek().sessions || {})[id];
