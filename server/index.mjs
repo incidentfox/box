@@ -27,6 +27,7 @@ import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { ClaudeExecEngine } from './claude-exec-engine.mjs';
 import { claudeModelContextWindow, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from './claude-model.mjs';
 import { codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-processes.mjs';
+import { terminateProcessWithEscalation } from './process-termination.mjs';
 import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
@@ -5335,9 +5336,12 @@ function undoQueuedCancel(extKey, qid) {
 }
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
-  if (s.bashProc) killAgentProcess(s.bashProc, 'SIGTERM');
-  if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
-  if (s.codexGoalProc) killAgentProcess(s.codexGoalProc, 'SIGTERM');
+  const stopOwnedProcess = (proc) => terminateProcessWithEscalation(proc, {
+    signalProcess: killAgentProcess,
+  });
+  if (s.bashProc) stopOwnedProcess(s.bashProc);
+  if (s.proc) stopOwnedProcess(s.proc);
+  if (s.codexGoalProc) stopOwnedProcess(s.codexGoalProc);
   // A server restart loses ChildProcess handles while a pre-existing Codex resume may
   // remain alive. Stop must still work: find only resume processes naming this exact
   // thread and terminate them. Owned processes may appear here too; SIGTERM is idempotent.
