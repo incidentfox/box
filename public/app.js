@@ -2551,7 +2551,7 @@ function connectWS() {
   ws.onmessage = (e) => { resetWsWatchdog(); onServer(JSON.parse(e.data)); };
   ws.onopen = () => { resetWsWatchdog(); subscribeCurrentWS(); };
   ws.onerror = () => { try { ws.close(); } catch {} };
-  ws.onclose = () => { if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
+  ws.onclose = () => { if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } pendingTeamChat = null; if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
 }
 function setNewChatIntro(on) {
   const chat = $('chat');
@@ -3854,6 +3854,16 @@ function onServer(o) {
     if (!messages.some((message) => message.id === o.message.id)) messages.push(o.message);
     cur.teamChat = messages.slice(-500); renderTeamChat();
   }
+  else if (o.type === 'team_chat_ack') {
+    if (!pendingTeamChat || o.clientMessageId !== pendingTeamChat.id) return;
+    const pending = pendingTeamChat; pendingTeamChat = null;
+    const input = $('teamChatInput');
+    if (cur.key === pending.key && String(input.value || '').trim() === pending.text) input.value = '';
+  }
+  else if (o.type === 'team_chat_error') {
+    if (pendingTeamChat && o.clientMessageId === pendingTeamChat.id) pendingTeamChat = null;
+    toast(o.msg || 'Team message was not sent. Your text is still here.', 4500);
+  }
   // The broadcast is what tells OTHER viewers (and other tabs) that sharing changed, so it
   // repaints the list too — otherwise the Team badge and the Shared tab count stay stale
   // until the next poll. The person who tapped gets their own toast from doShare().
@@ -4524,6 +4534,7 @@ function renderPresence() {
   bar.appendChild(copyLink);
 }
 let teamChatOpen = false;
+let pendingTeamChat = null;
 function teamChatTime(ts) {
   try { return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(ts)); } catch { return ''; }
 }
@@ -4555,8 +4566,15 @@ function sendTeamChat() {
   const text = String(input.value || '').trim();
   if (!text || !cur || !cur.shared || !cur.id) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Reconnecting…'); return; }
-  ws.send(JSON.stringify({ type: 'team_chat', key: cur.key, text }));
-  input.value = '';
+  if (pendingTeamChat) { toast('Waiting for the previous team message to be saved…'); return; }
+  const clientMessageId = `team-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  pendingTeamChat = { id: clientMessageId, key: cur.key, text };
+  try {
+    ws.send(JSON.stringify({ type: 'team_chat', key: cur.key, text, clientMessageId }));
+  } catch {
+    pendingTeamChat = null;
+    toast('Team message was not sent. Your text is still here.', 4500);
+  }
 }
 // Built-in CLI slash commands, shown for the ACTIVE agent. Agent-specific skills
 // and custom commands are loaded from /api/commands?agent=...

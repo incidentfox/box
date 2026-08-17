@@ -20,7 +20,10 @@ try {
     assert.equal(out.args[bindAt + 1], root);
     assert.equal(out.args[bindAt + 2], '/workspace');
     assert.ok(!out.args.includes('/home/factory/development/box-selfhost'));
-    assert.equal(out.args[out.args.indexOf('OPENAI_API_KEY') + 1], 'team-only');
+    assert.ok(out.args.includes('--ro-bind-data'));
+    assert.ok(!out.args.includes('OPENAI_API_KEY'));
+    assert.ok(!out.args.includes('team-only'));
+    assert.match(out.envInput.toString(), /OPENAI_API_KEY=team-only\0/);
     assert.equal(out.args[out.args.indexOf('-C') + 1], '/workspace');
   }
 
@@ -32,6 +35,8 @@ try {
     args: ['exec', '--json', '-C', nested, 'keep this host path unchanged: ' + nested],
   });
   assert.equal(unix.command, 'sudo');
+  assert.ok(unix.args.includes('--env-stdin'));
+  assert.ok(!unix.args.includes('team-only'));
   assert.equal(unix.args[unix.args.indexOf('-C') + 1], '/workspace/server');
   assert.equal(unix.args.at(-1), 'keep this host path unchanged: ' + nested);
 
@@ -46,6 +51,9 @@ try {
 
   const helper = readFileSync(join(root, 'scripts/box-team-codex'), 'utf8');
   assert.match(helper, /--setenv HOME \/home\/team/);
+  assert.match(helper, /--env-stdin/);
+  assert.doesNotMatch(helper, /--env\)/);
+  assert.match(helper, /read -r -d '' pair/);
   assert.match(helper, /--bind "\$runtime_home" \/home\/team/);
   assert.match(helper, /SHARED_AUTH_USERS/);
   assert.match(helper, /\.codex\/auth\.json/);
