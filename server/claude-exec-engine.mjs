@@ -29,7 +29,8 @@ export class ClaudeExecEngine {
   run({ sessionId, isNew, cwd, prompt, settings = {}, teamWorkspace, teamEnv = {}, teamUser = '', onEvent }) {
     const launch = buildUnixTeamSandbox({ runtime: 'claude', workspaceRoot: teamWorkspace, cwd,
       args: buildClaudeArgs({ sessionId, prompt, settings, isNew }), env: teamEnv, user: teamUser });
-    const child = this.spawnImpl(launch.command, launch.args, { cwd: launch.cwd, env: launch.env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    const child = this.spawnImpl(launch.command, launch.args, { cwd: launch.cwd, env: launch.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    child.stdin.end(launch.envInput);
     child.killTree = (signal = 'SIGTERM') => terminateCodexProcess(child, signal);
     const emit = (event) => { try { onEvent(event); } catch {} };
     const rl = createInterface({ input: child.stdout });

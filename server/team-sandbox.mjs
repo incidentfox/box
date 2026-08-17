@@ -26,6 +26,17 @@ function inside(child, root) {
   return r === '' || (!r.startsWith(`..${sep}`) && r !== '..' && !r.includes(`..${sep}`));
 }
 
+function serializeEnv(env = {}) {
+  const chunks = [];
+  for (const [key, rawValue] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid Team environment variable: ${key}`);
+    const value = String(rawValue);
+    if (value.includes('\0')) throw new Error(`Invalid NUL byte in Team environment variable: ${key}`);
+    chunks.push(`${key}=${value}\0`);
+  }
+  return Buffer.from(chunks.join(''));
+}
+
 // Codex receives its working directory twice: Bubblewrap's --chdir and Codex's
 // own -C/--cd argument. Translate the latter into the sandbox namespace too.
 export function translateRuntimeArgs(args = [], { runtime = 'codex', sandboxCwd = '/workspace' } = {}) {
@@ -60,22 +71,23 @@ export function buildTeamSandbox({ workspaceRoot, cwd, args = [], env = {}, runt
     LANG: 'C.UTF-8',
     ...env,
   };
-  const envArgs = Object.entries(cleanEnv).flatMap(([key, value]) => ['--setenv', key, String(value)]);
   return {
     command: BWRAP,
     args: [
       '--die-with-parent', '--new-session', '--unshare-all', '--share-net', '--clearenv',
-      ...envArgs,
       '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64',
       '--ro-bind', '/home/factory/.npm-global', '/opt/box-tools/node-global',
       '--dir', '/etc', '--dir', '/etc/ssl', '--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf',
       '--ro-bind', '/etc/hosts', '/etc/hosts', '--ro-bind', '/etc/ssl/certs', '/etc/ssl/certs',
-      '--bind', root, '/workspace', '--dir', '/home', '--dir', '/home/team',
+      '--bind', root, '/workspace', '--dir', '/home', '--dir', '/home/team', '--dir', '/run',
+      '--perms', '0400', '--ro-bind-data', '0', '/run/box-team-env',
       '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', sandboxCwd,
-      '--', spec.sandbox, ...sandboxArgs,
+      '--', '/bin/bash', '-c', 'while IFS= read -r -d "" pair; do export "$pair"; done < /run/box-team-env; exec "$@"',
+      'box-team-env', spec.sandbox, ...sandboxArgs,
     ],
     cwd: root,
     env: {},
+    envInput: serializeEnv(cleanEnv),
   };
 }
 
@@ -91,11 +103,11 @@ export function buildUnixTeamSandbox({ workspaceRoot, cwd, args = [], env = {}, 
   const rel = relative(root, workdir);
   const sandboxCwd = rel ? `/workspace/${rel}` : '/workspace';
   const sandboxArgs = translateRuntimeArgs(args, { runtime, sandboxCwd });
-  const envArgs = Object.entries(env).flatMap(([key, value]) => ['--env', String(key), String(value)]);
   return {
     command: 'sudo',
-    args: ['-n', '/usr/local/sbin/box-team-codex', '--runtime', runtime, '--user', user, '--workspace', root, '--cwd', workdir, ...envArgs, '--', ...sandboxArgs],
+    args: ['-n', '/usr/local/sbin/box-team-codex', '--runtime', runtime, '--user', user, '--workspace', root, '--cwd', workdir, '--env-stdin', '--', ...sandboxArgs],
     cwd: root,
     env: {},
+    envInput: serializeEnv(env),
   };
 }

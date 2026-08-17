@@ -179,9 +179,11 @@ const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FI
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 
 const PORT = Number(cfg('PORT', 7321));
-// Normal phone turns stay uncapped: independent Codex chats are expected to run in parallel.
-// A server restart is different because every interrupted turn resumes at once. Bound only
-// those automatic recoveries so a restart cannot create another CPU/memory stampede.
+// Codex turns are independent, but they share this service's 10G cgroup. A handful of large
+// contexts can otherwise make the kernel OOM-kill one child and leave several chats looking
+// stuck. Bound all Codex work, and keep automatic restart recoveries even more conservative.
+const MAX_CONCURRENT_CODEX_TURNS = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_TURNS', '3'));
+const CODEX_TURN_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_TURNS);
 const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '1'));
 const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
@@ -5508,13 +5510,17 @@ async function runWorker(s) {
   }
   s.running = true;
   while (s.queue.length) {
-    let releaseTurnSlot = null;
-    // Only an interrupted in-flight Codex turn is marked `recovered`. Ordinary phone turns and
-    // scheduled work retain full concurrency. Do not dequeue a recovery until admitted: if the
-    // server restarts again while waiting, the request remains durable in `queue`.
-    const recoveryQid = s.queue[0].recovered && (s.queue[0].agent || s.agent || 'claude') === 'codex'
-      ? s.queue[0].qid
-      : null;
+    const releases = [];
+    let slotsReleased = false;
+    const releaseTurnSlots = () => {
+      if (slotsReleased) return;
+      slotsReleased = true;
+      while (releases.length) releases.pop()();
+    };
+    // Do not dequeue Codex work until it is admitted: if the server restarts again while
+    // waiting, the request remains durable in `queue`. Recovered turns take both budgets.
+    const admittedQid = (s.queue[0].agent || s.agent || 'claude') === 'codex' ? s.queue[0].qid : null;
+    const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
     if (recoveryQid) {
       if (CODEX_RECOVERY_LIMITER.active >= CODEX_RECOVERY_LIMITER.limit) {
         bcast(s, {
@@ -5523,14 +5529,32 @@ async function runWorker(s) {
           msg: `Queued — restoring interrupted work when Box has capacity (${CODEX_RECOVERY_LIMITER.limit} recoveries at a time).`,
         });
       }
-      releaseTurnSlot = await CODEX_RECOVERY_LIMITER.acquire();
+      releases.push(await CODEX_RECOVERY_LIMITER.acquire());
       // Archive/cancel can clear or replace a queued recovery while it waits for capacity.
       if (!s.running || !s.queue.length) {
-        releaseTurnSlot();
+        releaseTurnSlots();
         break;
       }
       if (s.queue[0].qid !== recoveryQid || !s.queue[0].recovered) {
-        releaseTurnSlot();
+        releaseTurnSlots();
+        continue;
+      }
+    }
+    if (admittedQid) {
+      if (CODEX_TURN_LIMITER.active >= CODEX_TURN_LIMITER.limit) {
+        bcast(s, {
+          type: 'native_wait',
+          sessionId: s.sessionId,
+          msg: `Queued — starting when Box has capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
+        });
+      }
+      releases.push(await CODEX_TURN_LIMITER.acquire());
+      if (!s.running || !s.queue.length) {
+        releaseTurnSlots();
+        break;
+      }
+      if (s.queue[0].qid !== admittedQid) {
+        releaseTurnSlots();
         continue;
       }
     }
@@ -5561,14 +5585,14 @@ async function runWorker(s) {
     try {
       await runTurn(s, msg);
     } finally {
-      if (releaseTurnSlot) {
+      if (releases.length) {
         // `/goal` resolves the phone turn while its Codex process continues working. Keep
         // that process inside the same global budget until it actually exits.
         const goalProc = s.codexGoalProc;
         if (goalProc && goalProc.exitCode == null && goalProc.signalCode == null) {
-          goalProc.once('close', releaseTurnSlot);
+          goalProc.once('close', releaseTurnSlots);
         } else {
-          releaseTurnSlot();
+          releaseTurnSlots();
         }
       }
     }
@@ -6505,9 +6529,17 @@ wss.on('connection', (ws) => {
       if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
     } else if (m.type === 'team_chat') {
       const s = rt(m.key);
-      if (!s.sessionId || !sessionInTeamWorkspaceOf(s) || !principalCanAccessSession(ws.principal, s.sessionId)) return deny();
+      const clientMessageId = String(m.clientMessageId || '').slice(0, 128);
+      const teamChatReply = (type, payload = {}) => {
+        try { ws.send(JSON.stringify({ type, clientMessageId, ...payload })); } catch {}
+      };
+      if (!s.sessionId || !sessionInTeamWorkspaceOf(s) || !principalCanAccessSession(ws.principal, s.sessionId)) {
+        teamChatReply('team_chat_error', { msg: 'You no longer have access to this team chat.' });
+        return;
+      }
       const message = team.appendSessionChat(s.sessionId, m.text, ws.principal);
-      if (!message) { try { ws.send(JSON.stringify({ type: 'error', msg: 'Team chat message cannot be empty.' })); } catch {} return; }
+      if (!message) { teamChatReply('team_chat_error', { msg: 'Team chat message cannot be empty.' }); return; }
+      teamChatReply('team_chat_ack', { messageId: message.id });
       bcast(s, { type: 'team_chat', message });
     } else if (m.type === 'typing') {
       const s = rt(m.key);

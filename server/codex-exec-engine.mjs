@@ -150,9 +150,10 @@ export class CodexExecEngine {
     const child = this.spawnImpl(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [launch.envInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
+    if (launch.envInput) child.stdin.end(launch.envInput);
     child.killTree = (signal = 'SIGTERM') => terminateCodexProcess(child, signal);
 
     const rl = createInterface({ input: child.stdout });
