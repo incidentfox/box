@@ -1,4 +1,5 @@
 import { createReadStream, openSync, readSync, closeSync, statSync, watch } from 'node:fs';
+import { isAbsolute } from 'node:path';
 
 // Most history opens only need the recent conversation.  Keep the first disk read small:
 // long-lived Codex sessions contain huge world-state rows that otherwise make opening a
@@ -14,6 +15,18 @@ const textOutput = (value) => {
   if (Array.isArray(value)) return value.map((part) => part && (part.text || part.input_text) || '').join('');
   return value == null ? '' : JSON.stringify(value);
 };
+
+const GENERATED_IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i;
+
+// Codex persists generated images to disk and also places a large base64 result in the
+// rollout. Keep only the absolute saved path: Box already serves local files through its
+// authenticated raw-file route, and retaining the base64 would bloat history/websocket data.
+export function codexGeneratedImage(payload) {
+  const path = typeof payload?.saved_path === 'string' ? payload.saved_path.trim() : '';
+  if (payload?.type !== 'image_generation_end' || payload.status !== 'completed'
+    || !isAbsolute(path) || !GENERATED_IMAGE_PATH_RE.test(path)) return null;
+  return { path, alt: path.split('/').filter(Boolean).pop() || 'Generated image' };
+}
 
 function balancedObject(source, from) {
   const start = source.indexOf('{', from);
@@ -80,6 +93,11 @@ export function parseCodexRollout(raw) {
     if (!line.trim()) continue;
     let row; try { row = JSON.parse(line); } catch { continue; }
     const p = row.payload || {};
+    const generatedImage = row.type === 'event_msg' ? codexGeneratedImage(p) : null;
+    if (generatedImage) {
+      ensureAssistant(row.timestamp).parts.push({ t: 'image', ...generatedImage });
+      continue;
+    }
     if (row.type === 'event_msg' && p.type === 'user_message') {
       const text = String(p.message || '').trim();
       if (!text || text.startsWith('<') || text.startsWith('Caveat:')) continue;
@@ -114,7 +132,8 @@ export function parseCodexRollout(raw) {
 function relevantRolloutLine(line) {
   if (!line) return false;
   if (line.includes('"type":"event_msg"')) {
-    return line.includes('"type":"user_message"') || line.includes('"type":"agent_message"');
+    return line.includes('"type":"user_message"') || line.includes('"type":"agent_message"')
+      || line.includes('"type":"image_generation_end"');
   }
   if (!line.includes('"type":"response_item"')) return false;
   return line.includes('"type":"custom_tool_call"')
@@ -290,6 +309,8 @@ export function codexRolloutState(file) {
 
 export function parseCodexLiveEntry(row) {
   const p = row && row.payload || {};
+  const generatedImage = row && row.type === 'event_msg' ? codexGeneratedImage(p) : null;
+  if (generatedImage) return [{ kind: 'image', ...generatedImage, ts: row.timestamp }];
   if (row && row.type === 'event_msg' && p.type === 'user_message') {
     const text = String(p.message || '').trim();
     return text && !text.startsWith('<') && !text.startsWith('Caveat:') ? [{ kind: 'user', text, ts: row.timestamp }] : [];

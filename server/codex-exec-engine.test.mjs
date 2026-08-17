@@ -173,10 +173,13 @@ assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_m
   const events = [];
   const engine = new CodexExecEngine({ spawnImpl: (_cmd, args, options) => { spawnArgs = args; spawnOptions = options; return child; } });
   engine.run({ cwd: '/work', prompt: 'finish once', onEvent: (event) => events.push(event) });
+  child.stdout.write(`${JSON.stringify({ type: 'event_msg', payload: { type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/concept.png', result: 'secret-base64' } })}\n`);
   child.stdout.write(`${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })}\n`);
   child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } })}\n`);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events.map((event) => event.type), ['text', 'context', 'turn_end']);
+  assert.deepEqual(events.map((event) => event.type), ['image', 'text', 'context', 'turn_end']);
+  assert.deepEqual(events[0], { type: 'image', path: '/tmp/generated/concept.png', alt: 'concept.png' });
+  assert.ok(!JSON.stringify(events).includes('secret-base64'));
   assert.equal(events.at(-1).status, 'completed');
   assert.equal(spawnOptions.detached, process.platform !== 'win32');
   assert.ok(spawnArgs.includes('mcp_servers.sessiongrep.enabled=false'), 'owner turn disables sessiongrep MCP');

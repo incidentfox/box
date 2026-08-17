@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  codexRolloutHistory, codexRolloutMeta, codexRolloutState, parseCodexLiveEntry, parseCodexRollout,
+  codexGeneratedImage, codexRolloutHistory, codexRolloutMeta, codexRolloutState, parseCodexLiveEntry, parseCodexRollout,
   tailCodexRollout,
 } from './codex-rollout-history.mjs';
 
@@ -11,6 +11,7 @@ const rows = [
   { timestamp: '2026-07-17T17:00:00Z', type: 'event_msg', payload: { type: 'user_message', message: 'Monitor calls' } },
   { timestamp: '2026-07-17T17:00:01Z', type: 'response_item', payload: { type: 'reasoning', summary: ['secret'] } },
   { timestamp: '2026-07-17T17:00:02Z', type: 'event_msg', payload: { type: 'agent_message', message: 'Checking ten live calls.' } },
+  { timestamp: '2026-07-17T17:00:02.5Z', type: 'event_msg', payload: { type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/concept.png', result: 'secret-base64' } },
   { timestamp: '2026-07-17T17:00:03Z', type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'c1', input: 'const r = await tools.exec_command({"cmd":"poll calls","workdir":"/tmp"});' } },
   { timestamp: '2026-07-17T17:00:04Z', type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'c1', output: '9 active' } },
   { timestamp: '2026-07-17T17:00:05Z', type: 'response_item', payload: { type: 'function_call', name: 'wait', call_id: 'c2', arguments: '{"cell_id":"12"}' } },
@@ -20,11 +21,19 @@ const rows = [
 const messages = parseCodexRollout(rows);
 assert.equal(messages.length, 2);
 assert.equal(messages[0].role, 'user');
-assert.deepEqual(messages[1].parts.map((part) => part.t === 'text' ? part.text : part.name), ['Checking ten live calls.', 'Bash', 'Wait']);
-assert.equal(messages[1].parts[1].input, 'poll calls');
-assert.equal(messages[1].parts[1].result, '9 active');
-assert.equal(messages[1].parts[2].result, 'finished');
+assert.deepEqual(messages[1].parts.map((part) => part.t === 'text' ? part.text : part.t === 'image' ? part.alt : part.name), ['Checking ten live calls.', 'concept.png', 'Bash', 'Wait']);
+assert.equal(messages[1].parts[1].path, '/tmp/generated/concept.png');
+assert.equal(messages[1].parts[2].input, 'poll calls');
+assert.equal(messages[1].parts[2].result, '9 active');
+assert.equal(messages[1].parts[3].result, 'finished');
 assert.ok(!JSON.stringify(messages).includes('secret'));
+
+assert.deepEqual(codexGeneratedImage({ type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/concept.webp' }), {
+  path: '/tmp/generated/concept.webp', alt: 'concept.webp',
+});
+assert.equal(codexGeneratedImage({ type: 'image_generation_end', status: 'pending', saved_path: '/tmp/generated/concept.png' }), null);
+assert.equal(codexGeneratedImage({ type: 'image_generation_end', status: 'completed', saved_path: 'relative.png' }), null);
+assert.equal(codexGeneratedImage({ type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/not-image.txt' }), null);
 
 const root = mkdtempSync(join(tmpdir(), 'box-codex-rollout-'));
 try {
@@ -56,6 +65,9 @@ try {
     id: 'thread-1', cwd: '/tmp/work', created: '2026-07-17T16:59:59Z', source: 'native', opening: 'Monitor calls', size: page.liveCursor,
   });
   assert.deepEqual(parseCodexLiveEntry({ timestamp: 't', type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }).map((e) => e.kind), ['text', 'turn_end']);
+  assert.deepEqual(parseCodexLiveEntry({ timestamp: 't', type: 'event_msg', payload: { type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/live.png', result: 'secret-base64' } }), [
+    { kind: 'image', path: '/tmp/generated/live.png', alt: 'live.png', ts: 't' },
+  ]);
   assert.equal(codexRolloutState(file).busy, true);
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'agent_message', message: 'Done.', phase: 'final_answer' } }) + '\n');
   assert.equal(codexRolloutState(file).phase, 'final_answer');
@@ -74,9 +86,12 @@ try {
 
   const streamed = [];
   const stop = tailCodexRollout(file, (event) => streamed.push(event));
+  appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/streamed.png', result: 'secret-base64' } }) + '\n');
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'one live message' } }) + '\n');
   assert.equal(codexRolloutState(file).busy, true);
-  for (let i = 0; i < 25 && !streamed.length; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  for (let i = 0; i < 25 && streamed.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(streamed.filter((event) => event.kind === 'image').length, 1);
+  assert.equal(streamed.find((event) => event.kind === 'image').path, '/tmp/generated/streamed.png');
   assert.equal(streamed.filter((event) => event.kind === 'user').length, 1);
   stop();
   appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'user_message', message: 'must not replay after stop' } }) + '\n');
