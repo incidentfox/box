@@ -179,11 +179,8 @@ const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FI
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 
 const PORT = Number(cfg('PORT', 7321));
-// Codex turns are independent, but they share this service's 10G cgroup. A handful of large
-// contexts can otherwise make the kernel OOM-kill one child and leave several chats looking
-// stuck. Bound all Codex work, and keep automatic restart recoveries even more conservative.
-const MAX_CONCURRENT_CODEX_TURNS = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_TURNS', '3'));
-const CODEX_TURN_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_TURNS);
+// Normal Box turns start immediately without a global session cap. Automatic restart
+// recoveries remain serialized so one deploy cannot replay every interrupted turn at once.
 const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '1'));
 const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
@@ -5517,10 +5514,10 @@ async function runWorker(s) {
       slotsReleased = true;
       while (releases.length) releases.pop()();
     };
-    // Do not dequeue Codex work until it is admitted: if the server restarts again while
-    // waiting, the request remains durable in `queue`. Recovered turns take both budgets.
-    const admittedQid = (s.queue[0].agent || s.agent || 'claude') === 'codex' ? s.queue[0].qid : null;
-    const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
+    // Do not dequeue recovered Codex work until it is admitted: if the server restarts again
+    // while waiting, the request remains durable in `queue`. Normal turns have no global cap.
+    const codexQid = (s.queue[0].agent || s.agent || 'claude') === 'codex' ? s.queue[0].qid : null;
+    const recoveryQid = codexQid && s.queue[0].recovered ? codexQid : null;
     if (recoveryQid) {
       if (CODEX_RECOVERY_LIMITER.active >= CODEX_RECOVERY_LIMITER.limit) {
         bcast(s, {
@@ -5536,24 +5533,6 @@ async function runWorker(s) {
         break;
       }
       if (s.queue[0].qid !== recoveryQid || !s.queue[0].recovered) {
-        releaseTurnSlots();
-        continue;
-      }
-    }
-    if (admittedQid) {
-      if (CODEX_TURN_LIMITER.active >= CODEX_TURN_LIMITER.limit) {
-        bcast(s, {
-          type: 'native_wait',
-          sessionId: s.sessionId,
-          msg: `Queued — starting when Box has capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
-        });
-      }
-      releases.push(await CODEX_TURN_LIMITER.acquire());
-      if (!s.running || !s.queue.length) {
-        releaseTurnSlots();
-        break;
-      }
-      if (s.queue[0].qid !== admittedQid) {
         releaseTurnSlots();
         continue;
       }
@@ -5586,8 +5565,8 @@ async function runWorker(s) {
       await runTurn(s, msg);
     } finally {
       if (releases.length) {
-        // `/goal` resolves the phone turn while its Codex process continues working. Keep
-        // that process inside the same global budget until it actually exits.
+        // `/goal` resolves a recovered phone turn while its Codex process continues working.
+        // Keep that process inside the restart-recovery budget until it actually exits.
         const goalProc = s.codexGoalProc;
         if (goalProc && goalProc.exitCode == null && goalProc.signalCode == null) {
           goalProc.once('close', releaseTurnSlots);

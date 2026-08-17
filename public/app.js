@@ -4259,8 +4259,9 @@ function chooseWaiting(index, btn) {
 function stopCurrent() {
   try { ws.send(JSON.stringify({ type: 'cancel', key: cur.key })); } catch {}
   if (live) { clearLoading(); live.textEl.classList.remove('cursor'); if (live.raw) { live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); } }
-  // optimistic: if the server doesn't confirm within 1.5s, release the UI anyway
-  setTimeout(() => { if (running) { running = false; refreshButton(); } }, 1500);
+  // The server owns the running state. Its canceled `done` is immediately followed by
+  // `turn_start` when queued messages exist, so a local fallback must not mark that new
+  // turn idle after it has already begun.
 }
 $('stopBtn').onclick = stopCurrent;
 $('sendBtn').onclick = () => { if ($('sendBtn').dataset.act === 'stop') stopCurrent(); else submit(); };
