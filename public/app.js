@@ -3454,19 +3454,76 @@ function fillFileSize(el, fp) {
     .then((r) => { const s = fmtBytes(r.headers.get('content-length')); if (s) el.textContent = s; })
     .catch(() => {});
 }
-function downloadFile(fp, fname) {
-  // Use the server's attachment response instead of buffering the entire file in JS.
-  // This is important for large workbooks/archives and gives iOS a real download response.
+const preparedDownloadFiles = new Map();
+function isMobileFileClient() {
+  const ua = String(navigator.userAgent || '');
+  return /Android|iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function browserDownloadFile(fp, fname) {
   const a = document.createElement('a');
-  a.href = rawFileUrl(fp, true);
-  a.download = fname || String(fp || '').split('/').pop() || 'download';
+  const name = fname || String(fp || '').split('/').pop() || 'download';
+  if (isMobileFileClient()) {
+    // iOS ignores Content-Disposition/download for PDFs and otherwise replaces the
+    // standalone PWA with a chrome-less PDF view. A new browsing context preserves Box.
+    a.href = rawFileUrl(fp);
+    a.target = '_blank';
+    a.rel = 'noopener';
+  } else {
+    a.href = rawFileUrl(fp, true);
+    a.download = name;
+  }
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   a.remove();
 }
+function rememberPreparedDownload(key, file) {
+  if (preparedDownloadFiles.size >= 3 && !preparedDownloadFiles.has(key)) {
+    preparedDownloadFiles.delete(preparedDownloadFiles.keys().next().value);
+  }
+  preparedDownloadFiles.set(key, file);
+}
+async function downloadFile(fp, fname) {
+  const name = fname || String(fp || '').split('/').pop() || 'download';
+  if (!isMobileFileClient() || typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') {
+    browserDownloadFile(fp, name);
+    return;
+  }
+
+  const key = rawFileUrl(fp);
+  let file = preparedDownloadFiles.get(key);
+  try {
+    if (!file) {
+      toast(`Preparing ${name}…`, 5000);
+      const response = await fetch(key);
+      if (!response.ok) throw new Error(`Download failed (${response.status})`);
+      const blob = await response.blob();
+      file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+      rememberPreparedDownload(key, file);
+    }
+    if (!navigator.canShare({ files: [file] })) throw new Error('File sharing is unavailable');
+    // On iPhone/iPad this opens the native sheet, including "Save to Files",
+    // without navigating the PWA away from Box.
+    await navigator.share({ files: [file], title: name });
+    preparedDownloadFiles.delete(key);
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      preparedDownloadFiles.delete(key);
+      return;
+    }
+    if (error && error.name === 'NotAllowedError' && file) {
+      // A slow fetch can outlive Safari's transient user activation. Retain the
+      // prepared file so the next tap invokes navigator.share synchronously.
+      toast(`${name} is ready — tap Save / Share again`, 5000);
+      return;
+    }
+    preparedDownloadFiles.delete(key);
+    toast('Couldn’t open sharing. Opening the file in your browser…', 3500);
+    browserDownloadFile(fp, name);
+  }
+}
 function fileDlBtn(fp, fname) {
-  const dl = document.createElement('button'); dl.className = 'fileCardDl'; dl.title = 'Download'; dl.innerHTML = ICONS['arrow-down'];
+  const dl = document.createElement('button'); dl.className = 'fileCardDl'; dl.title = 'Save / Share'; dl.setAttribute('aria-label', `Save or share ${fname || 'file'}`); dl.innerHTML = ICONS['arrow-down'];
   dl.addEventListener('click', (e) => { e.stopPropagation(); downloadFile(fp, fname); });
   return dl;
 }
@@ -5954,12 +6011,13 @@ function showMedia(path) {
   else if (MEDIA.video.includes(ext)) { const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.src = rawUrl(path); v.className = 'mediael'; body.appendChild(v); }
   else if (ext === 'pdf') {
     // Native embedded PDF viewer (full + scrollable on desktop; first page on iOS Safari).
-    // Always offer an open-in-new-tab fallback so the whole document is reachable everywhere.
+    // Keep navigation in Box and send mobile users through the native Save/Share sheet.
     const f = document.createElement('iframe'); f.className = 'mediael pdfframe'; f.title = path.split('/').pop();
     f.src = rawUrl(path) + '#view=FitH'; body.appendChild(f);
     const bar = document.createElement('div'); bar.className = 'pdfFallbackBar';
-    const a = document.createElement('a'); a.className = 'filePreviewBtn'; a.textContent = 'Open in browser'; a.href = rawUrl(path); a.target = '_blank'; a.rel = 'noopener';
-    bar.appendChild(a); body.appendChild(bar);
+    const save = document.createElement('button'); save.className = 'filePreviewBtn'; save.textContent = 'Save / Share PDF';
+    save.onclick = () => downloadFile(path, path.split('/').pop());
+    bar.appendChild(save); body.appendChild(bar);
   }
   else if (SPREADSHEET_EXTS.includes(ext)) renderSpreadsheetPreview(body, path);
   else if (isTextPreviewExt(ext)) {

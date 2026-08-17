@@ -738,7 +738,7 @@ html[data-theme="dark"] .agentTag.arch { background: #2c2620; color: #c8b48c; }
 .fileCardIcon svg { width: 16px; height: 16px; opacity: 0.7; }
 .fileCardName { flex: 1; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .fileCardExt { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .05em; color: var(--muted); background: var(--subtle); border-radius: 5px; padding: 2px 5px; }
-.fileCardDl { flex: none; opacity: 0.5; background: none; border: 0; padding: 2px; margin: 0; color: inherit; cursor: pointer; line-height: 0; border-radius: 6px; } .fileCardDl svg { width: 16px; height: 16px; }
+.fileCardDl { flex: none; width: 36px; height: 36px; display: grid; place-items: center; opacity: 0.55; background: none; border: 0; padding: 0; margin: -8px -6px -8px 0; color: inherit; cursor: pointer; line-height: 0; border-radius: 9px; } .fileCardDl svg { width: 18px; height: 18px; }
 .fileCardDl:active { opacity: 0.9; }
 .fileCardMain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .fileCardSize { font-size: 11px; color: var(--muted); font-weight: 500; }
@@ -759,7 +759,7 @@ html[data-theme="dark"] .agentTag.arch { background: #2c2620; color: #c8b48c; }
 /* PDF in the full-screen media viewer */
 .pdfframe { width: 100%; height: 100%; min-height: 72vh; border: 0; background: #fff; }
 .pdfFallbackBar { display: flex; justify-content: center; padding: 10px 0 2px; }
-.pdfFallbackBar .filePreviewBtn { flex: none; min-width: 180px; }
+.pdfFallbackBar .filePreviewBtn { flex: none; min-width: 180px; min-height: 44px; }
 
 /* AskUserQuestion → interactive question cards */
 .askUserCard { display: flex; flex-direction: column; gap: 14px; margin: 4px 0; max-width: min(360px, 92vw); }
