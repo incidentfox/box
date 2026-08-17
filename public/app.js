@@ -3312,6 +3312,8 @@ function buildHistElement(m) {
       }
     } else if (role === 'user' && (p.t === 'image' || p.t === 'file') && p.path) {
       body.appendChild(userAttachmentGrid([p.path]));
+    } else if (role === 'assistant' && p.t === 'image' && p.path) {
+      body.appendChild(imageDeliveryCard(p.path, p.alt || String(p.path).split('/').pop() || 'Generated image'));
     } else if (p.t === 'tool') body.appendChild(toolChip(p.name, summarize(p.name, p.input), { input: p.detail || p.input, result: p.result }));
   }
   rawText = rawText.trim();
@@ -3634,7 +3636,7 @@ function toolChip(name, info, data) {
   }
   const c = document.createElement('div'); c.className = 'toolchip clickable';
   const rawInput = (data && data.input) || {};
-  const path = rawInput.file_path;
+  const path = rawInput.file_path || rawInput.path;
   const isImg = name === 'Read' && path && /\.(png|jpe?g|gif|webp|svg|bmp|heic)$/i.test(path);
   // Native-style subtle row: bold verb + muted description + chevron. For Bash, prefer
   // the human-readable description over the raw command (matches the desktop app).
@@ -3660,7 +3662,7 @@ function toolChip(name, info, data) {
 function summarize(name, input) {
   if (!input) return '';
   if (name === 'Bash') return (input.command || '').slice(0, 60);
-  if (['Read', 'Edit', 'Write'].includes(name)) return (input.file_path || '').split('/').slice(-1)[0];
+  if (['Read', 'Edit', 'Write'].includes(name)) return (input.file_path || input.path || '').split('/').slice(-1)[0];
   if (['Grep', 'Glob'].includes(name)) return input.pattern || '';
   if (name === 'Task') return input.description || '';
   return '';
@@ -3815,6 +3817,22 @@ function startAssistant() {
   liveMdCache = { cut: -1, html: '' };   // never reuse a previous turn's cached prefix
 }
 function clearLoading() { if (live && live.loading) { live.loading.remove(); live.loading = null; } }
+function insertLiveImagePart(path, alt) {
+  if (!path) return;
+  if (!live) startAssistant();
+  clearLoading();
+  live.textEl.classList.remove('cursor');
+  live.textEl._rawMdText = live.raw;
+  live.textEl.innerHTML = md(live.raw);
+  const card = imageDeliveryCard(path, alt || String(path).split('/').pop() || 'Generated image');
+  live.textEl.insertAdjacentElement('afterend', card);
+  live.raw = '';
+  const nextText = document.createElement('div');
+  nextText.className = 'cursor mdBlock';
+  nextText._rawMdText = '';
+  card.insertAdjacentElement('afterend', nextText);
+  live.textEl = nextText;
+}
 // remove orphaned streaming indicators (blinking cursor / loading dots) left by a previous
 // turn or a reconnect — prevents stray ghost indicators lingering in the transcript.
 function killGhostIndicators() { stopLiveProgress(); $('messages').querySelectorAll('.cursor').forEach((e) => e.classList.remove('cursor')); $('messages').querySelectorAll('.loading').forEach((e) => e.remove()); $('messages').querySelectorAll('.liveProgress').forEach((e) => e.remove()); }
@@ -3881,6 +3899,7 @@ function onServer(o) {
   if (o.type === 'idle') { running = false; killGhostIndicators(); refreshButton(); refreshSessionsSoon(); refreshSessionModesSoon(); return; }
   if (o.type === 'thinking') { if (live) { const viewport = captureChatViewport(); clearLoading(); if (!live.think) { live.think = document.createElement('div'); live.think.className = 'thinking'; live.body.insertBefore(live.think, live.textEl); } live.think.textContent += o.delta; restoreChatViewport(viewport); } }
   else if (o.type === 'text') { if (!live) startAssistant(); clearLoading(); live.raw += o.delta; live.copyText += o.delta; queueRender(); }
+  else if (o.type === 'image') { const viewport = captureChatViewport(); insertLiveImagePart(o.path, o.alt); restoreChatViewport(viewport); }
   else if (o.type === 'tool') {
     const viewport = captureChatViewport();
     if (!live) startAssistant(); clearLoading();
@@ -4020,6 +4039,8 @@ function onSync(o) {
           const chip = toolChip(p.name, p.input || '', live.toolData[p.id]);
           live.textEl.insertAdjacentElement('afterend', chip);
           live.raw = ''; const nt = document.createElement('div'); nt.className = 'cursor mdBlock'; nt._rawMdText = ''; chip.insertAdjacentElement('afterend', nt); live.textEl = nt;
+        } else if (p.t === 'image' && p.path) {
+          insertLiveImagePart(p.path, p.alt);
         } else if (p.t === 'text' && p.text) { clearLoading(); live.raw += p.text; live.copyText += p.text; live.textEl._rawMdText = live.raw; live.textEl.innerHTML = md(live.raw); }
       }
     } else if (redraw) {

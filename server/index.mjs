@@ -1762,10 +1762,12 @@ function migrateCodexSession(fromId, toId) {
 // Build the ordered parts a history reload renders from the live turn's curParts.
 function codexAssistantParts(curParts) {
   return (curParts || [])
-    .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool'))
+    .filter((p) => (p.t === 'text' ? !!(p.text && p.text.trim()) : p.t === 'tool' || (p.t === 'image' && p.path)))
     .map((p) => (p.t === 'tool'
       ? { t: 'tool', id: p.id, name: p.name, input: compactString(p.input || '', 240), detail: compactToolDetail(p.name, p.detail || null, p.input), result: p.result ? compactString(p.result, HIST_TOOL_RESULT_LIMIT) : p.result }
-      : { t: 'text', text: p.text }));
+      : p.t === 'image'
+        ? { t: 'image', path: p.path, alt: p.alt }
+        : { t: 'text', text: p.text }));
 }
 // Persist the in-flight Codex assistant turn AS IT STREAMS, not only at finish(). Codex
 // turns run long (a delegated ticket is 200+ tool calls / many minutes) and this box is
@@ -4807,6 +4809,12 @@ function onTailEvent(s, ev) {
     const delta = s.agent === 'codex' && last && last.t === 'text' && last.text ? `\n\n${ev.text}` : ev.text;
     s.curText += delta; pushTextPart(s, delta); bcast(s, { type: 'text', delta });
   }
+  else if (ev.kind === 'image') {
+    const part = { t: 'image', path: ev.path, alt: ev.alt };
+    s.curParts.push(part);
+    if (s.sessionId) flushCodexAssistant(s);
+    bcast(s, { type: 'image', path: ev.path, alt: ev.alt });
+  }
   else if (ev.kind === 'thinking') bcast(s, { type: 'thinking', delta: ev.text });
   else if (ev.kind === 'tool') {
     const t = { type: 'tool', id: ev.id, name: ev.name, input: summarizeToolInput(ev.name, ev.input), detail: ev.input };
@@ -5832,6 +5840,10 @@ function runCodexTurn(s, msg, resolve) {
         // (~tens per turn), so a crash never loses one.
         if (s.sessionId) { s.cxLastFlush = Date.now(); flushCodexAssistant(s); }
         bcast(s, { type: 'text', delta });
+      } else if (ev.type === 'image') {
+        s.curParts.push({ t: 'image', path: ev.path, alt: ev.alt });
+        if (s.sessionId) { s.cxLastFlush = Date.now(); flushCodexAssistant(s); }
+        bcast(s, ev);
       } else if (ev.type === 'thinking') {
         // Reasoning content stays hidden; this is only a liveness heartbeat used by the
         // activity clock so a healthy, quiet Codex turn does not look frozen.

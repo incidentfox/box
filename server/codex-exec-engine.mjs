@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { buildChildEnv } from './child-env.mjs';
 import { buildTeamSandbox, buildUnixTeamSandbox } from './team-sandbox.mjs';
+import { codexGeneratedImage } from './codex-rollout-history.mjs';
 
 // Owner Codex turns use the login stored by `codex login` (normally ChatGPT). In a
 // non-interactive `codex exec`, either API-key variable can take precedence over that
@@ -167,6 +168,12 @@ export class CodexExecEngine {
       if (!line.trim()) return;
       let o;
       try { o = JSON.parse(line); } catch { return; }
+
+      const generated = o.type === 'event_msg' ? codexGeneratedImage(o.payload) : null;
+      if (generated) {
+        emit({ type: 'image', ...generated });
+        return;
+      }
 
       if (o.type === 'thread.started' && o.thread_id) {
         emit({ type: 'session', id: o.thread_id });
