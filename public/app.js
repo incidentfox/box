@@ -6038,7 +6038,13 @@ function renderNativePdfFallback(body, path) {
   f.src = rawUrl(path) + '#view=FitH'; body.appendChild(f);
   const bar = document.createElement('div'); bar.className = 'pdfFallbackBar';
   const open = document.createElement('button'); open.className = 'filePreviewBtn'; open.textContent = 'Open PDF in browser';
-  open.onclick = () => browserDownloadFile(path, path.split('/').pop());
+  open.onclick = () => {
+    const a = document.createElement('a');
+    a.href = rawUrl(path);
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.click();
+  };
   const save = document.createElement('button'); save.className = 'filePreviewBtn'; save.textContent = 'Save / Share PDF';
   save.onclick = () => downloadFile(path, path.split('/').pop());
   bar.append(open, save); body.appendChild(bar);
@@ -6071,14 +6077,17 @@ async function renderMobilePdf(body, path) {
     let availableWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
     const records = [];
+    const firstPage = await pdf.getPage(1);
+    const estimatedViewport = firstPage.getViewport({ scale: 1 });
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
       if (run !== pdfRenderRun) return;
-      const page = await pdf.getPage(pageNumber);
-      const baseViewport = page.getViewport({ scale: 1 });
+      const page = pageNumber === 1 ? firstPage : null;
+      const baseViewport = estimatedViewport;
       const cssScale = availableWidth / baseViewport.width;
-      const cssViewport = page.getViewport({ scale: cssScale });
+      const cssViewport = baseViewport.clone({ scale: cssScale });
       const wrap = document.createElement('section'); wrap.className = 'pdfPage';
       wrap.setAttribute('aria-label', `Page ${pageNumber} of ${pdf.numPages}`);
+      if (page) wrap.dataset.pdfLoaded = 'true';
       wrap.style.width = `${Math.floor(cssViewport.width)}px`;
       wrap.style.height = `${Math.floor(cssViewport.height)}px`;
       const label = document.createElement('div'); label.className = 'pdfPageLabel';
@@ -6106,7 +6115,7 @@ async function renderMobilePdf(body, path) {
         record.canvas = null;
       }
       record.wrap.classList.remove('rendering', 'rendered');
-      try { record.page.cleanup(); } catch {}
+      try { record.page?.cleanup(); } catch {}
     };
     const pump = async () => {
       if (stopped || active) return;
@@ -6119,16 +6128,30 @@ async function renderMobilePdf(body, path) {
       record.queued = false;
       active = record;
       const generation = ++record.generation;
-      const renderViewport = record.page.getViewport({ scale: record.cssScale * pixelRatio });
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.ceil(renderViewport.width);
-      canvas.height = Math.ceil(renderViewport.height);
-      canvas.style.width = record.wrap.style.width;
-      canvas.style.height = record.wrap.style.height;
-      record.canvas = canvas;
-      record.wrap.insertBefore(canvas, record.label);
-      record.wrap.classList.add('rendering');
       try {
+        if (!record.page) {
+          const page = await pdf.getPage(record.pageNumber);
+          if (stopped || run !== pdfRenderRun || generation !== record.generation || !record.near) {
+            try { page.cleanup(); } catch {}
+            return;
+          }
+          record.page = page;
+          record.baseViewport = page.getViewport({ scale: 1 });
+          record.cssScale = availableWidth / record.baseViewport.width;
+          const cssViewport = record.baseViewport.clone({ scale: record.cssScale });
+          record.wrap.style.width = `${Math.floor(cssViewport.width)}px`;
+          record.wrap.style.height = `${Math.floor(cssViewport.height)}px`;
+          record.wrap.dataset.pdfLoaded = 'true';
+        }
+        const renderViewport = record.page.getViewport({ scale: record.cssScale * pixelRatio });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(renderViewport.width);
+        canvas.height = Math.ceil(renderViewport.height);
+        canvas.style.width = record.wrap.style.width;
+        canvas.style.height = record.wrap.style.height;
+        record.canvas = canvas;
+        record.wrap.insertBefore(canvas, record.label);
+        record.wrap.classList.add('rendering');
         const task = record.page.render({ canvasContext: canvas.getContext('2d'), viewport: renderViewport });
         record.renderTask = task;
         await task.promise;
@@ -6143,7 +6166,7 @@ async function renderMobilePdf(body, path) {
         if (generation === record.generation) release(record);
       } finally {
         if (record.renderTask) record.renderTask = null;
-        try { record.page.cleanup(); } catch {}
+        try { record.page?.cleanup(); } catch {}
         active = null;
         pump();
       }
@@ -6169,7 +6192,7 @@ async function renderMobilePdf(body, path) {
       records.forEach((record) => {
         release(record);
         record.cssScale = availableWidth / record.baseViewport.width;
-        const viewport = record.page.getViewport({ scale: record.cssScale });
+        const viewport = record.baseViewport.clone({ scale: record.cssScale });
         record.wrap.style.width = `${Math.floor(viewport.width)}px`;
         record.wrap.style.height = `${Math.floor(viewport.height)}px`;
         if (record.near) enqueue(record);

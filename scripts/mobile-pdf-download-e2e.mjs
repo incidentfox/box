@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = 'mobile-pdf-e2e-token';
-const PAGE_COUNT = 12;
+const PAGE_COUNT = 120;
 
 function createPdf(pageCount) {
   const pageRefs = Array.from({ length: pageCount }, (_, index) => `${3 + index * 2} 0 R`).join(' ');
@@ -165,6 +165,9 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.pdfPage.rendered').length > 0);
   await page.waitForFunction(() => typeof Promise.withResolvers === 'function');
 
+  const initiallyLoaded = await page.locator('.pdfPage[data-pdf-loaded="true"]').count();
+  if (initiallyLoaded >= PAGE_COUNT) throw new Error(`PDF eagerly loaded every page (${initiallyLoaded}/${PAGE_COUNT})`);
+
   const portrait = await page.locator('.pdfPage').first().evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return { width: rect.width, height: rect.height };
@@ -226,6 +229,22 @@ try {
   if (await page.locator('#explorer').evaluate((element) => !element.classList.contains('hidden'))) {
     throw new Error('Back did not close the PDF reader');
   }
+
+  const desktopPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await desktopPage.addInitScript((token) => localStorage.setItem('cc_token', token), TOKEN);
+  await desktopPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  await desktopPage.evaluate((path) => openFile(path), pdfPath);
+  await desktopPage.waitForSelector('.pdfFallbackBar');
+  const [openedPdf, openedRequest] = await Promise.all([
+    desktopPage.waitForEvent('popup'),
+    desktopPage.context().waitForEvent('request', { predicate: (request) => new URL(request.url()).pathname === '/api/raw' }),
+    desktopPage.getByRole('button', { name: 'Open PDF in browser' }).click(),
+  ]);
+  if (openedRequest.url().includes('download=1')) {
+    throw new Error(`Open PDF used the download route instead of the browser route: ${openedRequest.url()}`);
+  }
+  await openedPdf.close();
+  await desktopPage.close();
   console.log(`PASS ${browserName} mobile PDF uses authenticated routes, relayouts on rotation, exposes all pages, lazily renders, saves/shares, and Back exits`);
 } finally {
   if (browser) await browser.close();
