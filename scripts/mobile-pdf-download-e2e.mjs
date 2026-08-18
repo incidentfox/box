@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Mobile-browser regression for saving a PDF without navigating away from Box.
+// Mobile-browser regression for viewing and saving a multi-page PDF without
+// navigating away from Box.
 
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
@@ -12,8 +13,34 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = join(ROOT, 'public');
 const TOKEN = 'mobile-pdf-e2e-token';
 const PDF_PATH = '/tmp/mobile-save-test.pdf';
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
-const PDF = Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n');
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
+
+function createPdf(pageCount) {
+  const pageRefs = Array.from({ length: pageCount }, (_, index) => `${3 + index * 2} 0 R`).join(' ');
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    `<< /Type /Pages /Kids [${pageRefs}] /Count ${pageCount} >>`,
+  ];
+  for (let index = 0; index < pageCount; index++) {
+    const contentRef = 4 + index * 2;
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentRef} 0 R /Resources << >> >>`);
+    objects.push('<< /Length 0 >>\nstream\n\nendstream');
+  }
+
+  let output = '%PDF-1.4\n%\xe2\xe3\xcf\xd3\n';
+  const offsets = [0];
+  objects.forEach((body, index) => {
+    offsets.push(Buffer.byteLength(output, 'binary'));
+    output += `${index + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(output, 'binary');
+  output += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  output += offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('');
+  output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(output, 'binary');
+}
+
+const PDF = createPdf(3);
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://box-e2e');
@@ -27,9 +54,11 @@ const server = createServer((req, res) => {
   }
   if (url.pathname === '/api/sessions') return send({ sessions: [], counts: { all: 0 }, defaultCwd: ROOT, defaultAgent: 'codex' });
   if (url.pathname.startsWith('/api/')) return send({});
-  const file = url.pathname === '/' || !extname(url.pathname)
-    ? join(PUBLIC, 'index.html')
-    : join(PUBLIC, url.pathname);
+  const file = url.pathname.startsWith('/vendor/pdfjs/')
+    ? join(ROOT, 'node_modules', 'pdfjs-dist', 'build', url.pathname.split('/').pop())
+    : url.pathname === '/' || !extname(url.pathname)
+      ? join(PUBLIC, 'index.html')
+      : join(PUBLIC, url.pathname);
   if (!existsSync(file)) { res.writeHead(404); return res.end('not found'); }
   res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
   res.end(readFileSync(file));
@@ -59,9 +88,29 @@ try {
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
   await page.evaluate((path) => openFile(path), PDF_PATH);
   await page.waitForSelector('#expReader:not(.hidden)');
+  await page.waitForFunction(() => document.querySelectorAll('.pdfPage.rendered').length === 3);
+
+  const pageState = await page.evaluate(() => {
+    const reader = document.querySelector('#readerBody');
+    const last = document.querySelector('.pdfPage:last-child');
+    last.scrollIntoView({ block: 'end' });
+    return {
+      pageCount: document.querySelectorAll('.pdfPage').length,
+      lastLabel: last.getAttribute('aria-label'),
+      scrollable: reader.scrollHeight > reader.clientHeight,
+      scrollTop: reader.scrollTop,
+    };
+  });
+  if (pageState.pageCount !== 3 || pageState.lastLabel !== 'Page 3 of 3' || !pageState.scrollable || pageState.scrollTop <= 0) {
+    throw new Error(`PDF pages are not fully scrollable: ${JSON.stringify(pageState)}`);
+  }
+
+  if (process.env.PDF_E2E_SCREENSHOT) {
+    await page.screenshot({ path: process.env.PDF_E2E_SCREENSHOT, fullPage: false });
+  }
 
   const before = page.url();
-  const save = page.getByRole('button', { name: 'Save / Share PDF' });
+  const save = page.locator('#readerDownload');
   await save.click();
   await page.waitForFunction(() => window.__boxSharedName === 'mobile-save-test.pdf');
 
@@ -79,7 +128,7 @@ try {
   if (await page.locator('#explorer').evaluate((el) => !el.classList.contains('hidden'))) {
     throw new Error('Back did not close the PDF reader');
   }
-  console.log('PASS mobile PDF Save/Share preserves Box and Back exits the reader');
+  console.log('PASS mobile PDF renders every page, scrolls, saves/shares, and Back exits the reader');
 } finally {
   await browser.close();
   server.close();

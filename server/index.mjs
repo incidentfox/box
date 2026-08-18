@@ -4618,6 +4618,16 @@ app.get('/vendor/livekit-client.umd.js', (_req, res) => {
     maxAge: '7d', immutable: true,
   });
 });
+app.get('/vendor/pdfjs/pdf.mjs', (_req, res) => {
+  res.type('text/javascript').sendFile(join(ROOT, 'node_modules', 'pdfjs-dist', 'build', 'pdf.mjs'), {
+    maxAge: '7d', immutable: true,
+  });
+});
+app.get('/vendor/pdfjs/pdf.worker.mjs', (_req, res) => {
+  res.type('text/javascript').sendFile(join(ROOT, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.mjs'), {
+    maxAge: '7d', immutable: true,
+  });
+});
 app.use(express.static(PUBLIC));
 // Box is a client-side app, but its screens use real pathname routes so chats and
 // issues can be bookmarked/shared and browser navigation reads naturally. Serve the
