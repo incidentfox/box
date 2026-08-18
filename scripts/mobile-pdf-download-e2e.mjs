@@ -23,7 +23,10 @@ function createPdf(pageCount) {
   ];
   for (let index = 0; index < pageCount; index++) {
     const contentRef = 4 + index * 2;
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentRef} 0 R /Resources << >> >>`);
+    // Alternate portrait, landscape, and A4-like pages so the viewer cannot
+    // derive every placeholder from page 1 without the regression noticing.
+    const mediaBox = index % 3 === 0 ? '0 0 612 792' : index % 3 === 1 ? '0 0 792 612' : '0 0 595 842';
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox}] /Contents ${contentRef} 0 R /Resources << >> >>`);
     objects.push('<< /Length 0 >>\nstream\n\nendstream');
   }
 
@@ -161,10 +164,12 @@ try {
   await page.goto(origin, { waitUntil: 'domcontentloaded' });
   await page.evaluate((path) => openFile(path), pdfPath);
   await page.waitForSelector('#expReader:not(.hidden)');
-  await page.waitForFunction((count) => document.querySelectorAll('.pdfPage').length === count, PAGE_COUNT);
+  await page.waitForFunction((count) => document.querySelector('.pdfPages')?.getAttribute('aria-label') === `${count} page PDF`, PAGE_COUNT);
   await page.waitForFunction(() => document.querySelectorAll('.pdfPage.rendered').length > 0);
   await page.waitForFunction(() => typeof Promise.withResolvers === 'function');
 
+  const initialDomPages = await page.locator('.pdfPage').count();
+  if (initialDomPages > 12) throw new Error(`PDF created too many page wrappers up front (${initialDomPages}/${PAGE_COUNT})`);
   const initiallyLoaded = await page.locator('.pdfPage[data-pdf-loaded="true"]').count();
   if (initiallyLoaded >= PAGE_COUNT) throw new Error(`PDF eagerly loaded every page (${initiallyLoaded}/${PAGE_COUNT})`);
 
@@ -174,6 +179,7 @@ try {
   });
   await page.setViewportSize({ width: 844, height: 390 });
   await page.waitForFunction((oldWidth) => document.querySelector('.pdfPage').getBoundingClientRect().width > oldWidth + 100, portrait.width);
+  await page.waitForFunction(() => document.querySelector('[data-pdf-page-number="1"]')?.classList.contains('rendered'));
   const landscape = await page.locator('.pdfPage').first().evaluate((element) => {
     const rect = element.getBoundingClientRect();
     const canvas = element.querySelector('canvas');
@@ -189,26 +195,33 @@ try {
   const initiallyRendered = await page.locator('.pdfPage.rendered').count();
   if (initiallyRendered >= PAGE_COUNT) throw new Error(`PDF eagerly rendered every page (${initiallyRendered}/${PAGE_COUNT})`);
 
-  await page.evaluate(() => document.querySelector('.pdfPage:last-child').scrollIntoView({ block: 'end' }));
-  await page.waitForFunction(() => document.querySelector('.pdfPage:last-child').classList.contains('rendered'));
-  await page.waitForFunction(() => !document.querySelector('.pdfPage:first-child canvas'));
+  await page.evaluate(() => { const reader = document.querySelector('#readerBody'); reader.scrollTop = reader.scrollHeight; });
+  await page.waitForFunction((count) => document.querySelector(`[data-pdf-page-number="${count}"]`)?.classList.contains('rendered'), PAGE_COUNT);
+  await page.waitForFunction(() => !document.querySelector('[data-pdf-page-number="1"]'));
 
   const pageState = await page.evaluate((count) => {
     const reader = document.querySelector('#readerBody');
-    const last = document.querySelector('.pdfPage:last-child');
+    const last = document.querySelector(`[data-pdf-page-number="${count}"]`);
+    const rect = last.getBoundingClientRect();
     return {
-      pageCount: document.querySelectorAll('.pdfPage').length,
+      pageCount: Number(document.querySelector('.pdfPages').getAttribute('aria-label').split(' ')[0]),
+      domPageCount: document.querySelectorAll('.pdfPage').length,
       lastLabel: last.getAttribute('aria-label'),
+      lastRatio: rect.width / rect.height,
       scrollable: reader.scrollHeight > reader.clientHeight,
       scrollTop: reader.scrollTop,
       renderedAfterScroll: document.querySelectorAll('.pdfPage.rendered').length,
-      firstPageReleased: !document.querySelector('.pdfPage:first-child canvas'),
+      firstPageReleased: !document.querySelector('[data-pdf-page-number="1"]'),
       expectedLastLabel: `Page ${count} of ${count}`,
     };
   }, PAGE_COUNT);
-  if (pageState.pageCount !== PAGE_COUNT || pageState.lastLabel !== pageState.expectedLastLabel || !pageState.scrollable || pageState.scrollTop <= 0 || !pageState.firstPageReleased || pageState.renderedAfterScroll >= PAGE_COUNT) {
+  const expectedLastRatio = 595 / 842;
+  if (pageState.pageCount !== PAGE_COUNT || pageState.domPageCount > 12 || pageState.lastLabel !== pageState.expectedLastLabel || Math.abs(pageState.lastRatio - expectedLastRatio) > 0.01 || !pageState.scrollable || pageState.scrollTop <= 0 || !pageState.firstPageReleased || pageState.renderedAfterScroll >= PAGE_COUNT) {
     throw new Error(`PDF pages are not fully scrollable: ${JSON.stringify(pageState)}`);
   }
+
+  await page.evaluate(() => { document.querySelector('#readerBody').scrollTop = 0; });
+  await page.waitForFunction(() => document.querySelector('[data-pdf-page-number="1"]')?.classList.contains('rendered'));
 
   if (process.env.PDF_E2E_SCREENSHOT) await page.screenshot({ path: process.env.PDF_E2E_SCREENSHOT, fullPage: false });
 

@@ -6077,23 +6077,21 @@ async function renderMobilePdf(body, path) {
     let availableWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
     const records = [];
-    const firstPage = await pdf.getPage(1);
-    const estimatedViewport = firstPage.getViewport({ scale: 1 });
+    const pageGap = 14;
+    const pagePadding = 12;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
       if (run !== pdfRenderRun) return;
-      const page = pageNumber === 1 ? firstPage : null;
-      const baseViewport = estimatedViewport;
+      const page = await pdf.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
       const cssScale = availableWidth / baseViewport.width;
       const cssViewport = baseViewport.clone({ scale: cssScale });
-      const wrap = document.createElement('section'); wrap.className = 'pdfPage';
-      wrap.setAttribute('aria-label', `Page ${pageNumber} of ${pdf.numPages}`);
-      if (page) wrap.dataset.pdfLoaded = 'true';
-      wrap.style.width = `${Math.floor(cssViewport.width)}px`;
-      wrap.style.height = `${Math.floor(cssViewport.height)}px`;
-      const label = document.createElement('div'); label.className = 'pdfPageLabel';
-      label.textContent = `${pageNumber} / ${pdf.numPages}`;
-      wrap.appendChild(label); pages.appendChild(wrap);
-      records.push({ page, pageNumber, baseViewport, cssScale, wrap, label, canvas: null, renderTask: null, generation: 0, near: false, queued: false });
+      records.push({
+        page: null, pageNumber, baseViewport, cssScale,
+        width: Math.floor(cssViewport.width), height: Math.floor(cssViewport.height), top: 0,
+        wrap: null, label: null, canvas: null, renderTask: null,
+        generation: 0, near: false, queued: false,
+      });
+      try { page.cleanup(); } catch {}
     }
 
     if (run !== pdfRenderRun) return;
@@ -6101,7 +6099,39 @@ async function renderMobilePdf(body, path) {
     let active = null;
     const queue = [];
 
-    const release = (record) => {
+    const layoutRecords = () => {
+      let top = pagePadding;
+      records.forEach((record) => {
+        record.cssScale = availableWidth / record.baseViewport.width;
+        const viewport = record.baseViewport.clone({ scale: record.cssScale });
+        record.width = Math.floor(viewport.width);
+        record.height = Math.floor(viewport.height);
+        record.top = top;
+        top += record.height + pageGap;
+        if (record.wrap) {
+          record.wrap.style.top = `${record.top}px`;
+          record.wrap.style.width = `${record.width}px`;
+          record.wrap.style.height = `${record.height}px`;
+        }
+      });
+      pages.style.height = `${Math.max(1, top - pageGap + pagePadding)}px`;
+    };
+    const mount = (record) => {
+      if (record.wrap) return;
+      const wrap = document.createElement('section'); wrap.className = 'pdfPage';
+      wrap.setAttribute('aria-label', `Page ${record.pageNumber} of ${pdf.numPages}`);
+      wrap.dataset.pdfPageNumber = String(record.pageNumber);
+      wrap.style.top = `${record.top}px`;
+      wrap.style.width = `${record.width}px`;
+      wrap.style.height = `${record.height}px`;
+      const label = document.createElement('div'); label.className = 'pdfPageLabel';
+      label.textContent = `${record.pageNumber} / ${pdf.numPages}`;
+      wrap.appendChild(label); pages.appendChild(wrap);
+      record.wrap = wrap;
+      record.label = label;
+    };
+
+    const release = (record, unmount = false) => {
       record.generation++;
       record.queued = false;
       if (record.renderTask) {
@@ -6114,13 +6144,19 @@ async function renderMobilePdf(body, path) {
         record.canvas.remove();
         record.canvas = null;
       }
-      record.wrap.classList.remove('rendering', 'rendered');
+      record.wrap?.classList.remove('rendering', 'rendered');
       try { record.page?.cleanup(); } catch {}
+      record.page = null;
+      if (unmount && record.wrap) {
+        record.wrap.remove();
+        record.wrap = null;
+        record.label = null;
+      }
     };
     const pump = async () => {
       if (stopped || active) return;
       let record = queue.shift();
-      while (record && (!record.queued || !record.near || record.canvas)) {
+      while (record && (!record.queued || !record.near || record.canvas || !record.wrap)) {
         record.queued = false;
         record = queue.shift();
       }
@@ -6136,11 +6172,6 @@ async function renderMobilePdf(body, path) {
             return;
           }
           record.page = page;
-          record.baseViewport = page.getViewport({ scale: 1 });
-          record.cssScale = availableWidth / record.baseViewport.width;
-          const cssViewport = record.baseViewport.clone({ scale: record.cssScale });
-          record.wrap.style.width = `${Math.floor(cssViewport.width)}px`;
-          record.wrap.style.height = `${Math.floor(cssViewport.height)}px`;
           record.wrap.dataset.pdfLoaded = 'true';
         }
         const renderViewport = record.page.getViewport({ scale: record.cssScale * pixelRatio });
@@ -6167,6 +6198,7 @@ async function renderMobilePdf(body, path) {
       } finally {
         if (record.renderTask) record.renderTask = null;
         try { record.page?.cleanup(); } catch {}
+        record.page = null;
         active = null;
         pump();
       }
@@ -6179,63 +6211,49 @@ async function renderMobilePdf(body, path) {
     };
     const setNear = (record, near) => {
       record.near = near;
-      if (near) enqueue(record);
-      else release(record);
+      if (near) {
+        mount(record);
+        enqueue(record);
+      } else release(record, true);
     };
+
+    let visibleFrame = 0;
+    const checkVisible = () => {
+      visibleFrame = 0;
+      const margin = body.clientHeight * 1.25;
+      const start = body.scrollTop - margin;
+      const end = body.scrollTop + body.clientHeight + margin;
+      records.forEach((record) => setNear(record, record.top + record.height >= start && record.top <= end));
+    };
+    const scheduleVisible = () => {
+      if (!visibleFrame) visibleFrame = requestAnimationFrame(checkVisible);
+    };
+    body.addEventListener('scroll', scheduleVisible, { passive: true });
 
     let resizeFrame = 0;
     const relayout = () => {
       resizeFrame = 0;
       const nextWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
       if (Math.abs(nextWidth - availableWidth) < 1) return;
+      const scrollRatio = body.scrollTop / Math.max(1, body.scrollHeight - body.clientHeight);
       availableWidth = nextWidth;
-      records.forEach((record) => {
-        release(record);
-        record.cssScale = availableWidth / record.baseViewport.width;
-        const viewport = record.baseViewport.clone({ scale: record.cssScale });
-        record.wrap.style.width = `${Math.floor(viewport.width)}px`;
-        record.wrap.style.height = `${Math.floor(viewport.height)}px`;
-        if (record.near) enqueue(record);
-      });
+      records.forEach((record) => release(record));
+      layoutRecords();
+      body.scrollTop = scrollRatio * Math.max(0, body.scrollHeight - body.clientHeight);
+      scheduleVisible();
     };
     const scheduleRelayout = () => {
       if (!resizeFrame) resizeFrame = requestAnimationFrame(relayout);
     };
     window.addEventListener('resize', scheduleRelayout, { passive: true });
 
-    let stopWatching;
-    if ('IntersectionObserver' in window) {
-      const observer = new IntersectionObserver((entries) => {
-        entries.forEach((entry) => setNear(records[Number(entry.target.dataset.pdfPageIndex)], entry.isIntersecting));
-      }, { root: body, rootMargin: '125% 0px' });
-      records.forEach((record, index) => {
-        record.wrap.dataset.pdfPageIndex = index;
-        observer.observe(record.wrap);
-      });
-      stopWatching = () => observer.disconnect();
-    } else {
-      let frame = 0;
-      const check = () => {
-        frame = 0;
-        const readerRect = body.getBoundingClientRect();
-        const margin = readerRect.height * 1.25;
-        records.forEach((record) => {
-          const rect = record.wrap.getBoundingClientRect();
-          setNear(record, rect.bottom >= readerRect.top - margin && rect.top <= readerRect.bottom + margin);
-        });
-      };
-      const schedule = () => { if (!frame) frame = requestAnimationFrame(check); };
-      body.addEventListener('scroll', schedule, { passive: true });
-      schedule();
-      stopWatching = () => {
-        body.removeEventListener('scroll', schedule);
-        if (frame) cancelAnimationFrame(frame);
-      };
-    }
+    layoutRecords();
+    scheduleVisible();
 
     pdfRenderCleanup = () => {
       stopped = true;
-      stopWatching();
+      body.removeEventListener('scroll', scheduleVisible);
+      if (visibleFrame) cancelAnimationFrame(visibleFrame);
       window.removeEventListener('resize', scheduleRelayout);
       if (resizeFrame) cancelAnimationFrame(resizeFrame);
       queue.length = 0;
