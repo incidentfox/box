@@ -6068,7 +6068,7 @@ async function renderMobilePdf(body, path) {
     body.appendChild(pages);
     await new Promise((resolve) => requestAnimationFrame(resolve));
 
-    const availableWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
+    let availableWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
     const records = [];
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
@@ -6084,7 +6084,7 @@ async function renderMobilePdf(body, path) {
       const label = document.createElement('div'); label.className = 'pdfPageLabel';
       label.textContent = `${pageNumber} / ${pdf.numPages}`;
       wrap.appendChild(label); pages.appendChild(wrap);
-      records.push({ page, pageNumber, cssScale, wrap, label, canvas: null, renderTask: null, generation: 0, near: false, queued: false });
+      records.push({ page, pageNumber, baseViewport, cssScale, wrap, label, canvas: null, renderTask: null, generation: 0, near: false, queued: false });
     }
 
     if (run !== pdfRenderRun) return;
@@ -6160,6 +6160,26 @@ async function renderMobilePdf(body, path) {
       else release(record);
     };
 
+    let resizeFrame = 0;
+    const relayout = () => {
+      resizeFrame = 0;
+      const nextWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
+      if (Math.abs(nextWidth - availableWidth) < 1) return;
+      availableWidth = nextWidth;
+      records.forEach((record) => {
+        release(record);
+        record.cssScale = availableWidth / record.baseViewport.width;
+        const viewport = record.page.getViewport({ scale: record.cssScale });
+        record.wrap.style.width = `${Math.floor(viewport.width)}px`;
+        record.wrap.style.height = `${Math.floor(viewport.height)}px`;
+        if (record.near) enqueue(record);
+      });
+    };
+    const scheduleRelayout = () => {
+      if (!resizeFrame) resizeFrame = requestAnimationFrame(relayout);
+    };
+    window.addEventListener('resize', scheduleRelayout, { passive: true });
+
     let stopWatching;
     if ('IntersectionObserver' in window) {
       const observer = new IntersectionObserver((entries) => {
@@ -6183,11 +6203,9 @@ async function renderMobilePdf(body, path) {
       };
       const schedule = () => { if (!frame) frame = requestAnimationFrame(check); };
       body.addEventListener('scroll', schedule, { passive: true });
-      window.addEventListener('resize', schedule, { passive: true });
       schedule();
       stopWatching = () => {
         body.removeEventListener('scroll', schedule);
-        window.removeEventListener('resize', schedule);
         if (frame) cancelAnimationFrame(frame);
       };
     }
@@ -6195,6 +6213,8 @@ async function renderMobilePdf(body, path) {
     pdfRenderCleanup = () => {
       stopped = true;
       stopWatching();
+      window.removeEventListener('resize', scheduleRelayout);
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
       queue.length = 0;
       records.forEach(release);
       pdf.destroy().catch(() => {});

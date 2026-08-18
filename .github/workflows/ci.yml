@@ -16,5 +16,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx playwright install --with-deps webkit
       - run: npm test
       - run: node scripts/smoke-chat.mjs --fake-codex
