@@ -5927,6 +5927,7 @@ async function refreshAttnBadge() {
 
 $('readerBack').onclick = () => $('expClose').click();
 $('expClose').onclick = () => {
+  cancelPdfRender();
   if (!$('expReader').classList.contains('hidden')) { $('expReader').classList.add('hidden'); if ($('expList').children.length) $('expList').classList.remove('hidden'); else $('explorer').classList.add('hidden'); }
   else $('explorer').classList.add('hidden');
 };
@@ -5958,6 +5959,7 @@ $('expJump').querySelector('button').onclick = (e) => {
   openJumpPath();
 };
 async function browseExp(path) {
+  cancelPdfRender();
   $('expReader').classList.add('hidden'); $('expList').classList.remove('hidden');
   path = normalizeJumpPath(path);
   let d; try { d = await (await api('/api/fs?path=' + encodeURIComponent(path))).json(); } catch { return; }
@@ -6014,9 +6016,265 @@ const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic']
 const SPREADSHEET_EXTS = ['xls', 'xlsx', 'xlsm', 'xlsb', 'ods'];
 const SPREADSHEET_MAX_BYTES = 20 * 1024 * 1024;
 let spreadsheetWorker = null;
+let pdfJsPromise = null;
+let pdfRenderRun = 0;
+let pdfRenderCleanup = null;
 const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
+function loadPdfJs() {
+  if (!pdfJsPromise) {
+    pdfJsPromise = import('/vendor/pdfjs/pdf.mjs').then((pdfjs) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.mjs';
+      return pdfjs;
+    }).catch((error) => {
+      pdfJsPromise = null;
+      throw error;
+    });
+  }
+  return pdfJsPromise;
+}
+function renderNativePdfFallback(body, path) {
+  body.innerHTML = '';
+  const f = document.createElement('iframe'); f.className = 'mediael pdfframe'; f.title = path.split('/').pop();
+  f.src = rawUrl(path) + '#view=FitH'; body.appendChild(f);
+  const bar = document.createElement('div'); bar.className = 'pdfFallbackBar';
+  const open = document.createElement('button'); open.className = 'filePreviewBtn'; open.textContent = 'Open PDF in browser';
+  open.onclick = () => {
+    const a = document.createElement('a');
+    a.href = rawUrl(path);
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.click();
+  };
+  const save = document.createElement('button'); save.className = 'filePreviewBtn'; save.textContent = 'Save / Share PDF';
+  save.onclick = () => downloadFile(path, path.split('/').pop());
+  bar.append(open, save); body.appendChild(bar);
+}
+function cancelPdfRender() {
+  pdfRenderRun++;
+  const cleanup = pdfRenderCleanup;
+  pdfRenderCleanup = null;
+  if (cleanup) cleanup();
+}
+async function renderMobilePdf(body, path) {
+  const run = ++pdfRenderRun;
+  body.innerHTML = '<div class="pdfLoading" role="status">Loading PDF…</div>';
+  let documentTask = null;
+  let pdf = null;
+  let renderOwned = false;
+  try {
+    const pdfjs = await loadPdfJs();
+    if (run !== pdfRenderRun) return;
+    documentTask = pdfjs.getDocument({ url: rawUrl(path) });
+    pdf = await documentTask.promise;
+    if (run !== pdfRenderRun) return;
+
+    const pages = document.createElement('div'); pages.className = 'pdfPages';
+    pages.setAttribute('aria-label', `${pdf.numPages} page PDF`);
+    body.innerHTML = '';
+    body.appendChild(pages);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    let availableWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    const records = [];
+    const pageGap = 14;
+    const pagePadding = 12;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      if (run !== pdfRenderRun) return;
+      const page = await pdf.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const cssScale = availableWidth / baseViewport.width;
+      const cssViewport = baseViewport.clone({ scale: cssScale });
+      records.push({
+        page: null, pageNumber, baseViewport, cssScale,
+        width: Math.floor(cssViewport.width), height: Math.floor(cssViewport.height), top: 0,
+        wrap: null, label: null, canvas: null, renderTask: null,
+        generation: 0, near: false, queued: false,
+      });
+      try { page.cleanup(); } catch {}
+    }
+
+    if (run !== pdfRenderRun) return;
+    let stopped = false;
+    let active = null;
+    const queue = [];
+
+    const layoutRecords = () => {
+      let top = pagePadding;
+      records.forEach((record) => {
+        record.cssScale = availableWidth / record.baseViewport.width;
+        const viewport = record.baseViewport.clone({ scale: record.cssScale });
+        record.width = Math.floor(viewport.width);
+        record.height = Math.floor(viewport.height);
+        record.top = top;
+        top += record.height + pageGap;
+        if (record.wrap) {
+          record.wrap.style.top = `${record.top}px`;
+          record.wrap.style.width = `${record.width}px`;
+          record.wrap.style.height = `${record.height}px`;
+        }
+      });
+      pages.style.height = `${Math.max(1, top - pageGap + pagePadding)}px`;
+    };
+    const mount = (record) => {
+      if (record.wrap) return;
+      const wrap = document.createElement('section'); wrap.className = 'pdfPage';
+      wrap.setAttribute('aria-label', `Page ${record.pageNumber} of ${pdf.numPages}`);
+      wrap.dataset.pdfPageNumber = String(record.pageNumber);
+      wrap.style.top = `${record.top}px`;
+      wrap.style.width = `${record.width}px`;
+      wrap.style.height = `${record.height}px`;
+      const label = document.createElement('div'); label.className = 'pdfPageLabel';
+      label.textContent = `${record.pageNumber} / ${pdf.numPages}`;
+      wrap.appendChild(label); pages.appendChild(wrap);
+      record.wrap = wrap;
+      record.label = label;
+    };
+
+    const release = (record, unmount = false) => {
+      record.generation++;
+      record.queued = false;
+      if (record.renderTask) {
+        try { record.renderTask.cancel(); } catch {}
+        record.renderTask = null;
+      }
+      if (record.canvas) {
+        record.canvas.width = 1;
+        record.canvas.height = 1;
+        record.canvas.remove();
+        record.canvas = null;
+      }
+      record.wrap?.classList.remove('rendering', 'rendered');
+      try { record.page?.cleanup(); } catch {}
+      record.page = null;
+      if (unmount && record.wrap) {
+        record.wrap.remove();
+        record.wrap = null;
+        record.label = null;
+      }
+    };
+    const pump = async () => {
+      if (stopped || active) return;
+      let record = queue.shift();
+      while (record && (!record.queued || !record.near || record.canvas || !record.wrap)) {
+        record.queued = false;
+        record = queue.shift();
+      }
+      if (!record) return;
+      record.queued = false;
+      active = record;
+      const generation = ++record.generation;
+      try {
+        if (!record.page) {
+          const page = await pdf.getPage(record.pageNumber);
+          if (stopped || run !== pdfRenderRun || generation !== record.generation || !record.near) {
+            try { page.cleanup(); } catch {}
+            return;
+          }
+          record.page = page;
+          record.wrap.dataset.pdfLoaded = 'true';
+        }
+        const renderViewport = record.page.getViewport({ scale: record.cssScale * pixelRatio });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(renderViewport.width);
+        canvas.height = Math.ceil(renderViewport.height);
+        canvas.style.width = record.wrap.style.width;
+        canvas.style.height = record.wrap.style.height;
+        record.canvas = canvas;
+        record.wrap.insertBefore(canvas, record.label);
+        record.wrap.classList.add('rendering');
+        const task = record.page.render({ canvasContext: canvas.getContext('2d'), viewport: renderViewport });
+        record.renderTask = task;
+        await task.promise;
+        if (!stopped && run === pdfRenderRun && generation === record.generation && record.near) {
+          record.wrap.classList.remove('rendering');
+          record.wrap.classList.add('rendered');
+        } else if (generation === record.generation) {
+          release(record);
+        }
+      } catch (error) {
+        if (!stopped && error?.name !== 'RenderingCancelledException') console.warn(`PDF page ${record.pageNumber} failed to render`, error);
+        if (generation === record.generation) release(record);
+      } finally {
+        if (record.renderTask) record.renderTask = null;
+        try { record.page?.cleanup(); } catch {}
+        record.page = null;
+        active = null;
+        pump();
+      }
+    };
+    const enqueue = (record) => {
+      if (stopped || !record.near || record.canvas || record.queued) return;
+      record.queued = true;
+      queue.push(record);
+      pump();
+    };
+    const setNear = (record, near) => {
+      record.near = near;
+      if (near) {
+        mount(record);
+        enqueue(record);
+      } else release(record, true);
+    };
+
+    let visibleFrame = 0;
+    const checkVisible = () => {
+      visibleFrame = 0;
+      const margin = body.clientHeight * 1.25;
+      const start = body.scrollTop - margin;
+      const end = body.scrollTop + body.clientHeight + margin;
+      records.forEach((record) => setNear(record, record.top + record.height >= start && record.top <= end));
+    };
+    const scheduleVisible = () => {
+      if (!visibleFrame) visibleFrame = requestAnimationFrame(checkVisible);
+    };
+    body.addEventListener('scroll', scheduleVisible, { passive: true });
+
+    let resizeFrame = 0;
+    const relayout = () => {
+      resizeFrame = 0;
+      const nextWidth = Math.max(1, (pages.clientWidth || body.clientWidth || window.innerWidth) - 24);
+      if (Math.abs(nextWidth - availableWidth) < 1) return;
+      const scrollRatio = body.scrollTop / Math.max(1, body.scrollHeight - body.clientHeight);
+      availableWidth = nextWidth;
+      records.forEach((record) => release(record));
+      layoutRecords();
+      body.scrollTop = scrollRatio * Math.max(0, body.scrollHeight - body.clientHeight);
+      scheduleVisible();
+    };
+    const scheduleRelayout = () => {
+      if (!resizeFrame) resizeFrame = requestAnimationFrame(relayout);
+    };
+    window.addEventListener('resize', scheduleRelayout, { passive: true });
+
+    layoutRecords();
+    scheduleVisible();
+
+    pdfRenderCleanup = () => {
+      stopped = true;
+      body.removeEventListener('scroll', scheduleVisible);
+      if (visibleFrame) cancelAnimationFrame(visibleFrame);
+      window.removeEventListener('resize', scheduleRelayout);
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      queue.length = 0;
+      records.forEach(release);
+      pdf.destroy().catch(() => {});
+    };
+    renderOwned = true;
+  } catch (error) {
+    if (run !== pdfRenderRun) return;
+    console.warn('PDF page rendering failed; using native fallback', error);
+    renderNativePdfFallback(body, path);
+  } finally {
+    if (!renderOwned) {
+      if (pdf) await pdf.destroy().catch(() => {});
+      else if (documentTask) await documentTask.destroy().catch(() => {});
+    }
+  }
+}
 function openFile(path) { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); showMedia(path); }
 function showMedia(path) {
+  cancelPdfRender();
   if (spreadsheetWorker) { spreadsheetWorker.terminate(); spreadsheetWorker = null; }
   path = normalizeJumpPath(path);
   $('expList').classList.add('hidden'); $('expReader').classList.remove('hidden'); paintIcons($('expReader'));
@@ -6031,14 +6289,10 @@ function showMedia(path) {
   else if (MEDIA.audio.includes(ext)) { const a = document.createElement('audio'); a.controls = true; a.src = rawUrl(path); a.className = 'mediael'; body.appendChild(a); }
   else if (MEDIA.video.includes(ext)) { const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.src = rawUrl(path); v.className = 'mediael'; body.appendChild(v); }
   else if (ext === 'pdf') {
-    // Native embedded PDF viewer (full + scrollable on desktop; first page on iOS Safari).
-    // Keep navigation in Box and send mobile users through the native Save/Share sheet.
-    const f = document.createElement('iframe'); f.className = 'mediael pdfframe'; f.title = path.split('/').pop();
-    f.src = rawUrl(path) + '#view=FitH'; body.appendChild(f);
-    const bar = document.createElement('div'); bar.className = 'pdfFallbackBar';
-    const save = document.createElement('button'); save.className = 'filePreviewBtn'; save.textContent = 'Save / Share PDF';
-    save.onclick = () => downloadFile(path, path.split('/').pop());
-    bar.appendChild(save); body.appendChild(bar);
+    // iOS only exposes the first page of an embedded PDF. Render each page into
+    // the existing scrollable reader there; desktop keeps its native PDF viewer.
+    if (isMobileFileClient()) renderMobilePdf(body, path);
+    else renderNativePdfFallback(body, path);
   }
   else if (SPREADSHEET_EXTS.includes(ext)) renderSpreadsheetPreview(body, path);
   else if (isTextPreviewExt(ext)) {
