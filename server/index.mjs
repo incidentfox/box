@@ -4619,12 +4619,12 @@ app.get('/vendor/livekit-client.umd.js', (_req, res) => {
   });
 });
 app.get('/vendor/pdfjs/pdf.mjs', (_req, res) => {
-  res.type('text/javascript').sendFile(join(ROOT, 'node_modules', 'pdfjs-dist', 'build', 'pdf.mjs'), {
+  res.type('text/javascript').sendFile(join(ROOT, 'node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.mjs'), {
     maxAge: '7d', immutable: true,
   });
 });
 app.get('/vendor/pdfjs/pdf.worker.mjs', (_req, res) => {
-  res.type('text/javascript').sendFile(join(ROOT, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.mjs'), {
+  res.type('text/javascript').sendFile(join(ROOT, 'node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.worker.mjs'), {
     maxAge: '7d', immutable: true,
   });
 });

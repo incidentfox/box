@@ -40,7 +40,8 @@ function createPdf(pageCount) {
   return Buffer.from(output, 'binary');
 }
 
-const PDF = createPdf(3);
+const PAGE_COUNT = 12;
+const PDF = createPdf(PAGE_COUNT);
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://box-e2e');
@@ -55,7 +56,7 @@ const server = createServer((req, res) => {
   if (url.pathname === '/api/sessions') return send({ sessions: [], counts: { all: 0 }, defaultCwd: ROOT, defaultAgent: 'codex' });
   if (url.pathname.startsWith('/api/')) return send({});
   const file = url.pathname.startsWith('/vendor/pdfjs/')
-    ? join(ROOT, 'node_modules', 'pdfjs-dist', 'build', url.pathname.split('/').pop())
+    ? join(ROOT, 'node_modules', 'pdfjs-dist', 'legacy', 'build', url.pathname.split('/').pop())
     : url.pathname === '/' || !extname(url.pathname)
       ? join(PUBLIC, 'index.html')
       : join(PUBLIC, url.pathname);
@@ -66,8 +67,11 @@ const server = createServer((req, res) => {
 
 const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const PW_DIR = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
-const { chromium } = createRequire(join(PW_DIR, 'package.json'))('@playwright/test');
-const browser = await chromium.launch();
+const playwright = createRequire(join(PW_DIR, 'package.json'))('@playwright/test');
+const browserName = process.env.PDF_E2E_BROWSER || 'chromium';
+const browserType = playwright[browserName];
+if (!browserType) throw new Error(`Unsupported PDF_E2E_BROWSER: ${browserName}`);
+const browser = await browserType.launch();
 const page = await browser.newPage({
   viewport: { width: 390, height: 844 },
   deviceScaleFactor: 2,
@@ -76,6 +80,9 @@ const page = await browser.newPage({
   userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
 });
 await page.addInitScript((token) => {
+  // Safari versions before 17.4 do not provide this API. The PDF.js legacy
+  // bundle must install its compatibility implementation before opening a PDF.
+  Object.defineProperty(Promise, 'withResolvers', { configurable: true, writable: true, value: undefined });
   localStorage.setItem('cc_token', token);
   Object.defineProperty(navigator, 'canShare', { configurable: true, value: ({ files }) => Boolean(files && files.length) });
   Object.defineProperty(navigator, 'share', {
@@ -88,20 +95,33 @@ try {
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
   await page.evaluate((path) => openFile(path), PDF_PATH);
   await page.waitForSelector('#expReader:not(.hidden)');
-  await page.waitForFunction(() => document.querySelectorAll('.pdfPage.rendered').length === 3);
+  await page.waitForFunction((count) => document.querySelectorAll('.pdfPage').length === count, PAGE_COUNT);
+  await page.waitForFunction(() => document.querySelectorAll('.pdfPage.rendered').length > 0);
+  await page.waitForFunction(() => typeof Promise.withResolvers === 'function');
 
-  const pageState = await page.evaluate(() => {
+  const initiallyRendered = await page.locator('.pdfPage.rendered').count();
+  if (initiallyRendered >= PAGE_COUNT) {
+    throw new Error(`PDF eagerly rendered every page (${initiallyRendered}/${PAGE_COUNT})`);
+  }
+
+  await page.evaluate(() => document.querySelector('.pdfPage:last-child').scrollIntoView({ block: 'end' }));
+  await page.waitForFunction(() => document.querySelector('.pdfPage:last-child').classList.contains('rendered'));
+  await page.waitForFunction(() => !document.querySelector('.pdfPage:first-child canvas'));
+
+  const pageState = await page.evaluate((count) => {
     const reader = document.querySelector('#readerBody');
     const last = document.querySelector('.pdfPage:last-child');
-    last.scrollIntoView({ block: 'end' });
     return {
       pageCount: document.querySelectorAll('.pdfPage').length,
       lastLabel: last.getAttribute('aria-label'),
       scrollable: reader.scrollHeight > reader.clientHeight,
       scrollTop: reader.scrollTop,
+      renderedAfterScroll: document.querySelectorAll('.pdfPage.rendered').length,
+      firstPageReleased: !document.querySelector('.pdfPage:first-child canvas'),
+      expectedLastLabel: `Page ${count} of ${count}`,
     };
-  });
-  if (pageState.pageCount !== 3 || pageState.lastLabel !== 'Page 3 of 3' || !pageState.scrollable || pageState.scrollTop <= 0) {
+  }, PAGE_COUNT);
+  if (pageState.pageCount !== PAGE_COUNT || pageState.lastLabel !== pageState.expectedLastLabel || !pageState.scrollable || pageState.scrollTop <= 0 || !pageState.firstPageReleased || pageState.renderedAfterScroll >= PAGE_COUNT) {
     throw new Error(`PDF pages are not fully scrollable: ${JSON.stringify(pageState)}`);
   }
 
@@ -128,7 +148,7 @@ try {
   if (await page.locator('#explorer').evaluate((el) => !el.classList.contains('hidden'))) {
     throw new Error('Back did not close the PDF reader');
   }
-  console.log('PASS mobile PDF renders every page, scrolls, saves/shares, and Back exits the reader');
+  console.log(`PASS ${browserName} mobile PDF exposes all pages, lazily renders while scrolling, releases distant canvases, saves/shares, and Back exits the reader`);
 } finally {
   await browser.close();
   server.close();
