@@ -12,6 +12,8 @@
     "slack:events": "node harness/slack.mjs emit-recent",
     "slack:events:install": "node scripts/install-slack-events.mjs",
     "test:linear-lite": "node lib/linear-lite/test.mjs",
+    "test:fs-entry-sort": "node server/fs-entry-sort.test.mjs",
+    "test:file-explorer-sort": "node public/file-explorer-sort.test.mjs",
     "test:codex-context": "node server/codex-context.test.mjs",
     "test:codex-exec": "node server/codex-exec-engine.test.mjs && node server/codex-processes.test.mjs",
     "test:process-termination": "node server/process-termination.test.mjs",

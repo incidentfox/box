@@ -49,6 +49,7 @@ import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
 import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
+import { sortFsEntries } from './fs-entry-sort.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
@@ -4420,13 +4421,19 @@ app.get('/api/sessions/:id/linear', requireAuth, async (req, res) => {
 // filesystem browser / @-picker
 app.get('/api/fs', requireAuth, (req, res) => {
   const p = resolve(req.query.path || DEFAULT_CWD);
+  const sortMode = req.query.sort === 'mtime' ? 'mtime' : 'name';
   try {
     const st = statSync(p);
     if (st.isDirectory()) {
-      const entries = readdirSync(p, { withFileTypes: true })
+      const entries = sortFsEntries(readdirSync(p, { withFileTypes: true })
         .filter((e) => !e.name.startsWith('.') || req.query.hidden === '1')
-        .map((e) => ({ name: e.name, dir: e.isDirectory() }))
-        .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+        .map((e) => {
+          const entry = { name: e.name, dir: e.isDirectory() };
+          if (sortMode === 'mtime') {
+            try { entry.mtime = statSync(join(p, e.name)).mtimeMs; } catch { entry.mtime = 0; }
+          }
+          return entry;
+        }), sortMode);
       return res.json({ type: 'dir', path: p, parent: dirname(p), entries });
     }
     if (st.size > 1_000_000) return res.json({ type: 'file', path: p, tooBig: true, size: st.size });
