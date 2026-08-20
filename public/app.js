@@ -5947,6 +5947,11 @@ function normalizeJumpPath(path) {
   if (!path) return '';
   return expandBoxPath(path);
 }
+function explorerSortMode(path) {
+  const normalized = String(path || '').replace(/\/+$/, '');
+  const uploads = expandBoxPath('~/.cc-mobile/uploads').replace(/\/+$/, '');
+  return normalized === uploads ? 'mtime' : 'name';
+}
 function openJumpPath() {
   let v = String($('expJumpInput').value || '').trim();
   if (!v) return;
@@ -5970,7 +5975,8 @@ async function browseExp(path) {
   cancelPdfRender();
   $('expReader').classList.add('hidden'); $('expList').classList.remove('hidden');
   path = normalizeJumpPath(path);
-  let d; try { d = await (await api('/api/fs?path=' + encodeURIComponent(path))).json(); } catch { return; }
+  const sort = explorerSortMode(path);
+  let d; try { d = await (await api('/api/fs?path=' + encodeURIComponent(path) + '&sort=' + sort)).json(); } catch { return; }
   if (d.error) return toast(d.error);
   if (d.type === 'file') { showMedia(path); return; }
   expPath = d.path; $('expPath').textContent = shortCwd(d.path);
