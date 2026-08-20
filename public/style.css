@@ -281,6 +281,14 @@ h1 { margin: 0; font-size: 26px; font-weight: 700; }
 .compose svg { width: 22px; height: 22px; }
 .sidebarToggle.sidebarToggle, .sidebarRestore.sidebarRestore, .sessionMenu.sessionMenu { display: none; }
 
+@media (max-width: 899px) {
+  #sessions .sbar #settingsBtn,
+  #sessions .sbar #themeBtn,
+  #sessions .sbar #boardBtn,
+  #sessions .sbar #voiceBtn { display: none !important; }
+  #sessions .sbar .sessionMenu { display: grid; }
+}
+
 /* status filter tabs */
 .tabs { display: flex; gap: 8px; padding: 12px 14px 6px; overflow-x: auto; flex: none; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
