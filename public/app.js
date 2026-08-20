@@ -1563,6 +1563,7 @@ function openSessionMenu() {
   const voiceAvailable = $('voiceBtn') && !$('voiceBtn').classList.contains('hidden');
   const rows = [
     { ic: ICONS.settings, label: 'Settings', desc: 'Workspace, agent, and permissions', fn: openAppSettings },
+    { ic: ICONS.folder, label: 'Uploads', desc: 'Files uploaded to this box', fn: () => openBoxExplorer('~/.cc-mobile/uploads') },
     { ic: document.documentElement.dataset.theme === 'dark' ? ICONS.sun : ICONS.moon, label: 'Theme', desc: document.documentElement.dataset.theme === 'dark' ? 'Switch to light' : 'Switch to dark', fn: toggleTheme },
     { ic: ICONS.pulse, label: 'Pipelines', desc: 'Automation and inbox health', fn: openPipelines },
   ];
@@ -5580,11 +5581,18 @@ $('chatTitle').onclick = openChatTitleSheet;
 /* ---------- file explorer + reader ---------- */
 let expPath = '';
 const parentOf = (p) => p.replace(/\/[^/]+\/?$/, '') || '/';
+function openBoxExplorer(path) {
+  $('explorer').classList.remove('hidden');
+  paintIcons($('explorer'));
+  browseExp(path);
+  const input = $('expJumpInput');
+  try { input.focus(); input.select(); } catch {}
+}
 $('filesBtn').onclick = () => {
   // The explorer browses THIS box. For a chat running on a teammate's box, the files that
   // matter are theirs — send it to the shared-workspace browser instead of a dead end.
   if (chatIsForeign() && typeof openTeamFiles === 'function') return openTeamFiles(chatEp());
-  $('explorer').classList.remove('hidden'); paintIcons($('explorer')); browseExp(cur.cwd || defaultCwd); const i = $('expJumpInput'); try { i.focus(); i.select(); } catch {}
+  openBoxExplorer(cur.cwd || defaultCwd);
 };
 
 /* ---- my messages overlay ---- */
