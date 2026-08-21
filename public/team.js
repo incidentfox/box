@@ -679,6 +679,7 @@ function openTeamFiles(ep, at = '') {
 }
 
 async function browseTeamFiles(path) {
+  cancelDocxRender();
   $('tfReader').classList.add('hidden');
   $('tfList').classList.remove('hidden');
   const d = await teamGet('/api/team/fs?path=' + encodeURIComponent(path || ''), tfEp);
@@ -714,6 +715,7 @@ const tfShort = (p) => {
 };
 
 function showTeamFile(d) {
+  cancelDocxRender();
   $('tfList').classList.add('hidden');
   $('tfReader').classList.remove('hidden');
   paintIcons($('tfReader'));
@@ -722,12 +724,17 @@ function showTeamFile(d) {
   $('tfPath').textContent = tfShort(path);
   $('tfReaderAt').onclick = () => tfInsertRef(path);
   $('tfReaderBack').onclick = () => browseTeamFiles(path.replace(/\/[^/]+$/, '') || tfRoot);
-  const body = $('tfReaderBody'); body.innerHTML = '';
+  const body = $('tfReaderBody'); body.innerHTML = ''; body.classList.remove('docxBody');
   const ext = (path.split('.').pop() || '').toLowerCase();
+  const sourceUrl = epUrl(tfEp, '/api/raw?path=' + encodeURIComponent(path) + '&token=' + encodeURIComponent(tfEp.token));
   if (MEDIA.img.includes(ext)) {
     const im = tEl('img', 'mediaimg');
-    im.src = epUrl(tfEp, '/api/raw?path=' + encodeURIComponent(path) + '&token=' + encodeURIComponent(tfEp.token));
+    im.src = sourceUrl;
     body.appendChild(im);
+    return;
+  }
+  if (ext === 'docx') {
+    renderDocxPreview(body, sourceUrl, path.split('/').pop());
     return;
   }
   if (d.tooBig) { body.appendChild(tNote(`Too large to preview (${Math.round((d.size || 0) / 1e6)} MB). @-mention it and ask the agent to read it.`)); return; }
@@ -763,6 +770,7 @@ if ($('teamBack')) $('teamBack').onclick = () => (isGuestHere() ? null : openSes
 if ($('teamRefresh')) $('teamRefresh').onclick = () => renderTeam();
 if ($('teamFilesBtn')) $('teamFilesBtn').onclick = () => openTeamFiles();
 if ($('tfClose')) $('tfClose').onclick = () => {
+  cancelDocxRender();
   if (!$('tfReader').classList.contains('hidden')) { $('tfReader').classList.add('hidden'); $('tfList').classList.remove('hidden'); return; }
   $('teamFiles').classList.add('hidden');
 };

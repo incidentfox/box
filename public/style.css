@@ -643,6 +643,14 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .binaryFileDownload { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 180px; padding: 11px 18px; border: 0; border-radius: 11px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
 .binaryFileDownload svg { width: 17px; height: 17px; }
 .binaryFileDownload:active { opacity: .75; }
+#readerBody.docxBody, #tfReaderBody.docxBody {
+  flex: 1; min-height: 0; overflow: auto !important; padding: 18px 12px 36px;
+  box-sizing: border-box; background: #e8eef1;
+}
+.docxLoading { min-height: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); }
+.docxPreview { min-width: 0; }
+.docxPreview .docx-wrapper { padding: 0 !important; background: transparent !important; }
+.docxPreview .docx-wrapper > section.docx { margin: 0 auto 20px; box-shadow: 0 8px 28px rgba(34,45,51,.14); }
 .spreadsheetBody { overflow: hidden !important; }
 .sheetLoading { min-height: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); }
 .sheetLoading .loading { display: inline-flex; }
@@ -1306,6 +1314,11 @@ textarea.acctInput { resize: vertical; }
   #readerBody.astext, #readerBody pre.hl code { padding: 18px var(--desktop-pad); }
   .toast { bottom: 24px; }
   .dropInner { border-radius: 14px; }
+}
+
+@media (max-width: 600px) {
+  #readerBody.docxBody, #tfReaderBody.docxBody { padding: 10px 0 28px; }
+  .docxPreview .docx-wrapper { align-items: flex-start; overflow-x: auto; }
 }
 /* keyboard-selected session row (j/k navigation, desktop) */
 .sCard.kbsel .sCardFront { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 14px; }

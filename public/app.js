@@ -5936,6 +5936,7 @@ async function refreshAttnBadge() {
 $('readerBack').onclick = () => $('expClose').click();
 $('expClose').onclick = () => {
   cancelPdfRender();
+  cancelDocxRender();
   if (!$('expReader').classList.contains('hidden')) { $('expReader').classList.add('hidden'); if ($('expList').children.length) $('expList').classList.remove('hidden'); else $('explorer').classList.add('hidden'); }
   else $('explorer').classList.add('hidden');
 };
@@ -5973,6 +5974,7 @@ $('expJump').querySelector('button').onclick = (e) => {
 };
 async function browseExp(path) {
   cancelPdfRender();
+  cancelDocxRender();
   $('expReader').classList.add('hidden'); $('expList').classList.remove('hidden');
   path = normalizeJumpPath(path);
   const sort = explorerSortMode(path);
@@ -6029,11 +6031,105 @@ function openToolDetail(name, data) {
 const MEDIA = { img: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic'], audio: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'], video: ['mp4', 'mov', 'webm', 'm4v', 'mkv'] };
 const SPREADSHEET_EXTS = ['xls', 'xlsx', 'xlsm', 'xlsb', 'ods'];
 const SPREADSHEET_MAX_BYTES = 20 * 1024 * 1024;
+const DOCX_MAX_BYTES = 30 * 1024 * 1024;
 let spreadsheetWorker = null;
 let pdfJsPromise = null;
 let pdfRenderRun = 0;
 let pdfRenderCleanup = null;
+let docxRendererPromise = null;
+let docxRenderRun = 0;
+let docxRenderCleanup = null;
 const rawUrl = (p) => '/api/raw?path=' + encodeURIComponent(expandBoxPath(p)) + '&token=' + encodeURIComponent(TOKEN);
+function loadDocxRenderer() {
+  if (window.BoxDocxRenderer) return Promise.resolve(window.BoxDocxRenderer);
+  if (!docxRendererPromise) {
+    docxRendererPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/vendor/docx-renderer.bundle.js';
+      script.async = true;
+      script.onload = () => window.BoxDocxRenderer
+        ? resolve(window.BoxDocxRenderer)
+        : reject(new Error('Word preview engine did not initialize'));
+      script.onerror = () => reject(new Error('Could not load the Word preview engine'));
+      document.head.appendChild(script);
+    }).catch((error) => {
+      docxRendererPromise = null;
+      throw error;
+    });
+  }
+  return docxRendererPromise;
+}
+function cancelDocxRender() {
+  docxRenderRun++;
+  const cleanup = docxRenderCleanup;
+  docxRenderCleanup = null;
+  if (cleanup) cleanup();
+}
+function docxFallback(body, sourceUrl, filename, message, onDownload) {
+  body.classList.remove('docxBody');
+  body.innerHTML = '';
+  const panel = document.createElement('div'); panel.className = 'binaryFilePanel';
+  const badge = document.createElement('div'); badge.className = 'binaryFileBadge'; badge.textContent = 'DOCX';
+  const name = document.createElement('strong'); name.textContent = filename;
+  const note = document.createElement('p'); note.textContent = message;
+  const dl = document.createElement('button'); dl.className = 'binaryFileDownload';
+  dl.innerHTML = `${ICONS['arrow-down']}<span>Download original</span>`;
+  dl.onclick = () => {
+    if (onDownload) return onDownload();
+    const a = document.createElement('a');
+    a.href = sourceUrl + (sourceUrl.includes('?') ? '&' : '?') + 'dl=1';
+    a.download = filename;
+    a.click();
+  };
+  panel.append(badge, name, note, dl); body.appendChild(panel);
+}
+async function renderDocxPreview(body, sourceUrl, filename, onDownload) {
+  const run = ++docxRenderRun;
+  body.classList.add('docxBody');
+  body.innerHTML = '<div class="docxLoading" role="status"><span class="loading"><span></span><span></span><span></span></span><strong>Rendering the original Word layout…</strong></div>';
+  let cleanup = null;
+  try {
+    const [renderer, response] = await Promise.all([loadDocxRenderer(), fetch(sourceUrl)]);
+    if (run !== docxRenderRun) return;
+    if (!response.ok) throw new Error('Could not read this Word document');
+    const announcedSize = Number(response.headers.get('content-length') || 0);
+    if (announcedSize > DOCX_MAX_BYTES) {
+      return docxFallback(body, sourceUrl, filename, `This document is ${fmtBytes(announcedSize)}. Preview supports Word files up to ${fmtBytes(DOCX_MAX_BYTES)}; the original is unchanged and available to download.`, onDownload);
+    }
+    const buffer = await response.arrayBuffer();
+    if (run !== docxRenderRun) return;
+    if (buffer.byteLength > DOCX_MAX_BYTES) {
+      return docxFallback(body, sourceUrl, filename, `This document is ${fmtBytes(buffer.byteLength)}. Preview supports Word files up to ${fmtBytes(DOCX_MAX_BYTES)}; the original is unchanged and available to download.`, onDownload);
+    }
+
+    // Word caches automatic pagination in lastRenderedPageBreak markers. Those
+    // markers are often stale after editing and can create nearly blank pages in
+    // browser renderers, so remove them from the preview copy only. The original
+    // DOCX bytes remain untouched for download.
+    const previewBytes = renderer.stripCachedDocxPageBreaks(new Uint8Array(buffer));
+    const styleHost = document.createElement('div'); styleHost.hidden = true;
+    const target = document.createElement('div'); target.className = 'docxPreview';
+    body.innerHTML = ''; body.append(styleHost, target);
+    const result = await renderer.render(previewBytes, target, styleHost, {
+      breakPages: true,
+      ignoreLastRenderedPageBreak: true,
+      ignoreHeight: false,
+      ignoreTableWrap: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+    });
+    cleanup = () => { try { result?.dispose?.(); } catch {} };
+    if (run !== docxRenderRun) { cleanup(); return; }
+    docxRenderCleanup = cleanup;
+  } catch (error) {
+    if (run !== docxRenderRun) return;
+    console.warn('Word document preview failed', error);
+    if (cleanup) cleanup();
+    docxFallback(body, sourceUrl, filename, 'We couldn’t display this Word document. The original file is unchanged and still available to download.', onDownload);
+  }
+}
 function loadPdfJs() {
   if (!pdfJsPromise) {
     pdfJsPromise = import('/vendor/pdfjs/pdf.mjs').then((pdfjs) => {
@@ -6289,6 +6385,7 @@ async function renderMobilePdf(body, path) {
 function openFile(path) { $('explorer').classList.remove('hidden'); paintIcons($('explorer')); showMedia(path); }
 function showMedia(path) {
   cancelPdfRender();
+  cancelDocxRender();
   if (spreadsheetWorker) { spreadsheetWorker.terminate(); spreadsheetWorker = null; }
   path = normalizeJumpPath(path);
   $('expList').classList.add('hidden'); $('expReader').classList.remove('hidden'); paintIcons($('expReader'));
@@ -6298,7 +6395,7 @@ function showMedia(path) {
   $('readerAt').onclick = () => insertRef(path);
   $('readerDownload').onclick = () => downloadFile(path, path.split('/').pop());
   const ext = (path.split('.').pop() || '').toLowerCase();
-  const body = $('readerBody'); body.innerHTML = ''; body.classList.remove('astext');
+  const body = $('readerBody'); body.innerHTML = ''; body.classList.remove('astext', 'spreadsheetBody', 'docxBody');
   if (MEDIA.img.includes(ext)) { const im = document.createElement('img'); im.className = 'mediaimg'; im.src = rawUrl(path); body.appendChild(im); }
   else if (MEDIA.audio.includes(ext)) { const a = document.createElement('audio'); a.controls = true; a.src = rawUrl(path); a.className = 'mediael'; body.appendChild(a); }
   else if (MEDIA.video.includes(ext)) { const v = document.createElement('video'); v.controls = true; v.playsInline = true; v.src = rawUrl(path); v.className = 'mediael'; body.appendChild(v); }
@@ -6308,6 +6405,7 @@ function showMedia(path) {
     if (isMobileFileClient()) renderMobilePdf(body, path);
     else renderNativePdfFallback(body, path);
   }
+  else if (ext === 'docx') renderDocxPreview(body, rawUrl(path), path.split('/').pop(), () => downloadFile(path, path.split('/').pop()));
   else if (SPREADSHEET_EXTS.includes(ext)) renderSpreadsheetPreview(body, path);
   else if (isTextPreviewExt(ext)) {
     body.classList.add('astext'); body.textContent = 'Loading…';
