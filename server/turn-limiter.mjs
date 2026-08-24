@@ -3,6 +3,14 @@ export function normalizeTurnLimit(value, fallback = 3) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+// Raw bash commands inherit the session agent for display/routing, but they do not
+// launch Codex and therefore must not occupy a Codex turn slot.
+export function turnAdmissionQid(state) {
+  const message = state?.queue?.[0];
+  if (!message || message.mode === 'bash') return null;
+  return (message.agent || state.agent || 'claude') === 'codex' ? message.qid || null : null;
+}
+
 export function createTurnLimiter(limit) {
   const max = normalizeTurnLimit(limit);
   let active = 0;

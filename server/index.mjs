@@ -53,7 +53,7 @@ import { sortFsEntries } from './fs-entry-sort.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
-import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
+import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, turnAdmissionQid } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
   normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
@@ -5592,7 +5592,7 @@ async function runWorker(s) {
     // waiting, the request remains durable in `queue`. A cancellable wait is important:
     // removing the head message must wake this worker instead of leaving `running=true`
     // forever with no process behind it.
-    const admittedQid = (s.queue[0].agent || s.agent || 'claude') === 'codex' ? s.queue[0].qid : null;
+    const admittedQid = turnAdmissionQid(s);
     const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
     const acquireSlot = async (limiter, qid) => {
       const controller = new AbortController();

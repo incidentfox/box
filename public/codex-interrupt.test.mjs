@@ -20,6 +20,7 @@ const undoQueuedCancel = server.match(/function undoQueuedCancel\(extKey, qid\) 
 assert.match(undoQueuedCancel, /kickWorker\(s\)/);
 assert.doesNotMatch(undoQueuedCancel, /runWorker\(s\)/);
 assert.match(server, /s\._admissionQid = qid/);
+assert.match(server, /const admittedQid = turnAdmissionQid\(s\);/);
 assert.match(server, /const batch = s\.queue\.splice\(0, take\);/);
 assert.match(server, /const msg = combineQueued\(batch\.map/);
 

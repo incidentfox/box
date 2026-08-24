@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
-import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
+import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, turnAdmissionQid } from './turn-limiter.mjs';
 
 assert.equal(normalizeTurnLimit('4'), 4);
 assert.equal(normalizeTurnLimit('0'), 3);
 assert.equal(normalizeTurnLimit('nope', 2), 2);
+
+// Bash messages may carry a Codex agent label, but only actual Codex turns use
+// the bounded Codex worker pool.
+assert.equal(turnAdmissionQid({ agent: 'codex', queue: [{ qid: 'bash', mode: 'bash', agent: 'codex' }] }), null);
+assert.equal(turnAdmissionQid({ agent: 'codex', queue: [{ qid: 'codex', mode: 'chat' }] }), 'codex');
+assert.equal(turnAdmissionQid({ agent: 'claude', queue: [{ qid: 'claude', mode: 'chat' }] }), null);
+assert.equal(turnAdmissionQid({ agent: 'codex', queue: [] }), null);
 
 const limiter = createTurnLimiter(2);
 const first = await limiter.acquire();
