@@ -50,6 +50,22 @@ assert.equal(single.queued, 0);
 holder();
 assert.equal(single.active, 0);
 
+// Canceling the head waiter must not strand the next session in the FIFO.
+const heldAgain = await single.acquire();
+const firstWaiterController = new AbortController();
+const canceledHead = single.acquire({ signal: firstWaiterController.signal });
+const survivingWaiter = single.acquire();
+assert.equal(single.queued, 2);
+firstWaiterController.abort();
+assert.equal(await canceledHead, null);
+assert.equal(single.queued, 1);
+heldAgain();
+const survivingRelease = await survivingWaiter;
+assert.equal(single.active, 1);
+assert.equal(single.queued, 0);
+survivingRelease();
+assert.equal(single.active, 0);
+
 const alreadyCanceled = new AbortController();
 alreadyCanceled.abort();
 assert.equal(await single.acquire({ signal: alreadyCanceled.signal }), null);
