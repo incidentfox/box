@@ -181,13 +181,9 @@ const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FI
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 
 const PORT = Number(cfg('PORT', 7321));
-// Codex turns share the server's cgroup. Without a process-wide ceiling, several large
-// contexts can OOM-kill the HTTP server and leave every card looking stuck. Requests stay
-// durable in their session queue while admission is full.
-const MAX_CONCURRENT_CODEX_TURNS = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_TURNS', '3'));
-const CODEX_TURN_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_TURNS);
-// Automatic restart recoveries are more conservative so a deploy cannot replay every
-// interrupted turn simultaneously.
+// Normal Box sessions start immediately with no process-wide concurrency cap. Automatic
+// restart recoveries are deliberately more conservative so a deploy cannot replay every
+// interrupted turn simultaneously and overwhelm the server before the UI is reachable.
 const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '1'));
 const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
@@ -5588,12 +5584,10 @@ async function runWorker(s) {
       slotsReleased = true;
       while (releases.length) releases.pop()();
     };
-    // Do not dequeue Codex work until it is admitted: if the server restarts again while
-    // waiting, the request remains durable in `queue`. A cancellable wait is important:
-    // removing the head message must wake this worker instead of leaving `running=true`
-    // forever with no process behind it.
-    const admittedQid = turnAdmissionQid(s);
-    const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
+    // Only automatic restart recovery is admission-limited. Normal user-started sessions
+    // launch immediately. While a recovery waits, leave it durable in `queue`; its wait is
+    // cancellable so removing the head cannot strand `running=true` without a process.
+    const recoveryQid = s.queue[0]?.recovered ? turnAdmissionQid(s) : null;
     if (recoveryQid) {
       if (CODEX_RECOVERY_LIMITER.active >= CODEX_RECOVERY_LIMITER.limit) {
         bcast(s, {
@@ -5615,31 +5609,8 @@ async function runWorker(s) {
         continue;
       }
     }
-    if (admittedQid) {
-      if (CODEX_TURN_LIMITER.active >= CODEX_TURN_LIMITER.limit) {
-        bcast(s, {
-          type: 'native_wait',
-          sessionId: s.sessionId,
-          msg: `Queued — starting when Box has capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
-        });
-      }
-      const release = await acquireTurnAdmission(s, CODEX_TURN_LIMITER, admittedQid);
-      if (!release) {
-        releaseTurnSlots();
-        continue;
-      }
-      releases.push(release);
-      if (!s.running || !s.queue.length) {
-        releaseTurnSlots();
-        break;
-      }
-      if (s.queue[0].qid !== admittedQid) {
-        releaseTurnSlots();
-        continue;
-      }
-    }
     // Drain the leading run from the same sender and execution path. Bash/chat or
-    // cross-agent boundaries must stay separate so admission matches the turn that runs.
+    // cross-agent boundaries must stay separate so each runner gets the right payload.
     const take = queuedTurnBatchSize(s);
     const batch = s.queue.splice(0, take);
     const msg = combineQueued(batch.map((message) => prepareRecoveredMessage(s, message)));
@@ -5662,8 +5633,8 @@ async function runWorker(s) {
       await runTurn(s, msg);
     } finally {
       if (releases.length) {
-        // `/goal` resolves a phone turn while its Codex process continues working. Keep that
-        // process inside the same admission budgets until it actually exits.
+        // `/goal` resolves a phone turn while its Codex process continues working. Keep an
+        // automatic recovery inside its recovery slot until the process actually exits.
         const goalProc = s.codexGoalProc;
         if (goalProc && goalProc.exitCode == null && goalProc.signalCode == null) {
           goalProc.once('close', releaseTurnSlots);
