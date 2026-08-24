@@ -10,8 +10,11 @@ assert.doesNotMatch(stopCurrent, /setTimeout/);
 assert.doesNotMatch(stopCurrent, /running\s*=\s*false/);
 
 assert.doesNotMatch(app, /payload\.interrupt/);
-assert.doesNotMatch(server, /BOX_MAX_CONCURRENT_CODEX_TURNS|CODEX_TURN_LIMITER/);
+assert.match(server, /BOX_MAX_CONCURRENT_CODEX_TURNS/);
+assert.match(server, /CODEX_TURN_LIMITER/);
+assert.match(server, /kickWorker\(s\)/);
+assert.match(server, /interruptWorkerAdmission\(s\)/);
 assert.match(server, /const batch = s\.queue\.splice\(0, take\);/);
 assert.match(server, /const msg = combineQueued\(batch\.map/);
 
-console.log('Codex Stop preserves queued batching and normal turns have no global cap');
+console.log('Codex Stop preserves queued batching and worker admission stays bounded and wakeable');

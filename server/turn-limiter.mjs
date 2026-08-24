@@ -8,9 +8,21 @@ export function createTurnLimiter(limit) {
   let active = 0;
   const waiters = [];
 
-  function acquire() {
+  function acquire({ signal } = {}) {
     return new Promise((resolve) => {
+      if (signal?.aborted) return resolve(null);
+      let queued = false;
+      const cancel = () => {
+        if (!queued) return;
+        queued = false;
+        const idx = waiters.indexOf(grant);
+        if (idx >= 0) waiters.splice(idx, 1);
+        resolve(null);
+      };
       const grant = () => {
+        if (signal?.aborted) return cancel();
+        queued = false;
+        signal?.removeEventListener('abort', cancel);
         active++;
         let released = false;
         resolve(() => {
@@ -23,7 +35,11 @@ export function createTurnLimiter(limit) {
       };
 
       if (active < max) grant();
-      else waiters.push(grant);
+      else {
+        queued = true;
+        waiters.push(grant);
+        signal?.addEventListener('abort', cancel, { once: true });
+      }
     });
   }
 

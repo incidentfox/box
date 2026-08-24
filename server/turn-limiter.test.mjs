@@ -37,4 +37,22 @@ second();
 fourth();
 assert.equal(limiter.active, 0);
 
+// A queue mutation must be able to wake a worker that is waiting for admission.
+const single = createTurnLimiter(1);
+const holder = await single.acquire();
+const controller = new AbortController();
+const canceledPromise = single.acquire({ signal: controller.signal });
+assert.equal(single.queued, 1);
+controller.abort();
+assert.equal(await canceledPromise, null);
+assert.equal(single.active, 1);
+assert.equal(single.queued, 0);
+holder();
+assert.equal(single.active, 0);
+
+const alreadyCanceled = new AbortController();
+alreadyCanceled.abort();
+assert.equal(await single.acquire({ signal: alreadyCanceled.signal }), null);
+assert.equal(single.active, 0);
+
 console.log('turn-limiter tests passed');
