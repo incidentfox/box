@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
+import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 
 assert.equal(normalizeTurnLimit('4'), 4);
 assert.equal(normalizeTurnLimit('0'), 3);
@@ -70,5 +70,27 @@ const alreadyCanceled = new AbortController();
 alreadyCanceled.abort();
 assert.equal(await single.acquire({ signal: alreadyCanceled.signal }), null);
 assert.equal(single.active, 0);
+
+// Cancel/voice barge-in while waiting must remove only the admitted message and wake
+// the worker. The following message remains available for the next admission pass.
+const admissionController = new AbortController();
+const waitingState = {
+  queue: [{ qid: 'waiting', text: 'cancel me' }, { qid: 'next', text: 'keep me' }],
+  _admissionQid: 'waiting',
+  _admissionAbort: admissionController,
+};
+assert.deepEqual(cancelWaitingTurnAdmission(waitingState), { qid: 'waiting', text: 'cancel me' });
+assert.equal(admissionController.signal.aborted, true);
+assert.deepEqual(waitingState.queue, [{ qid: 'next', text: 'keep me' }]);
+
+const changedHeadController = new AbortController();
+const changedHeadState = {
+  queue: [{ qid: 'replacement', text: 'do not cancel' }],
+  _admissionQid: 'old-head',
+  _admissionAbort: changedHeadController,
+};
+assert.equal(cancelWaitingTurnAdmission(changedHeadState), null);
+assert.equal(changedHeadController.signal.aborted, true);
+assert.deepEqual(changedHeadState.queue, [{ qid: 'replacement', text: 'do not cancel' }]);
 
 console.log('turn-limiter tests passed');

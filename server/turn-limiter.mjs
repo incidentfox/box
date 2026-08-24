@@ -50,3 +50,15 @@ export function createTurnLimiter(limit) {
     get limit() { return max; },
   };
 }
+
+// Cancel the exact durable message whose worker is waiting for an admission slot.
+// Keeping the qid on the runtime state makes this safe if another queue mutation raced
+// with Cancel: a newer head is never removed merely because an older waiter was aborted.
+export function cancelWaitingTurnAdmission(state) {
+  const qid = state?._admissionQid;
+  if (!qid) return null;
+  const index = Array.isArray(state.queue) ? state.queue.findIndex((message) => message?.qid === qid) : -1;
+  const message = index >= 0 ? state.queue.splice(index, 1)[0] : null;
+  try { state._admissionAbort?.abort(); } catch {}
+  return message;
+}

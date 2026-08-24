@@ -14,6 +14,9 @@ assert.match(server, /BOX_MAX_CONCURRENT_CODEX_TURNS/);
 assert.match(server, /CODEX_TURN_LIMITER/);
 assert.match(server, /kickWorker\(s\)/);
 assert.match(server, /interruptWorkerAdmission\(s\)/);
+const cancelCurrent = server.match(/function cancelCurrent\(extKey\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.match(cancelCurrent, /cancelWaitingTurnAdmission\(s\)/);
+assert.match(server, /s\._admissionQid = qid/);
 assert.match(server, /const batch = s\.queue\.splice\(0, take\);/);
 assert.match(server, /const msg = combineQueued\(batch\.map/);
 

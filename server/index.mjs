@@ -53,7 +53,7 @@ import { sortFsEntries } from './fs-entry-sort.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
-import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
+import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
   normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
@@ -5374,6 +5374,18 @@ function undoQueuedCancel(extKey, qid) {
 }
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
+  const canceledAdmission = cancelWaitingTurnAdmission(s);
+  if (canceledAdmission) {
+    persist(s);
+    bcast(s, { type: 'queue', queue: queueView(s) });
+    if (typeof canceledAdmission.onComplete === 'function') {
+      try {
+        canceledAdmission.onComplete({
+          text: '', sessionId: s.sessionId || '', agent: s.agent || canceledAdmission.agent || 'claude', error: '', canceled: true,
+        });
+      } catch {}
+    }
+  }
   const stopOwnedProcess = (proc) => terminateProcessWithEscalation(proc, {
     signalProcess: killAgentProcess,
   });
@@ -5579,11 +5591,15 @@ async function runWorker(s) {
     // forever with no process behind it.
     const admittedQid = (s.queue[0].agent || s.agent || 'claude') === 'codex' ? s.queue[0].qid : null;
     const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
-    const acquireSlot = async (limiter) => {
+    const acquireSlot = async (limiter, qid) => {
       const controller = new AbortController();
       s._admissionAbort = controller;
+      s._admissionQid = qid;
       const release = await limiter.acquire({ signal: controller.signal });
-      if (s._admissionAbort === controller) s._admissionAbort = null;
+      if (s._admissionAbort === controller) {
+        s._admissionAbort = null;
+        s._admissionQid = null;
+      }
       return release;
     };
     if (recoveryQid) {
@@ -5594,7 +5610,7 @@ async function runWorker(s) {
           msg: `Queued — restoring interrupted work when Box has capacity (${CODEX_RECOVERY_LIMITER.limit} recoveries at a time).`,
         });
       }
-      const release = await acquireSlot(CODEX_RECOVERY_LIMITER);
+      const release = await acquireSlot(CODEX_RECOVERY_LIMITER, recoveryQid);
       if (!release) continue;
       releases.push(release);
       // Archive/cancel can clear or replace a queued recovery while it waits for capacity.
@@ -5615,7 +5631,7 @@ async function runWorker(s) {
           msg: `Queued — starting when Box has capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
         });
       }
-      const release = await acquireSlot(CODEX_TURN_LIMITER);
+      const release = await acquireSlot(CODEX_TURN_LIMITER, admittedQid);
       if (!release) {
         releaseTurnSlots();
         continue;
