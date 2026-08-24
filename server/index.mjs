@@ -53,7 +53,7 @@ import { sortFsEntries } from './fs-entry-sort.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
-import { createTurnLimiter, normalizeTurnLimit } from './turn-limiter.mjs';
+import { acquireTurnAdmission, cancelWaitingTurnAdmission, canResetCodexActivity, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
   normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
@@ -181,8 +181,13 @@ const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FI
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
 
 const PORT = Number(cfg('PORT', 7321));
-// Normal Box turns start immediately without a global session cap. Automatic restart
-// recoveries remain serialized so one deploy cannot replay every interrupted turn at once.
+// Codex turns share the server's cgroup. Without a process-wide ceiling, several large
+// contexts can OOM-kill the HTTP server and leave every card looking stuck. Requests stay
+// durable in their session queue while admission is full.
+const MAX_CONCURRENT_CODEX_TURNS = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_TURNS', '3'));
+const CODEX_TURN_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_TURNS);
+// Automatic restart recoveries are more conservative so a deploy cannot replay every
+// interrupted turn simultaneously.
 const MAX_CONCURRENT_CODEX_RECOVERIES = normalizeTurnLimit(cfg('BOX_MAX_CONCURRENT_CODEX_RECOVERIES', '1'));
 const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES);
 // Default working directory for new chats / where /skills are scanned. Defaults to $HOME;
@@ -5113,7 +5118,7 @@ function enqueue(extKey, msg) {
   if (normalizeSessionCategory(msg.category)) s.category = 'vob';
   s.queue.push(msg); persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
-  runWorker(s);
+  kickWorker(s);
   return msg.qid;
 }
 
@@ -5231,7 +5236,7 @@ function refreshCodexActivity(s) {
     const state = cachedCodexRolloutState(file);
     // A terminal native rollout can outlive its terminal/dtach marker. Present it as idle
     // when a phone reconnects; the process-level concurrency check remains separate.
-    if (!state.busy && !s.proc) {
+    if (canResetCodexActivity(s, state)) {
       s.running = false; s.inflight = null; s.lastActivityAt = 0; s.activityLabel = '';
       deleteRunning(s.sessionId);
       return;
@@ -5330,13 +5335,21 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
 function dequeue(extKey, qid) {
   const s = rt(extKey);
   const idx = s.queue.findIndex((q) => q.qid === qid);
-  if (idx >= 0) { s.queue.splice(idx, 1); persist(s); bcast(s, { type: 'queue', queue: queueView(s) }); }
+  if (idx >= 0) {
+    const removedHead = idx === 0;
+    s.queue.splice(idx, 1);
+    if (removedHead) interruptWorkerAdmission(s);
+    persist(s);
+    bcast(s, { type: 'queue', queue: queueView(s) });
+  }
 }
 function cancelQueued(extKey, qid) {
   const s = rt(extKey);
+  const removedHead = s.queue[0]?.qid === qid;
   const result = cancelQueuedMessage(s.queue, qid);
   if (!result.undo) return;
   s.queue = result.queue;
+  if (removedHead) interruptWorkerAdmission(s);
   s.queueUndo.set(qid, result.undo);
   persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
@@ -5357,10 +5370,25 @@ function undoQueuedCancel(extKey, qid) {
   persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
   bcast(s, { type: 'queue_restored', qid });
-  runWorker(s);
+  // A restored head must pass through the same stale-running repair used by a
+  // newly enqueued message. Calling runWorker directly can strand this durable
+  // message when the previous worker disappeared before clearing s.running.
+  kickWorker(s);
 }
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
+  const canceledAdmission = cancelWaitingTurnAdmission(s);
+  if (canceledAdmission) {
+    persist(s);
+    bcast(s, { type: 'queue', queue: queueView(s) });
+    if (typeof canceledAdmission.onComplete === 'function') {
+      try {
+        canceledAdmission.onComplete({
+          text: '', sessionId: s.sessionId || '', agent: s.agent || canceledAdmission.agent || 'claude', error: '', canceled: true,
+        });
+      } catch {}
+    }
+  }
   const stopOwnedProcess = (proc) => terminateProcessWithEscalation(proc, {
     signalProcess: killAgentProcess,
   });
@@ -5414,6 +5442,7 @@ function teardownSessionRuntime(id, { force = true, procText = null } = {}) {
     s.queue = [];
     s.inflight = null;
     s.queueUndo.clear();
+    interruptWorkerAdmission(s);
     // This interrupts the active runner and any exact-session Codex process that
     // survived a server restart. Force-killing the captured handles below also
     // catches child handles nulled by their normal close path.
@@ -5509,6 +5538,22 @@ function prepareRecoveredMessage(s, message) {
   return prepareRecoveredCodexMessage(message, { originalLanded: codexUserQidPersisted(s.sessionId, message.qid) });
 }
 
+function interruptWorkerAdmission(s) {
+  try { s._admissionAbort?.abort(); } catch {}
+}
+
+function kickWorker(s) {
+  // The only legitimate process-free running states are an admission wait, a native-turn
+  // wait, or an in-flight turn whose child is between lifecycle callbacks. If none exists,
+  // the old worker is gone: clear only this in-memory flag and let its durable queue resume.
+  if (s.running && s.queue.length && !s.inflight && !s.proc && !s.bashProc && !s.codexGoalProc
+      && !s._nativeWait && !s._admissionAbort) {
+    s.running = false;
+    if (s.sessionId) deleteRunning(s.sessionId);
+  }
+  runWorker(s);
+}
+
 async function runWorker(s) {
   if (s.running) return;
   // A completed Box turn may leave the SAME Codex process alive because /goal immediately
@@ -5543,10 +5588,12 @@ async function runWorker(s) {
       slotsReleased = true;
       while (releases.length) releases.pop()();
     };
-    // Do not dequeue recovered Codex work until it is admitted: if the server restarts again
-    // while waiting, the request remains durable in `queue`. Normal turns have no global cap.
-    const codexQid = (s.queue[0].agent || s.agent || 'claude') === 'codex' ? s.queue[0].qid : null;
-    const recoveryQid = codexQid && s.queue[0].recovered ? codexQid : null;
+    // Do not dequeue Codex work until it is admitted: if the server restarts again while
+    // waiting, the request remains durable in `queue`. A cancellable wait is important:
+    // removing the head message must wake this worker instead of leaving `running=true`
+    // forever with no process behind it.
+    const admittedQid = turnAdmissionQid(s);
+    const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
     if (recoveryQid) {
       if (CODEX_RECOVERY_LIMITER.active >= CODEX_RECOVERY_LIMITER.limit) {
         bcast(s, {
@@ -5555,7 +5602,9 @@ async function runWorker(s) {
           msg: `Queued — restoring interrupted work when Box has capacity (${CODEX_RECOVERY_LIMITER.limit} recoveries at a time).`,
         });
       }
-      releases.push(await CODEX_RECOVERY_LIMITER.acquire());
+      const release = await acquireTurnAdmission(s, CODEX_RECOVERY_LIMITER, recoveryQid);
+      if (!release) continue;
+      releases.push(release);
       // Archive/cancel can clear or replace a queued recovery while it waits for capacity.
       if (!s.running || !s.queue.length) {
         releaseTurnSlots();
@@ -5566,13 +5615,32 @@ async function runWorker(s) {
         continue;
       }
     }
-    // Drain the leading run of messages from the SAME sender. Batching two people's
-    // messages into one turn would merge them into a single bubble and lose the "who
-    // said what" the whole shared-session feature rests on. On a solo box every author
-    // is null, so this drains the entire queue exactly as it always did.
-    const headAuthor = s.queue[0].author ? s.queue[0].author.id : null;
-    let take = 1;
-    while (take < s.queue.length && (s.queue[take].author ? s.queue[take].author.id : null) === headAuthor) take++;
+    if (admittedQid) {
+      if (CODEX_TURN_LIMITER.active >= CODEX_TURN_LIMITER.limit) {
+        bcast(s, {
+          type: 'native_wait',
+          sessionId: s.sessionId,
+          msg: `Queued — starting when Box has capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
+        });
+      }
+      const release = await acquireTurnAdmission(s, CODEX_TURN_LIMITER, admittedQid);
+      if (!release) {
+        releaseTurnSlots();
+        continue;
+      }
+      releases.push(release);
+      if (!s.running || !s.queue.length) {
+        releaseTurnSlots();
+        break;
+      }
+      if (s.queue[0].qid !== admittedQid) {
+        releaseTurnSlots();
+        continue;
+      }
+    }
+    // Drain the leading run from the same sender and execution path. Bash/chat or
+    // cross-agent boundaries must stay separate so admission matches the turn that runs.
+    const take = queuedTurnBatchSize(s);
     const batch = s.queue.splice(0, take);
     const msg = combineQueued(batch.map((message) => prepareRecoveredMessage(s, message)));
     // Removing a message from `queue` must not remove it from durable state. A deploy or
@@ -5594,8 +5662,8 @@ async function runWorker(s) {
       await runTurn(s, msg);
     } finally {
       if (releases.length) {
-        // `/goal` resolves a recovered phone turn while its Codex process continues working.
-        // Keep that process inside the restart-recovery budget until it actually exits.
+        // `/goal` resolves a phone turn while its Codex process continues working. Keep that
+        // process inside the same admission budgets until it actually exits.
         const goalProc = s.codexGoalProc;
         if (goalProc && goalProc.exitCode == null && goalProc.signalCode == null) {
           goalProc.once('close', releaseTurnSlots);
