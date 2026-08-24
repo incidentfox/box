@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, turnAdmissionQid } from './turn-limiter.mjs';
+import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
 
 assert.equal(normalizeTurnLimit('4'), 4);
 assert.equal(normalizeTurnLimit('0'), 3);
@@ -11,6 +11,25 @@ assert.equal(turnAdmissionQid({ agent: 'codex', queue: [{ qid: 'bash', mode: 'ba
 assert.equal(turnAdmissionQid({ agent: 'codex', queue: [{ qid: 'codex', mode: 'chat' }] }), 'codex');
 assert.equal(turnAdmissionQid({ agent: 'claude', queue: [{ qid: 'claude', mode: 'chat' }] }), null);
 assert.equal(turnAdmissionQid({ agent: 'codex', queue: [] }), null);
+
+const soloCodex = { agent: 'codex', queue: [
+  { qid: 'one', mode: 'normal', agent: 'codex' },
+  { qid: 'two', mode: 'normal', agent: 'codex' },
+] };
+assert.equal(queuedTurnBatchSize(soloCodex), 2);
+assert.equal(queuedTurnBatchSize({ agent: 'codex', queue: [
+  { qid: 'bash', mode: 'bash', agent: 'codex' },
+  { qid: 'chat', mode: 'normal', agent: 'codex' },
+] }), 1);
+assert.equal(queuedTurnBatchSize({ agent: 'codex', queue: [
+  { qid: 'chat', mode: 'normal', agent: 'codex' },
+  { qid: 'bash', mode: 'bash', agent: 'codex' },
+] }), 1);
+assert.equal(queuedTurnBatchSize({ agent: 'claude', queue: [
+  { qid: 'claude', mode: 'normal', agent: 'claude' },
+  { qid: 'codex', mode: 'normal', agent: 'codex' },
+] }), 1);
+assert.equal(queuedTurnBatchSize({ queue: [] }), 0);
 
 const limiter = createTurnLimiter(2);
 const first = await limiter.acquire();

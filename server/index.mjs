@@ -53,7 +53,7 @@ import { sortFsEntries } from './fs-entry-sort.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
-import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, turnAdmissionQid } from './turn-limiter.mjs';
+import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
   normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
@@ -5649,13 +5649,9 @@ async function runWorker(s) {
         continue;
       }
     }
-    // Drain the leading run of messages from the SAME sender. Batching two people's
-    // messages into one turn would merge them into a single bubble and lose the "who
-    // said what" the whole shared-session feature rests on. On a solo box every author
-    // is null, so this drains the entire queue exactly as it always did.
-    const headAuthor = s.queue[0].author ? s.queue[0].author.id : null;
-    let take = 1;
-    while (take < s.queue.length && (s.queue[take].author ? s.queue[take].author.id : null) === headAuthor) take++;
+    // Drain the leading run from the same sender and execution path. Bash/chat or
+    // cross-agent boundaries must stay separate so admission matches the turn that runs.
+    const take = queuedTurnBatchSize(s);
     const batch = s.queue.splice(0, take);
     const msg = combineQueued(batch.map((message) => prepareRecoveredMessage(s, message)));
     // Removing a message from `queue` must not remove it from durable state. A deploy or

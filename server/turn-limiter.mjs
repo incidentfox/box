@@ -11,6 +11,27 @@ export function turnAdmissionQid(state) {
   return (message.agent || state.agent || 'claude') === 'codex' ? message.qid || null : null;
 }
 
+// A worker may coalesce rapid messages from one sender, but only when they use the
+// same execution path. Mixing bash/chat or different agents would make the head
+// message's admission decision apply to work that requires a different runner.
+export function queuedTurnBatchSize(state) {
+  const queue = state?.queue;
+  if (!Array.isArray(queue) || !queue.length) return 0;
+  const head = queue[0];
+  const headAuthor = head.author?.id || null;
+  const headMode = head.mode || 'normal';
+  const headAgent = head.agent || state.agent || 'claude';
+  let take = 1;
+  while (take < queue.length) {
+    const message = queue[take];
+    if ((message.author?.id || null) !== headAuthor) break;
+    if ((message.mode || 'normal') !== headMode) break;
+    if ((message.agent || state.agent || 'claude') !== headAgent) break;
+    take++;
+  }
+  return take;
+}
+
 export function createTurnLimiter(limit) {
   const max = normalizeTurnLimit(limit);
   let active = 0;
