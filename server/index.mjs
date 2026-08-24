@@ -5370,7 +5370,10 @@ function undoQueuedCancel(extKey, qid) {
   persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
   bcast(s, { type: 'queue_restored', qid });
-  runWorker(s);
+  // A restored head must pass through the same stale-running repair used by a
+  // newly enqueued message. Calling runWorker directly can strand this durable
+  // message when the previous worker disappeared before clearing s.running.
+  kickWorker(s);
 }
 function cancelCurrent(extKey) {
   const s = rt(extKey); s.canceled = true;
