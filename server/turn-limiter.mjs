@@ -32,6 +32,24 @@ export function queuedTurnBatchSize(state) {
   return take;
 }
 
+export async function acquireTurnAdmission(state, limiter, qid) {
+  const controller = new AbortController();
+  state._admissionAbort = controller;
+  state._admissionQid = qid;
+  const release = await limiter.acquire({ signal: controller.signal });
+  if (state._admissionAbort === controller) {
+    state._admissionAbort = null;
+    state._admissionQid = null;
+  }
+  return release;
+}
+
+// Reconnecting refreshes activity from the rollout on disk. An idle rollout does not
+// mean the Box worker is idle when that worker is still queued for an admission slot.
+export function canResetCodexActivity(state, rolloutState) {
+  return !rolloutState?.busy && !state?.proc && !state?._admissionAbort;
+}
+
 export function createTurnLimiter(limit) {
   const max = normalizeTurnLimit(limit);
   let active = 0;

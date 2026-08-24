@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
+import { acquireTurnAdmission, cancelWaitingTurnAdmission, canResetCodexActivity, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
 
 assert.equal(normalizeTurnLimit('4'), 4);
 assert.equal(normalizeTurnLimit('0'), 3);
@@ -30,6 +30,21 @@ assert.equal(queuedTurnBatchSize({ agent: 'claude', queue: [
   { qid: 'codex', mode: 'normal', agent: 'codex' },
 ] }), 1);
 assert.equal(queuedTurnBatchSize({ queue: [] }), 0);
+
+// A phone reconnect may inspect an idle rollout while this session is queued behind
+// another Codex turn. It must not clear `running` and allow a second worker to start.
+const reconnectLimiter = createTurnLimiter(1);
+const heldReconnectSlot = await reconnectLimiter.acquire();
+const reconnectState = { running: true, proc: null };
+const reconnectAdmission = acquireTurnAdmission(reconnectState, reconnectLimiter, 'queued-on-reconnect');
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(reconnectState._admissionQid, 'queued-on-reconnect');
+assert.ok(reconnectState._admissionAbort);
+assert.equal(canResetCodexActivity(reconnectState, { busy: false }), false);
+heldReconnectSlot();
+const releaseReconnectSlot = await reconnectAdmission;
+assert.equal(canResetCodexActivity(reconnectState, { busy: false }), true);
+releaseReconnectSlot();
 
 const limiter = createTurnLimiter(2);
 const first = await limiter.acquire();

@@ -53,7 +53,7 @@ import { sortFsEntries } from './fs-entry-sort.mjs';
 import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
 import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
 import { createVobTestConfigStore } from './vob-test-mode.mjs';
-import { cancelWaitingTurnAdmission, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
+import { acquireTurnAdmission, cancelWaitingTurnAdmission, canResetCodexActivity, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
   normalizeSessionWorkspace, ownerShareCwd, sessionInTeamWorkspace, sessionUsesTeamSandbox, sessionWorkspace,
@@ -5236,7 +5236,7 @@ function refreshCodexActivity(s) {
     const state = cachedCodexRolloutState(file);
     // A terminal native rollout can outlive its terminal/dtach marker. Present it as idle
     // when a phone reconnects; the process-level concurrency check remains separate.
-    if (!state.busy && !s.proc) {
+    if (canResetCodexActivity(s, state)) {
       s.running = false; s.inflight = null; s.lastActivityAt = 0; s.activityLabel = '';
       deleteRunning(s.sessionId);
       return;
@@ -5594,17 +5594,6 @@ async function runWorker(s) {
     // forever with no process behind it.
     const admittedQid = turnAdmissionQid(s);
     const recoveryQid = admittedQid && s.queue[0].recovered ? admittedQid : null;
-    const acquireSlot = async (limiter, qid) => {
-      const controller = new AbortController();
-      s._admissionAbort = controller;
-      s._admissionQid = qid;
-      const release = await limiter.acquire({ signal: controller.signal });
-      if (s._admissionAbort === controller) {
-        s._admissionAbort = null;
-        s._admissionQid = null;
-      }
-      return release;
-    };
     if (recoveryQid) {
       if (CODEX_RECOVERY_LIMITER.active >= CODEX_RECOVERY_LIMITER.limit) {
         bcast(s, {
@@ -5613,7 +5602,7 @@ async function runWorker(s) {
           msg: `Queued — restoring interrupted work when Box has capacity (${CODEX_RECOVERY_LIMITER.limit} recoveries at a time).`,
         });
       }
-      const release = await acquireSlot(CODEX_RECOVERY_LIMITER, recoveryQid);
+      const release = await acquireTurnAdmission(s, CODEX_RECOVERY_LIMITER, recoveryQid);
       if (!release) continue;
       releases.push(release);
       // Archive/cancel can clear or replace a queued recovery while it waits for capacity.
@@ -5634,7 +5623,7 @@ async function runWorker(s) {
           msg: `Queued — starting when Box has capacity (${CODEX_TURN_LIMITER.limit} Codex turns at a time).`,
         });
       }
-      const release = await acquireSlot(CODEX_TURN_LIMITER, admittedQid);
+      const release = await acquireTurnAdmission(s, CODEX_TURN_LIMITER, admittedQid);
       if (!release) {
         releaseTurnSlots();
         continue;

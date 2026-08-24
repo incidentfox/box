@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const app = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
 const server = readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8');
+const limiter = readFileSync(new URL('../server/turn-limiter.mjs', import.meta.url), 'utf8');
 
 const stopCurrent = app.match(/function stopCurrent\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
 assert.match(stopCurrent, /type: 'cancel'/);
@@ -19,8 +20,10 @@ assert.match(cancelCurrent, /cancelWaitingTurnAdmission\(s\)/);
 const undoQueuedCancel = server.match(/function undoQueuedCancel\(extKey, qid\) \{([\s\S]*?)\n\}/)?.[1] || '';
 assert.match(undoQueuedCancel, /kickWorker\(s\)/);
 assert.doesNotMatch(undoQueuedCancel, /runWorker\(s\)/);
-assert.match(server, /s\._admissionQid = qid/);
+assert.match(limiter, /state\._admissionQid = qid/);
 assert.match(server, /const admittedQid = turnAdmissionQid\(s\);/);
+assert.match(server, /if \(canResetCodexActivity\(s, state\)\)/);
+assert.match(server, /await acquireTurnAdmission\(s, CODEX_TURN_LIMITER, admittedQid\)/);
 assert.match(server, /const take = queuedTurnBatchSize\(s\);/);
 assert.match(server, /const batch = s\.queue\.splice\(0, take\);/);
 assert.match(server, /const msg = combineQueued\(batch\.map/);
