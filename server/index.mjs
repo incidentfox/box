@@ -48,11 +48,7 @@ import { renderMeetingContextForIssue } from './meeting-context.mjs';
 import { registerVoiceAssistant } from './voice-assistant.mjs';
 import { slackConfigured } from './slack-context.mjs';
 import { cleanPathToken, createLocalFileResolver, FILE_SEARCH_EXT_RE } from './local-file-resolver.mjs';
-import { isVobCallSession, mainPageSessionRank, normalizeSessionCategory, sessionAllowsAutoContinue } from './vob-session-category.mjs';
 import { sortFsEntries } from './fs-entry-sort.mjs';
-import { buildVobSnapshot, resolveVobAudio } from './vob-observability.mjs';
-import { firstVobRequestIdInRollout } from './vob-rollout-link.mjs';
-import { createVobTestConfigStore } from './vob-test-mode.mjs';
 import { acquireTurnAdmission, cancelWaitingTurnAdmission, canResetCodexActivity, createTurnLimiter, normalizeTurnLimit, queuedTurnBatchSize, turnAdmissionQid } from './turn-limiter.mjs';
 import * as team from './team.mjs';
 import {
@@ -69,7 +65,6 @@ const geminiEngine = new GeminiExecEngine();
 const deepseekEngine = new DeepSeekExecEngine();
 const agyEngine = new AgyExecEngine();
 const macEngine = new MacExecEngine();
-const vobTestConfigStore = createVobTestConfigStore();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -1524,7 +1519,6 @@ function ensureCodexSession(id, attrs = {}) {
     source: attrs.source || prev.source || '',
     transcriptPath: attrs.transcriptPath || prev.transcriptPath || '',
     dtachSock: attrs.dtachSock || prev.dtachSock || '',
-    category: attrs.category != null ? (normalizeSessionCategory(attrs.category) || '') : (prev.category || ''),
     createdBy: attrs.createdBy !== undefined ? attrs.createdBy : (prev.createdBy || null),
     teamSandbox: attrs.teamSandbox !== undefined ? !!attrs.teamSandbox : !!prev.teamSandbox,
     workspace: normalizeSessionWorkspace(attrs.workspace)
@@ -2310,23 +2304,19 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   const statusOf = (id) => archived.has(id) ? 'archived' : (RUNNING.has(id) || codexBusyIds.has(id)) ? 'working' : (scan.get(id) && scan.get(id).needsInput) ? 'needs_input' : liveIds.has(id) ? 'live' : 'idle';
   const byId = new Map(items.map((f) => [f.id, f]));
   const isAuto = (id) => isAutoFile((byId.get(id) || {}).file);
-  const isVob = (id) => isVobCallSession(byId.get(id) || {});
   // A workspace is a hard list boundary. Team work never appears in the personal
   // workspace, including its archive; personal work never appears in Team.
   const isTeamSession = (f) => !!(f && sessionInTeamWorkspaceOf(f));
   const canSee = (f) => principalCanSeeSessionRecord(principal, f);
   const inWorkspace = (f) => canSee(f) && (teamWorkspace ? isTeamSession(f) : !isTeamSession(f));
-  // Counts over all sessions. VOB calls appear in `all` and their dedicated
-  // category, but remain excluded from Working/Needs input/Live to avoid double
-  // counting those status tabs. Automated sessions remain separate.
+  // Counts over all sessions. Automated sessions remain separate.
   // autoSub breaks the auto total into subcategories for the Automated sub-tabs.
-  const counts = { all: 0, favorites: 0, team: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, vob: 0, auto: 0 };
+  const counts = { all: 0, favorites: 0, team: 0, working: 0, needs_input: 0, live: 0, idle: 0, archived: 0, auto: 0 };
   const autoSub = {};
   for (const f of items) {
     if (!inWorkspace(f)) continue;
     if (archived.has(f.id)) { counts.archived++; continue; }
     if (!teamWorkspace && f.file && isAutoFile(f.file)) { counts.auto++; const sk = autoSubcat(f.id, f.file); autoSub[sk] = (autoSub[sk] || 0) + 1; continue; }
-    if (!teamWorkspace && isVobCallSession(f)) { counts.vob++; counts.all++; continue; }
     if (favorites.has(f.id)) counts.favorites++;
     const st = statusOf(f.id); counts[st]++; counts.all++;
   }
@@ -2335,21 +2325,17 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   // `auto:<subkey>` narrows to one subcategory.
   const [fbase, fsub] = String(filter || 'all').split(':');
   let cand;
-  const activeRegular = (f) => inWorkspace(f) && !archived.has(f.id) && (teamWorkspace || (!(f.file && isAutoFile(f.file)) && !isVobCallSession(f)));
+  const activeRegular = (f) => inWorkspace(f) && !archived.has(f.id) && (teamWorkspace || !(f.file && isAutoFile(f.file)));
   if (filter === 'archived') cand = items.filter((f) => inWorkspace(f) && archived.has(f.id));
   else if (filter === 'favorites') cand = items.filter((f) => activeRegular(f) && favorites.has(f.id));
-  else if (filter === 'vob') cand = teamWorkspace ? [] : items.filter((f) => inWorkspace(f) && !archived.has(f.id) && isVobCallSession(f));
   else if (fbase === 'auto') cand = teamWorkspace ? [] : items.filter((f) => inWorkspace(f) && !archived.has(f.id) && f.file && isAutoFile(f.file) && (!fsub || autoSubcat(f.id, f.file) === fsub));
   else if (filter && filter !== 'all') cand = items.filter((f) => activeRegular(f) && statusOf(f.id) === filter);
   else cand = items.filter(activeRegular);
   const chosen = [], seen = new Set();
   if ((!filter || filter === 'all') && !teamWorkspace) {
-    // Reserve every VOB session before the general recency limit, just as live
-    // sessions are reserved. This keeps the complete VOB group on the main page.
-    for (const f of items) if (inWorkspace(f) && !archived.has(f.id) && !(f.file && isAutoFile(f.file)) && isVobCallSession(f)) { chosen.push(f); seen.add(f.id); }
     for (const id of liveIds) {
       const f = byId.get(id);
-      if (f && inWorkspace(f) && !archived.has(id) && !isAuto(id) && !isVob(id)) { chosen.push(f); seen.add(id); }
+      if (f && inWorkspace(f) && !archived.has(id) && !isAuto(id)) { chosen.push(f); seen.add(id); }
     }
   }
   for (const f of cand) { if (chosen.length >= limit) break; if (!seen.has(f.id)) { chosen.push(f); seen.add(f.id); } }
@@ -2368,7 +2354,6 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     // ai-title). Legacy box renames in names.json still win over an ai-title so old
     // names aren't lost. rcName ("box-xxxx") is a last-resort surface label.
     const tm = s.file ? titleMeta(s.file) : { custom: '', ai: '' };
-    const vob = isVobCallSession({ ...s, cwd });
     return {
       id: s.id,
       agent: s.agent || 'claude',
@@ -2378,7 +2363,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
       parentId: s.parentId || null, parentTitle: s.parentTitle || '',
       live: !!r || !!lb || cxLive, rcName: r ? r.rcName : (lb ? lb.rcName : null), note: r ? r.note : null, archived: archived.has(s.id),
       favorite: favorites.has(s.id),
-      status: statusOf(s.id), category: teamWorkspace ? 'main' : (s.file && isAutoFile(s.file) ? 'auto' : vob ? 'vob' : 'main'),
+      status: statusOf(s.id), category: !teamWorkspace && s.file && isAutoFile(s.file) ? 'auto' : 'main',
       subcat: !teamWorkspace && s.file && isAutoFile(s.file) ? autoSubcat(s.id, s.file) : null,
       pinned: (!!r || !!lb || cxLive) && !archived.has(s.id), mtime: actTime(s), renamed: !!(tm.custom || names[s.id]),
       archivedAt: archivedAt[s.id] || 0,
@@ -2395,7 +2380,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
   // right at the top), falling back to last-activity for legacy archives with no
   // recorded archive time. Every other view keeps live-pinned-then-recent order.
   if (filter === 'archived') out.sort((a, b) => (b.archivedAt - a.archivedAt) || (b.mtime - a.mtime));
-  else if (!filter || filter === 'all') out.sort((a, b) => mainPageSessionRank(a) - mainPageSessionRank(b) || (b.mtime - a.mtime));
+  else if (!filter || filter === 'all') out.sort((a, b) => (Number(b.favorite) - Number(a.favorite)) || (Number(b.pinned) - Number(a.pinned)) || (b.mtime - a.mtime));
   else out.sort((a, b) => (b.favorite - a.favorite) || (b.pinned - a.pinned) || (b.mtime - a.mtime));
   counts.autoSub = autoSub;
   return { sessions: out, counts };
@@ -3112,50 +3097,6 @@ app.get('/api/sessions/:id/history', requireAuth, async (req, res) => {
   }
 });
 
-// Legacy VOB sessions often predate the private owner/launch artifact that
-// carries the Box session id.  Their rollout still contains the opaque Rise4
-// request id, which is a safe, deterministic bridge to the matching case dir.
-function vobRequestIdsForSession(sessionId) {
-  const rollout = findCodexRollout(CODEX_HOME, sessionId);
-  if (!rollout) return [];
-  // The first request id in the rollout is the case that launched this
-  // session. Later ids are commonly mentioned in copied logs or follow-up
-  // context and must not make the resolver consider unrelated cases.
-  const requestId = firstVobRequestIdInRollout(rollout);
-  return requestId ? [requestId] : [];
-}
-
-// Owner-only VOB observability. The artifacts contain payer-call evidence and may
-// include PHI, so this surface intentionally does not enter the guest allowlist.
-app.get('/api/sessions/:id/vob', requireOwner, (req, res) => {
-  try {
-    const session = (loadCodex().sessions || {})[req.params.id] || null;
-    const requestIds = vobRequestIdsForSession(req.params.id);
-    const includePacketFacts = String(req.query.includePacketFacts || '').toLowerCase() === '1'
-      || String(req.query.includePacketFacts || '').toLowerCase() === 'true';
-    const snapshot = buildVobSnapshot({ sessionId: req.params.id, session, requestIds, includePacketFacts });
-    if (!snapshot.linked) return res.status(snapshot.ambiguous ? 409 : 404).json(snapshot);
-    res.setHeader('Cache-Control', 'private, no-store');
-    return res.json(snapshot);
-  } catch (error) {
-    return res.status(500).json({ error: String(error?.message || error).slice(0, 300) });
-  }
-});
-app.get('/api/sessions/:id/vob/attempts/:callId/audio', requireOwner, (req, res) => {
-  try {
-    const session = (loadCodex().sessions || {})[req.params.id] || null;
-    const requestIds = vobRequestIdsForSession(req.params.id);
-    const audio = resolveVobAudio({ sessionId: req.params.id, session, callId: req.params.callId, requestIds });
-    if (!audio) return res.status(404).json({ error: 'recording not found' });
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Accept-Ranges', 'bytes');
-    return res.sendFile(audio.path, { acceptRanges: true, cacheControl: false }, (error) => {
-      if (error && !res.headersSent) res.status(error.statusCode === 404 ? 404 : 500).json({ error: 'recording unavailable' });
-    });
-  } catch {
-    return res.status(404).json({ error: 'recording not found' });
-  }
-});
 app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
   try {
     const h = fullSessionHistory(req.params.id);
@@ -3299,16 +3240,11 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
       : isAgy ? { state: loadAgy(), save: saveAgy }
         : isMac ? { state: loadMac(), save: saveMac }
           : null;
-  const previousStoredSession = stored && stored.state.sessions && stored.state.sessions[id];
   const previousRuntime = RT.get(resolveKey(id))
     || [...RT.values()].find((s) => s.sessionId === id)
     || (existsSync(qpath(id)) ? rt(id) : null);
-  const requestedCategory = normalizeSessionCategory(req.body && req.body.category);
-  const preserveVobCategory = requestedCategory === 'vob'
-    || isVobCallSession({ ...(previousStoredSession || {}), ...(previousRuntime || {}) });
   if (stored && stored.state.sessions && stored.state.sessions[id]) {
     stored.state.sessions[id].title = name;
-    if (preserveVobCategory) stored.state.sessions[id].category = 'vob';
     stored.save(stored.state);
   } else {
     wrote = writeCustomTitle(id, name);
@@ -3324,7 +3260,6 @@ app.post('/api/sessions/:id/rename', requireAuth, (req, res) => {
   const runtime = previousRuntime;
   if (runtime) {
     runtime.title = name;
-    if (preserveVobCategory) runtime.category = 'vob';
     persist(runtime);
     bcast(runtime, {
       type: 'session', id: runtime.sessionId || id, agent: runtime.agent || undefined,
@@ -3398,16 +3333,6 @@ function scheduledSessionAgent(id) {
   if (findSessionFile(id)) return 'claude';
   return '';
 }
-function scheduledSessionMetadata(id, agent) {
-  if (agent === 'codex') return (loadCodex().sessions || {})[id] || {};
-  if (agent === 'claude' && (loadTeamClaude().sessions || {})[id]) return (loadTeamClaude().sessions || {})[id] || {};
-  if (agent === 'gemini') return (loadGemini().sessions || {})[id] || {};
-  if (agent === 'deepseek') return (loadDeepSeek().sessions || {})[id] || {};
-  if (agent === 'agy') return (loadAgy().sessions || {})[id] || {};
-  if (agent === 'mac') return (loadMac().sessions || {})[id] || {};
-  const file = findSessionFile(id);
-  return { file, title: file ? sessionTitle(file) : '', cwd: file ? decodeCwd(dirname(file)) : '' };
-}
 const scheduleRoute = (fn) => [requireAuth, async (req, res) => {
   const id = String(req.params.id || '');
   const agent = scheduledSessionAgent(id);
@@ -3456,10 +3381,8 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   const state = loadSchedules();
   const record = scheduleRecord(state, id, agent);
   record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, ...raw });
-  const suppressed = record.autoContinue.enabled && !sessionAllowsAutoContinue(scheduledSessionMetadata(id, agent));
-  if (suppressed) record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, enabled: false });
   saveSchedules(state);
-  return { ok: true, autoContinue: record.autoContinue, suppressed: suppressed ? 'vob_session' : null };
+  return { ok: true, autoContinue: record.autoContinue };
 }));
 app.delete('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent) => {
   const state = loadSchedules();
@@ -3924,11 +3847,6 @@ try {
       const s = rt(sessionId || key);
       return { sessionId: s.sessionId || '', agent: s.agent || '', busy: !!s.running || s.queue.length > 0 };
     },
-    vobSnapshotForSession: (sessionId, options = {}) => {
-      const session = (loadCodex().sessions || {})[sessionId] || null;
-      return buildVobSnapshot({ sessionId, session, requestIds: vobRequestIdsForSession(sessionId), ...options });
-    },
-    vobTestConfigStore,
   });
 } catch (e) { console.error('[box] voice assistant init failed:', e && e.message); }
 
@@ -4669,7 +4587,7 @@ function rt(extKey) {
     const manualTitle = isUuid(key) ? loadNames()[key] : '';
     RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (stored && stored.cwd) || null, agent: p.agent || (codex ? 'codex' : teamClaude ? 'claude' : null),
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (stored && stored.title) || '',
-      settings: normalizeSettings(p.settings || (stored && stored.settings) || {}), category: normalizeSessionCategory(p.category || (stored && stored.category)) || null,
+      settings: normalizeSettings(p.settings || (stored && stored.settings) || {}),
       context: p.context || (stored && stored.context) || null,
       createdBy: hasOwn('createdBy') ? p.createdBy : ((stored && stored.createdBy) || null),
       teamSandbox: hasOwn('teamSandbox') ? !!p.teamSandbox : !!(stored && stored.teamSandbox),
@@ -4684,7 +4602,7 @@ function persist(s) {
   // partway through the first turn, and it lands via five different engine paths — so
   // claim it here, on the one call every path already makes afterwards.
   if (s.createdBy && s.sessionId) { try { team.claimSession(s.sessionId, s.createdBy); } catch {} }
-  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', category: normalizeSessionCategory(s.category) || null, settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, workspace: sessionWorkspaceOf(s), queue: s.queue, inflight: s.inflight || null })); } catch {} }
+  try { writeFileSync(qpath(s.sessionId || s.key), JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, agent: s.agent, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, createdBy: s.createdBy || null, teamSandbox: !!s.teamSandbox, workspace: sessionWorkspaceOf(s), queue: s.queue, inflight: s.inflight || null })); } catch {} }
 function activityLabelForEvent(o, previous = '') {
   if (!o || !o.type) return '';
   if (o.type === 'turn_start') return 'Starting';
@@ -5111,7 +5029,6 @@ function enqueue(extKey, msg) {
   if (msg.parentId) s.parentId = msg.parentId;
   if (msg.parentTitle) s.parentTitle = msg.parentTitle;
   if (msg.title) s.title = msg.title;
-  if (normalizeSessionCategory(msg.category)) s.category = 'vob';
   s.queue.push(msg); persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
   kickWorker(s);
@@ -5156,17 +5073,6 @@ async function runScheduleTick(now = new Date()) {
         });
         wake.firedAt = now.toISOString();
         dirty = true;
-      }
-
-      // VOB operator goals remain visible and can be resumed manually, but they
-      // must not turn into unbounded background loops. One-time wakeups above
-      // remain available when an explicit follow-up is desired.
-      if (!sessionAllowsAutoContinue(scheduledSessionMetadata(id, agent))) {
-        if (record.autoContinue.enabled) {
-          record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, enabled: false });
-          dirty = true;
-        }
-        continue;
       }
 
       const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
@@ -5323,7 +5229,6 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
     title,
     parentId: body.parentId || null,
     parentTitle: body.parentTitle || '',
-    category: normalizeSessionCategory(body.category) || undefined,
     force: !!body.force,
   });
   res.json({ ok: true, key, qid, agent, cwd, title });
@@ -5795,7 +5700,7 @@ function runCodexTurn(s, msg, resolve) {
   // a resume already has s.sessionId, so it's untouched.
   if (!s.sessionId) {
     s.provKey = s.key;
-    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category, createdBy: s.createdBy || null, teamSandbox: sandboxed, workspace: sessionWorkspaceOf(s) });
+    ensureCodexSession(s.provKey, { cwd: s.cwd, title: initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, createdBy: s.createdBy || null, teamSandbox: sandboxed, workspace: sessionWorkspaceOf(s) });
     appendCodexMessage(s.provKey, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered });
     addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
@@ -5872,7 +5777,7 @@ function runCodexTurn(s, msg, resolve) {
         if (inTeamWorkspace) team.setShared(s.sessionId, true, 'owner', s.cwd);
         s.provKey = null;
         if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
-        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, category: s.category, createdBy: s.createdBy || null, teamSandbox: sandboxed, workspace: sessionWorkspaceOf(s) });
+        ensureCodexSession(s.sessionId, { cwd: s.cwd, title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80), lastUsed: Date.now(), settings: s.settings, parentId: msg.parentId || s.parentId || null, parentTitle: msg.parentTitle || s.parentTitle || '', context: s.context || null, createdBy: s.createdBy || null, teamSandbox: sandboxed, workspace: sessionWorkspaceOf(s) });
         if (!provKey) appendCodexMessage(s.sessionId, 'user', userText, { parts: userParts, qid: msg.qid, recovered: !!msg.recovered }); // provisional path already appended it
         persist(s);
         if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'codex' }); } catch {} }
@@ -6575,7 +6480,6 @@ wss.on('connection', (ws) => {
         // the owner left it — the clamp only bites on a directory nobody shared.
         cwd: sandboxed ? team.guestCwd(m.cwd || s0.cwd) : (m.cwd || s0.cwd),
         force: !!m.force, parentId: m.parentId || null, parentTitle: m.parentTitle || '', title: m.title || '',
-        category: normalizeSessionCategory(m.category) || undefined,
       });
       if (s0.typing && ws.principal) { s0.typing.delete(ws.principal.id); broadcastPresence(s0); }
     } else if (m.type === 'team_chat') {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createLivekitVoiceJoin, createLivekitVoiceMonitorJoin, livekitAdapterConfig, livekitConfigured, livekitHttpUrl, livekitParticipantIdentity, livekitRoomName, livekitRoomOptions, voiceAdapterTransport } from './livekit-voice.mjs';
+import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, livekitHttpUrl, livekitParticipantIdentity, livekitRoomName, livekitRoomOptions, voiceAdapterTransport } from './livekit-voice.mjs';
 
 assert.equal(voiceAdapterTransport(), 'livekit');
 assert.equal(voiceAdapterTransport('legacy'), 'legacy');
@@ -23,13 +23,4 @@ const claims = JSON.parse(Buffer.from(join.token.split('.')[1], 'base64url').toS
 assert.equal(claims.roomConfig.name, 'box-voice-call-123');
 assert.equal(claims.roomConfig.maxParticipants, 2);
 assert.equal(claims.roomConfig.agents[0].agentName, 'box-codex-voice');
-const monitor = await createLivekitVoiceMonitorJoin({ config, roomName: 'box-voice-call-123' });
-assert.equal(monitor.room, 'box-voice-call-123');
-assert.match(monitor.identity, /^monitor-/);
-const monitorClaims = JSON.parse(Buffer.from(monitor.token.split('.')[1], 'base64url').toString('utf8'));
-assert.equal(monitorClaims.video.roomJoin, true);
-assert.equal(monitorClaims.video.canPublish, false);
-assert.equal(monitorClaims.video.canSubscribe, true);
-assert.equal(monitorClaims.video.canPublishData, false);
-assert.equal(monitorClaims.roomConfig, undefined);
 console.log('livekit voice helpers: ok');

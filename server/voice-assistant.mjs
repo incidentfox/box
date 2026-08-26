@@ -34,8 +34,7 @@ import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from '.
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
-import { createLivekitVoiceJoin, createLivekitVoiceMonitorJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
-import { createVobTestConfig, normalizeVobTestSettings, vobTestCatalog } from './vob-test-mode.mjs';
+import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
 
 const nowIso = () => new Date().toISOString();
 const short = (s, n) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -781,7 +780,7 @@ function deriveLabelPhrase(raw, maxWords) {
   const cap = Math.max(1, Math.floor(Number(maxWords) || 6));
   if (tokens.length > cap) tokens = tokens.slice(0, cap);
   while (tokens.length > 1 && LABEL_TRAILING_RE.test(tokens[tokens.length - 1].replace(/[^\w]/g, ''))) tokens.pop();
-  // Lowercase for natural speech, but keep short ALL-CAPS acronyms (VOB, EOB, QME) intact
+  // Lowercase for natural speech, but keep short ALL-CAPS acronyms (EOB, QME) intact
   // so the model still spells them per the pronunciation rules.
   const out = tokens.map((w) => (/^[A-Z]{2,6}$/.test(w) ? w : w.toLowerCase())).join(' ');
   return out.replace(/[\s.,;:!?]+$/, '').trim();
@@ -854,14 +853,11 @@ export function agentFinishedLine({ agent = 'claude', speakAs = 'that work', tai
 
 export function registerVoiceAssistant(app, ctx) {
   const {
-    requireAuth, requireOwner, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
+    requireAuth, cfg, HOME, STATE_DIR, PORT, authToken, ownerName,
     defaultCwd, listSessions, findSessionFile, tailInfo, enqueue, rt, RUNNING, childEnv,
     macAvailable, loadCodexMessages, codexHome, codexMessagePath, transcribe,
-    runAdapterTurn, adapterSessionInfo, voiceSttEnabled, vobSnapshotForSession, vobTestConfigStore,
+    runAdapterTurn, adapterSessionInfo, voiceSttEnabled,
   } = ctx;
-  // A few isolated route tests register this module with only the authenticated
-  // guard. Production supplies the stricter owner guard for VOB controls.
-  const ownerGuard = typeof requireOwner === 'function' ? requireOwner : requireAuth;
 
   const OPENAI_KEY = cfg('OPENAI_API_KEY');
   const MODEL = cfg('VOICE_ASSISTANT_MODEL', 'gpt-realtime-2.1');
@@ -2410,7 +2406,7 @@ export function registerVoiceAssistant(app, ctx) {
 You are "Box" — ${ownerName}'s realtime voice copilot on his always-on dev server: the voice layer of the app that controls his coding-agent fleet (Claude Code, Codex), the Linear board, research, the company brain, notes, email, and calendar. Success = he gets real work done and real decisions made, hands-free. You ACT through tools; you never pretend to.
 
 # Who you're talking to
-Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: MindBill (mindbill.org), a California workers'-comp medical-legal billing SaaS displacing daisyBill. Anchor customer: Spectrum Medical Evaluators (~200 doctors, ~3,000 bills/month, $3 per bill plus a $999 monthly minimum). This week: the Monaco outbound-sales kickoff, a Rise4 call, and the CCWC conference in Anaheim. Side line, lower priority: psychiatry automation (Rise4 voice VOB, Bay Area Psychiatric Spravato forms). He is usually DRIVING when he talks to you.
+Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: MindBill (mindbill.org), a California workers'-comp medical-legal billing SaaS displacing daisyBill. Anchor customer: Spectrum Medical Evaluators (~200 doctors, ~3,000 bills/month, $3 per bill plus a $999 monthly minimum). This week: the Monaco outbound-sales kickoff, a Rise4 call, and the CCWC conference in Anaheim. Side line, lower priority: psychiatry automation (Bay Area Psychiatric Spravato forms). He is usually DRIVING when he talks to you.
 
 # Personality & Tone
 - A sharp, warm, direct colleague. Opinionated: push back with reasons and numbers — he explicitly wants a thought partner, not a yes-man.
@@ -2425,7 +2421,7 @@ ${voiceContextPolicy()}
 ${voiceResponseStyle(RESPONSE_STYLE)}
 
 # Reference pronunciations
-daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF, VOB = spell the letters · Jopari = "joh-PAR-ee" · Carisk = "CARE-isk" · Spravato = "sprah-VAH-toh".
+daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF = spell the letters · Jopari = "joh-PAR-ee" · Carisk = "CARE-isk" · Spravato = "sprah-VAH-toh".
 
 # Tools
 - Call read tools silently; the UI already shows an activity chip. Never say "checking", "one sec", or another tool preamble before a quick read.
@@ -2763,98 +2759,6 @@ ${voiceAutonomyPolicy()}
     }
   });
 
-  // Owner-only VOB role-play rooms. The case snapshot and selected settings stay in
-  // the server's short-lived config store; the agent receives only an opaque test id
-  // in LiveKit job metadata and loads the prompt from this authenticated endpoint.
-  app.get('/api/vob/test/options', ownerGuard, (_req, res) => {
-    res.json(vobTestCatalog());
-  });
-  app.post('/api/sessions/:id/vob/test/token', ownerGuard, async (req, res) => {
-    if (MODE !== 'adapter' || ADAPTER_TRANSPORT !== 'livekit' || !livekitConfigured(LIVEKIT)) {
-      return res.status(409).json({ error: 'LiveKit adapter mode is not configured' });
-    }
-    try {
-      const sessionId = String(req.params.id || '').trim();
-      const snapshot = typeof vobSnapshotForSession === 'function'
-        ? await Promise.resolve(vobSnapshotForSession(sessionId, { includePacketFacts: true }))
-        : null;
-      if (!snapshot || !snapshot.linked) {
-        return res.status(snapshot && snapshot.ambiguous ? 409 : 404).json(snapshot || { error: 'VOB case not found' });
-      }
-      if (!vobTestConfigStore || typeof vobTestConfigStore.put !== 'function') {
-        return res.status(503).json({ error: 'VOB test mode is not available' });
-      }
-      const testId = `vob-test-${randomBytes(12).toString('hex')}`;
-      const settings = normalizeVobTestSettings(req.body || {});
-      const config = createVobTestConfig({ testId, sessionId, snapshot, settings });
-      vobTestConfigStore.put(config);
-      const join = await createLivekitVoiceJoin({
-        config: LIVEKIT,
-        vsid: testId,
-        roomPrefix: 'box-vob-test',
-        source: 'box-vob-test',
-        participantName: 'VOB test operator',
-        metadata: { mode: 'vob-test', testId, sessionId },
-      });
-      return res.json({ ...join, testId, sessionId, mode: 'vob-test', settings, agent: LIVEKIT.agentName, transport: 'livekit' });
-    } catch (e) {
-      return res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
-    }
-  });
-  app.get('/api/sessions/:id/vob/test/config/:testId', ownerGuard, (req, res) => {
-    const config = vobTestConfigStore && typeof vobTestConfigStore.get === 'function'
-      ? vobTestConfigStore.get(req.params.testId)
-      : null;
-    if (!config || String(config.sessionId || '') !== String(req.params.id || '')) {
-      return res.status(404).json({ error: 'VOB test config expired or not found' });
-    }
-    res.setHeader('Cache-Control', 'private, no-store');
-    return res.json(config);
-  });
-  // Read-only owner monitor for an already-running production VOB room. This
-  // token can subscribe to audio/data but cannot publish or dispatch another
-  // agent, so opening the monitor cannot change the payer call.
-  app.get('/api/sessions/:id/vob/live-token', ownerGuard, async (req, res) => {
-    if (MODE !== 'adapter' || ADAPTER_TRANSPORT !== 'livekit' || !livekitConfigured(LIVEKIT)) {
-      return res.status(409).json({ error: 'LiveKit adapter mode is not configured' });
-    }
-    try {
-      const sessionId = String(req.params.id || '').trim();
-      const snapshot = typeof vobSnapshotForSession === 'function'
-        ? await Promise.resolve(vobSnapshotForSession(sessionId))
-        : null;
-      if (!snapshot || !snapshot.linked) {
-        return res.status(snapshot && snapshot.ambiguous ? 409 : 404).json(snapshot || { error: 'VOB case not found' });
-      }
-      const requestedCallId = String(req.query.callId || '').trim();
-      const attempts = Array.isArray(snapshot.attempts) ? snapshot.attempts : [];
-      const active = attempts.filter((attempt) => attempt && attempt.live);
-      const attempt = requestedCallId
-        ? active.find((candidate) => String(candidate.callId || '') === requestedCallId)
-        : active.length === 1 ? active[0] : null;
-      if (!attempt) {
-        return res.status(requestedCallId ? 409 : 400).json({
-          error: requestedCallId ? 'That VOB call is no longer active' : 'Choose one active VOB call to monitor',
-          activeCallIds: active.map((candidate) => String(candidate.callId || '')).filter(Boolean),
-        });
-      }
-      const join = await createLivekitVoiceMonitorJoin({
-        config: LIVEKIT,
-        vsid: attempt.vsid || attempt.callId,
-        roomName: attempt.roomName || '',
-      });
-      return res.json({ ...join, callId: attempt.callId, mode: 'vob-monitor', transport: 'livekit' });
-    } catch (e) {
-      return res.status(502).json({ error: String((e && e.message) || e).slice(0, 300) });
-    }
-  });
-  app.get('/api/voice/vob-test/config/:testId', requireAuth, (req, res) => {
-    const config = vobTestConfigStore && typeof vobTestConfigStore.get === 'function'
-      ? vobTestConfigStore.get(req.params.testId)
-      : null;
-    if (!config) return res.status(404).json({ error: 'VOB test config expired or not found' });
-    return res.json(config);
-  });
   async function synthesizeAdapterSpeech(text) {
     const r = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',

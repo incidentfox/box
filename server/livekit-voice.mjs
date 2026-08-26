@@ -1,5 +1,4 @@
 import { AccessToken, RoomConfiguration } from 'livekit-server-sdk';
-import { randomUUID } from 'node:crypto';
 
 export function voiceAdapterTransport(value = 'livekit') {
   return String(value || 'livekit').trim().toLowerCase() === 'legacy' ? 'legacy' : 'livekit';
@@ -77,22 +76,5 @@ export async function createLivekitVoiceJoin({ config, vsid, metadata = {}, room
   // This project contains unrelated deployments, so keep the explicit named dispatch
   // and two-participant limit instead of relying on automatic agent dispatch.
   token.roomConfig = new RoomConfiguration(livekitRoomOptions({ config, vsid, metadata, roomPrefix: prefix, source }));
-  return { url: config.url, room, identity, token: await token.toJwt(), roomSid: '' };
-}
-
-// A monitor joins an already-running room. It must never publish media/data or
-// attach an agent dispatch, otherwise opening the console could alter the call.
-export async function createLivekitVoiceMonitorJoin({ config, vsid, roomName = '', participantName = 'Box VOB live monitor' } = {}) {
-  if (!livekitConfigured(config)) throw new Error('LiveKit voice runtime is not configured');
-  const room = String(roomName || '').trim() || livekitRoomName(vsid, 'box-voice');
-  if (!room) throw new Error('invalid voice session id');
-  const identity = `monitor-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
-  const token = new AccessToken(config.apiKey, config.apiSecret, {
-    identity,
-    name: String(participantName || 'Box VOB live monitor').slice(0, 120),
-    ttl: '20m',
-    metadata: JSON.stringify({ source: 'box-vob-monitor', room }),
-  });
-  token.addGrant({ roomJoin: true, room, canPublish: false, canSubscribe: true, canPublishData: false });
   return { url: config.url, room, identity, token: await token.toJwt(), roomSid: '' };
 }

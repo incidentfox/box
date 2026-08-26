@@ -71,8 +71,8 @@ try {
   {
     // add a second, unrelated session
     mem.indexSession('vs-psych', [
-      { role: 'user', text: 'Remember to follow up on the Rise4 psychiatry VOB automation demo', ts: clock },
-      { role: 'assistant', text: 'Noted, Rise4 voice VOB for psychiatry.', ts: clock + 1 },
+      { role: 'user', text: 'Remember to follow up on the Rise4 psychiatry automation demo', ts: clock },
+      { role: 'assistant', text: 'Noted, Rise4 voice automation for psychiatry.', ts: clock + 1 },
       { role: 'user', text: 'And the Bay Area Psychiatric Spravato monitoring form', ts: clock + 2 },
     ]);
 
