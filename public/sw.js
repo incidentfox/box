@@ -1,7 +1,7 @@
 // Minimal service worker: makes the app installable + caches the shell so it
 // opens instantly. Network-first for everything; falls back to cache offline.
-const CACHE = 'cc-mobile-v155';
-const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/vob-test.js', '/manifest.webmanifest', '/icons/icon-192.png'];
+const CACHE = 'cc-mobile-v156';
+const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

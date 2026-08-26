@@ -351,7 +351,7 @@ assert.equal(adapterSessionIdFromRows([{ kind: 'assistant', source: 'adapter', a
   // A leading article is dropped after the imperative verb.
   assert.equal(plainLanguageLabel({ title: 'Fix the invoice rounding bug' }), 'invoice rounding bug');
   // Short ALL-CAPS acronyms survive (so the model still spells them), the rest lowercases.
-  assert.equal(plainLanguageLabel({ title: 'Implement VOB automation for Rise4 psychiatry intake' }), 'VOB automation for rise4 psychiatry intake');
+  assert.equal(plainLanguageLabel({ title: 'Implement intake automation for Rise4 psychiatry' }), 'intake automation for rise4 psychiatry');
 }
 
 {
