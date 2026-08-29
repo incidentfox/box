@@ -8,8 +8,9 @@ const now = new Date('2026-08-29T12:00:00Z');
 const defaults = normalizeAutoContinue({});
 assert.equal(defaults.enabled, true, 'task finisher is enabled by default');
 assert.equal(defaults.armed, false, 'old idle sessions are not revived');
-assert.equal(defaults.maxContinuations, 12);
 assert.equal(defaults.message, 'Continue. If done already, run /stop');
+assert.equal(defaults.delayMinutes, undefined, 'there is no idle delay setting');
+assert.equal(defaults.maxContinuations, undefined, 'automatic continuations are unlimited');
 assert.equal(DEFAULT_CONTINUE_MESSAGE, 'Continue. If done already, run /stop');
 assert.equal(taskFinisherStopRequested('/stop'), true);
 assert.equal(taskFinisherStopRequested('Done.\n\n/stop'), true);
@@ -19,16 +20,13 @@ assert.equal(taskFinisherStopRequested('/stopping'), false);
 const armed = armTaskFinisher(defaults, now);
 assert.equal(armed.armed, true);
 assert.equal(armed.continuationCount, 0);
-assert.equal(shouldRunTaskFinisher({ policy: armed, now: new Date('2026-08-29T12:02:59Z') }).due, false);
-assert.equal(shouldRunTaskFinisher({ policy: armed, now: new Date('2026-08-29T12:03:00Z') }).due, true);
+assert.equal(shouldRunTaskFinisher({ policy: armed, now }).due, true, 'completion is checked immediately');
 assert.equal(shouldRunTaskFinisher({ policy: armed, now: new Date('2026-08-29T12:04:00Z'), busy: true }).due, false);
 
-const active = noteTaskFinisherActivity({ ...armed, continuationCount: 2 }, new Date('2026-08-29T12:05:00Z'));
-assert.equal(active.continuationCount, 2, 'automatic continuations do not reset the bound');
+const active = noteTaskFinisherActivity({ ...armed, continuationCount: 10_000 }, new Date('2026-08-29T12:05:00Z'));
+assert.equal(active.continuationCount, 10_000, 'automatic continuations have no configured cap');
 assert.equal(active.lastActivityAt, Date.parse('2026-08-29T12:05:00Z'));
-
-const limited = shouldRunTaskFinisher({ policy: { ...active, maxContinuations: 2 }, now: new Date('2026-08-29T12:10:00Z') });
-assert.equal(limited.terminal, 'limit_reached');
+assert.equal(shouldRunTaskFinisher({ policy: active, now: new Date('2026-08-29T12:05:00Z') }).due, true);
 
 const stopped = stopTaskFinisher(armed, 'complete', 'Requested result delivered', now);
 assert.equal(stopped.armed, false);
@@ -45,7 +43,10 @@ assert.equal(armTaskFinisher(disabled, now).armed, false, 'the next user message
 
 const legacy = normalizeAutoContinue({ enabled: true, start: '05:00', end: '17:00', maxPerWindow: 240 });
 assert.equal(legacy.armed, false, 'legacy nonstop policies remain dormant until a new task');
-assert.equal(legacy.maxContinuations, 50, 'legacy bound is clamped to the new safety limit');
+assert.equal(legacy.maxContinuations, undefined, 'legacy continuation limits are ignored');
+
+const customized = normalizeAutoContinue({ message: 'A verbose old prompt' });
+assert.equal(customized.message, DEFAULT_CONTINUE_MESSAGE, 'the continuation message is fixed and concise');
 
 const wakeups = [
   { id: 'past', at: '2026-08-29T11:00:00Z' },
