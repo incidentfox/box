@@ -1,7 +1,9 @@
 export const DEFAULT_TIME_ZONE = 'America/Los_Angeles';
-export const DEFAULT_CONTINUE_MESSAGE = 'Continue working toward the active goal. Reconcile the current evidence and session state first, then take the next safe in-scope action. Preserve all existing safeguards. If the goal is complete, paused, blocked, needs human input, or has no safe next action, say so explicitly and stop.';
+export const DEFAULT_CONTINUE_MESSAGE = 'Continue. Re-read the user\'s original request and the current session state, then take the next safe in-scope action needed to finish the task. Do not repeat completed work. If the task is complete, genuinely blocked, or needs user input, say so explicitly.';
+export const DEFAULT_FINISHER_DELAY_MINUTES = 3;
+export const DEFAULT_MAX_CONTINUATIONS = 12;
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const TERMINAL_STATES = new Set(['complete', 'blocked', 'needs_input', 'stopped', 'error', 'limit_reached']);
 
 export function validTimeZone(value) {
   if (typeof value !== 'string' || !value.trim()) return false;
@@ -9,72 +11,87 @@ export function validTimeZone(value) {
   catch { return false; }
 }
 
+function boundedInt(value, fallback, min, max) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
+}
+
 export function normalizeAutoContinue(raw = {}) {
-  const timeZone = validTimeZone(raw.timeZone) ? raw.timeZone : DEFAULT_TIME_ZONE;
-  const time = (value, fallback) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || '')) ? String(value) : fallback;
-  const days = Array.isArray(raw.days)
-    ? [...new Set(raw.days.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))]
-    : [1, 2, 3, 4, 5];
+  const enabled = raw.enabled !== false;
+  const armed = enabled && raw.armed === true;
+  const requestedState = String(raw.state || '').trim();
+  const state = armed
+    ? (['watching', 'checking', 'continuing'].includes(requestedState) ? requestedState : 'watching')
+    : (TERMINAL_STATES.has(requestedState) ? requestedState : 'ready');
   return {
-    enabled: !!raw.enabled,
-    timeZone,
-    start: time(raw.start, '05:00'),
-    end: time(raw.end, '17:00'),
-    days: days.length ? days : [1, 2, 3, 4, 5],
-    delayMinutes: Math.max(1, Math.min(60, Number(raw.delayMinutes) || 3)),
-    maxPerWindow: Math.max(1, Math.min(1000, Number(raw.maxPerWindow) || 240)),
+    enabled,
+    armed,
+    state,
+    reason: String(raw.reason || '').trim().slice(0, 300),
+    timeZone: validTimeZone(raw.timeZone) ? raw.timeZone : DEFAULT_TIME_ZONE,
+    delayMinutes: boundedInt(raw.delayMinutes, DEFAULT_FINISHER_DELAY_MINUTES, 1, 60),
+    maxContinuations: boundedInt(raw.maxContinuations ?? raw.maxPerWindow, DEFAULT_MAX_CONTINUATIONS, 1, 50),
+    continuationCount: boundedInt(raw.continuationCount, 0, 0, 50),
     message: String(raw.message || DEFAULT_CONTINUE_MESSAGE).trim().slice(0, 4000) || DEFAULT_CONTINUE_MESSAGE,
+    taskStartedAt: Math.max(0, Number(raw.taskStartedAt) || 0),
+    lastActivityAt: Math.max(0, Number(raw.lastActivityAt) || 0),
+    lastCheckedAt: Math.max(0, Number(raw.lastCheckedAt) || 0),
     lastEnqueuedAt: Math.max(0, Number(raw.lastEnqueuedAt) || 0),
-    windowDate: String(raw.windowDate || ''),
-    windowCount: Math.max(0, Number(raw.windowCount) || 0),
   };
 }
 
-export function zonedClock(now = new Date(), timeZone = DEFAULT_TIME_ZONE) {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
-    timeZone, hour12: false, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  }).formatToParts(now).filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
-  const hour = Number(parts.hour) % 24;
+export function armTaskFinisher(policy = {}, now = new Date()) {
+  const normalized = normalizeAutoContinue(policy);
+  if (!normalized.enabled) return normalized;
+  const at = now.getTime();
   return {
-    day: DAY_NAMES.indexOf(parts.weekday),
-    minute: hour * 60 + Number(parts.minute),
-    date: `${parts.year}-${parts.month}-${parts.day}`,
+    ...normalized,
+    armed: true,
+    state: 'watching',
+    reason: 'Watching this task until it is finished',
+    continuationCount: 0,
+    taskStartedAt: at,
+    lastActivityAt: at,
+    lastCheckedAt: 0,
+    lastEnqueuedAt: 0,
   };
 }
 
-function clockMinute(value) {
-  const [hour, minute] = String(value).split(':').map(Number);
-  return hour * 60 + minute;
+export function noteTaskFinisherActivity(policy = {}, now = new Date()) {
+  const normalized = normalizeAutoContinue(policy);
+  if (!normalized.armed) return normalized;
+  return {
+    ...normalized,
+    state: 'watching',
+    reason: 'Waiting to verify the latest response',
+    lastActivityAt: now.getTime(),
+  };
 }
 
-export function insideAutoContinueWindow(policy, now = new Date()) {
+export function stopTaskFinisher(policy = {}, state = 'stopped', reason = '', now = new Date()) {
   const normalized = normalizeAutoContinue(policy);
-  const clock = zonedClock(now, normalized.timeZone);
-  if (!normalized.days.includes(clock.day)) return { inside: false, clock };
-  const start = clockMinute(normalized.start);
-  const end = clockMinute(normalized.end);
-  const inside = start < end
-    ? clock.minute >= start && clock.minute < end
-    : clock.minute >= start || clock.minute < end;
-  return { inside, clock };
+  const terminalState = TERMINAL_STATES.has(state) ? state : 'stopped';
+  return {
+    ...normalized,
+    armed: false,
+    state: terminalState,
+    reason: String(reason || '').trim().slice(0, 300),
+    lastCheckedAt: now.getTime(),
+  };
 }
 
-export function shouldAutoContinue({ policy, now = new Date(), busy = false, needsInput = false, goalStatus = null } = {}) {
+export function shouldRunTaskFinisher({ policy, now = new Date(), busy = false } = {}) {
   const normalized = normalizeAutoContinue(policy);
-  const { inside, clock } = insideAutoContinueWindow(normalized, now);
-  if (!normalized.enabled || !inside || busy || needsInput) return { due: false, policy: normalized, clock };
-  if (goalStatus && goalStatus !== 'active') return { due: false, policy: normalized, clock };
-  const windowCount = normalized.windowDate === clock.date ? normalized.windowCount : 0;
-  if (windowCount >= normalized.maxPerWindow) return { due: false, policy: normalized, clock };
-  if (normalized.lastEnqueuedAt && now.getTime() - normalized.lastEnqueuedAt < normalized.delayMinutes * 60_000) return { due: false, policy: normalized, clock };
-  return { due: true, policy: { ...normalized, windowDate: clock.date, windowCount }, clock };
+  if (!normalized.enabled || !normalized.armed || busy) return { due: false, policy: normalized };
+  if (normalized.continuationCount >= normalized.maxContinuations) {
+    return { due: false, terminal: 'limit_reached', policy: normalized };
+  }
+  const activityAt = Math.max(normalized.taskStartedAt, normalized.lastActivityAt, normalized.lastEnqueuedAt);
+  if (!activityAt || now.getTime() - activityAt < normalized.delayMinutes * 60_000) return { due: false, policy: normalized };
+  return { due: true, policy: normalized };
 }
 
 export function dueWakeups(wakeups = [], now = new Date()) {
   const nowMs = now.getTime();
   return wakeups.filter((wake) => !wake.firedAt && Number.isFinite(Date.parse(wake.at)) && Date.parse(wake.at) <= nowMs);
-}
-
-export function assistantStopsAutoContinue(text = '') {
-  return /(?:^|\n)\s*(?:blocked\b|needs? (?:your|human|jimmy(?:'s)?) input\b|waiting for (?:your|human|jimmy)\b|(?:cannot|can't) continue without\b|i need you to\b|(?:goal|objective|work) (?:is )?(?:complete|completed)\b)/i.test(String(text));
 }

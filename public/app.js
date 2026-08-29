@@ -4158,7 +4158,7 @@ const BUILTIN_CMDS = {
     { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'schedule', desc: 'Wake this session at a scheduled time', action: 'schedule' },
-    { name: 'autocontinue', desc: 'Keep this session working during business hours', action: 'autocontinue' },
+    { name: 'autocontinue', desc: 'Finish tasks with guarded Continue checks', action: 'autocontinue' },
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
     { name: 'switch', desc: 'Move THIS chat to another Claude account', action: 'switch-account' },
@@ -4176,7 +4176,7 @@ const BUILTIN_CMDS = {
     { name: 'prompts', desc: 'Edit built-in prompts and hooks', action: 'prompts' },
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'schedule', desc: 'Wake this session at a scheduled time', action: 'schedule' },
-    { name: 'autocontinue', desc: 'Keep this session working during business hours', action: 'autocontinue' },
+    { name: 'autocontinue', desc: 'Finish tasks with guarded Continue checks', action: 'autocontinue' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Codex model / reasoning effort', action: 'model' },
     { name: 'permissions', desc: 'Change approval & sandbox mode', action: 'approvals' },
@@ -4477,7 +4477,7 @@ function openStatusSheet() {
     fn: () => continueWithAgent(cur.agent === 'codex' ? 'claude' : 'codex'),
   });
   if (cur.id && cur.agent !== 'codex') rows.push({ ic: '', label: 'Switch account', desc: 'move this chat to another Claude account', fn: () => openAccountSwitch() });
-  if (cur.id) rows.push({ ic: '⏰', label: 'Schedule', desc: 'Wake-ups and business-hours auto-continue', fn: openScheduleSheet });
+  if (cur.id) rows.push({ ic: '⏰', label: 'Schedule', desc: 'Wake-ups and the default-on task finisher', fn: openScheduleSheet });
   openSheet('Status', rows);
 }
 function reviewCurrent() {
@@ -4767,10 +4767,19 @@ function renderSessionModes({ goal = null, schedule = null } = {}) {
 
   const policy = schedule && schedule.autoContinue;
   if (policy && policy.enabled) {
-    const title = `Auto-continue · ${policy.start || '05:00'}–${policy.end || '17:00'}`;
     const cadence = Math.max(1, Number(policy.delayMinutes) || 3);
-    const description = `${modeDaysLabel(policy.days)} ${modeZoneLabel(policy.timeZone)} · every ${cadence}m when idle · sends “${modeText(policy.message)}”`;
-    add('auto', '↻', title, description, openAutoContinueSheet);
+    const stateLabels = {
+      ready: 'On by default', watching: 'Watching', checking: 'Checking completion', continuing: 'Continuing',
+      complete: 'Complete', blocked: 'Blocked', needs_input: 'Needs input', stopped: 'Stopped',
+      error: 'Stopped after error', limit_reached: 'Safety limit reached',
+    };
+    const state = stateLabels[policy.state] || (policy.armed ? 'Watching' : 'On by default');
+    const count = Math.max(0, Number(policy.continuationCount) || 0);
+    const max = Math.max(1, Number(policy.maxContinuations) || 12);
+    const description = policy.armed
+      ? `${count}/${max} continuations · checks after ${cadence}m idle${policy.reason ? ` · ${policy.reason}` : ''}`
+      : (policy.reason || `Arms after each message · checks after ${cadence}m idle`);
+    add('auto', policy.armed ? '↻' : '✓', `Task finisher · ${state}`, description, openAutoContinueSheet);
   }
 
   bar.classList.toggle('hidden', bar.childElementCount === 0);
@@ -4971,9 +4980,19 @@ async function openScheduleSheet() {
   if (!cur.id) return toast('Send one message before scheduling it');
   let data; try { data = await loadSessionSchedule(); } catch (error) { return toast(String(error.message || error)); }
   const pending = (data.wakeups || []).filter((wake) => !wake.firedAt);
+  const finisher = data.autoContinue || {};
+  const finisherCount = Math.max(0, Number(finisher.continuationCount) || 0);
+  const finisherMax = Math.max(1, Number(finisher.maxContinuations) || 12);
   const rows = [
     { ic: '＋', label: 'Schedule a wake-up', desc: 'Send a message to this session at a specific time', fn: openWakeEditor },
-    { ic: data.autoContinue.enabled ? '●' : '○', label: 'Business-hours auto-continue', desc: data.autoContinue.enabled ? `${data.autoContinue.start}–${data.autoContinue.end} · ${data.autoContinue.timeZone}` : 'Off', fn: () => openAutoContinueEditor(data.autoContinue) },
+    {
+      ic: finisher.armed ? '●' : finisher.enabled ? '✓' : '○',
+      label: 'Task finisher',
+      desc: !finisher.enabled ? 'Off' : finisher.armed
+        ? `${finisherCount}/${finisherMax} continuations · ${finisher.reason || 'Watching this task'}`
+        : (finisher.reason || 'On by default · arms after each message'),
+      fn: () => openAutoContinueEditor(finisher),
+    },
   ];
   for (const wake of pending) rows.push({ ic: '⏰', label: new Date(wake.at).toLocaleString(), desc: wake.message, fn: () => openSheet('Cancel this wake-up?', [
     { ic: '×', label: 'Cancel wake-up', desc: new Date(wake.at).toLocaleString(), fn: async () => { const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/wakeups/${encodeURIComponent(wake.id)}`, { method: 'DELETE' }); if (response.ok) await refreshSessionModes(); toast(response.ok ? 'Wake-up canceled' : 'Could not cancel wake-up'); } },
@@ -4983,31 +5002,29 @@ async function openScheduleSheet() {
 }
 
 async function openAutoContinueSheet() {
-  if (!cur.id) return toast('Send one message before enabling auto-continue');
+  if (!cur.id) return toast('Send one message before configuring the task finisher');
   try { const data = await loadSessionSchedule(); openAutoContinueEditor(data.autoContinue); }
   catch (error) { toast(String(error.message || error)); }
 }
 
 function openAutoContinueEditor(policy) {
   policy ||= {};
-  const inner = $('sheetInner'); inner.innerHTML = '<h3>Business-hours auto-continue</h3><p class="sheetText">When this session is idle inside the window, Box re-enqueues a guarded continuation. Paused, completed, blocked, and needs-input Codex goals are left alone.</p>';
-  const enabled = document.createElement('select'); enabled.className = 'sheetInput'; enabled.innerHTML = '<option value="on">Enabled</option><option value="off">Disabled</option>'; enabled.value = policy.enabled ? 'on' : 'off'; inner.appendChild(enabled);
-  const timeRow = document.createElement('div'); timeRow.style.display = 'grid'; timeRow.style.gridTemplateColumns = '1fr 1fr'; timeRow.style.gap = '8px';
-  const start = document.createElement('input'); start.type = 'time'; start.className = 'sheetInput'; start.value = policy.start || '05:00';
-  const end = document.createElement('input'); end.type = 'time'; end.className = 'sheetInput'; end.value = policy.end || '17:00'; timeRow.append(start, end); inner.appendChild(timeRow);
-  const zone = document.createElement('input'); zone.className = 'sheetInput'; zone.value = policy.timeZone || 'America/Los_Angeles'; zone.placeholder = 'America/Los_Angeles'; inner.appendChild(zone);
-  const days = document.createElement('select'); days.className = 'sheetInput'; days.innerHTML = '<option value="weekdays">Monday–Friday</option><option value="daily">Every day</option>'; days.value = Array.isArray(policy.days) && policy.days.includes(0) ? 'daily' : 'weekdays'; inner.appendChild(days);
-  const delay = document.createElement('input'); delay.type = 'number'; delay.min = '1'; delay.max = '60'; delay.className = 'sheetInput'; delay.value = policy.delayMinutes || 3; delay.placeholder = 'Minutes between continuations'; inner.appendChild(delay);
-  const message = document.createElement('textarea'); message.className = 'sheetTextarea'; message.value = policy.message || 'Continue working toward the active goal.'; inner.appendChild(message);
+  const inner = $('sheetInner'); inner.innerHTML = '<h3>Task finisher</h3><p class="sheetText">On by default for each new chat task. After the session is idle, a cheap model decides whether to send one guarded Continue. It stops itself when the task is complete, blocked, waiting for you, canceled, or at the safety limit.</p>';
+  const field = (label, control) => { const wrap = document.createElement('label'); wrap.className = 'sheetField'; wrap.textContent = label; wrap.appendChild(control); inner.appendChild(wrap); };
+  const enabled = document.createElement('select'); enabled.className = 'sheetInput'; enabled.innerHTML = '<option value="on">Enabled</option><option value="off">Disabled</option>'; enabled.value = policy.enabled ? 'on' : 'off'; field('Automatic task finishing', enabled);
+  const delay = document.createElement('input'); delay.type = 'number'; delay.min = '1'; delay.max = '60'; delay.className = 'sheetInput'; delay.value = policy.delayMinutes || 3; field('Idle minutes before checking', delay);
+  const max = document.createElement('input'); max.type = 'number'; max.min = '1'; max.max = '50'; max.className = 'sheetInput'; max.value = policy.maxContinuations || 12; field('Maximum automatic continuations', max);
+  const message = document.createElement('textarea'); message.className = 'sheetTextarea'; message.value = policy.message || 'Continue. Re-read the user\'s original request and the current session state, then take the next safe in-scope action needed to finish the task. Do not repeat completed work. If the task is complete, genuinely blocked, or needs user input, say so explicitly.'; field('Continue message', message);
+  const status = document.createElement('p'); status.className = 'sheetText'; status.textContent = `Current: ${policy.state || 'ready'}${policy.reason ? ` — ${policy.reason}` : ''}`; inner.appendChild(status);
   const error = document.createElement('p'); error.className = 'err sheetErr'; inner.appendChild(error);
-  const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div><div>Save</div><div class="muted" style="font-size:12.5px">Persists across Box restarts and compaction</div></div>';
+  const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div><div>Save</div><div class="muted" style="font-size:12.5px">Enabling also arms it for the current task</div></div>';
   save.onclick = async () => {
     error.textContent = '';
     try {
-      const body = { enabled: enabled.value === 'on', start: start.value, end: end.value, timeZone: zone.value.trim(), days: days.value === 'daily' ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5], delayMinutes: Number(delay.value), message: message.value };
+      const body = { enabled: enabled.value === 'on', arm: enabled.value === 'on', delayMinutes: Number(delay.value), maxContinuations: Number(max.value), message: message.value };
       const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/autocontinue`, { method: 'PUT', body: JSON.stringify(body) });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || 'Save failed'); await refreshSessionModes(); closeSheet(); toast(body.enabled ? 'Business-hours auto-continue enabled' : 'Auto-continue disabled');
+      if (!response.ok) throw new Error(data.error || 'Save failed'); await refreshSessionModes(); closeSheet(); toast(body.enabled ? 'Task finisher armed' : 'Task finisher disabled');
     } catch (e) { error.textContent = String(e.message || e); }
   };
   inner.appendChild(save); showSheet();
