@@ -30,5 +30,9 @@ assert.match(server, /await acquireTurnAdmission\(s, CODEX_RECOVERY_LIMITER, rec
 assert.match(server, /const take = queuedTurnBatchSize\(s\);/);
 assert.match(server, /const batch = s\.queue\.splice\(0, take\);/);
 assert.match(server, /const msg = combineQueued\(batch\.map/);
+assert.match(app, /name: 'stop'.+action: 'stop-autocontinue'/);
+assert.match(app, /JSON\.stringify\(\{ stop: true \}\)/);
+assert.match(server, /if \(raw\.stop === true\)/);
+assert.match(server, /taskFinisherStopRequested\(completedText\)/);
 
 console.log('Codex Stop preserves batching; normal turns are unlimited and recovery stays wakeable');

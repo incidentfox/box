@@ -1,5 +1,5 @@
 export const DEFAULT_TIME_ZONE = 'America/Los_Angeles';
-export const DEFAULT_CONTINUE_MESSAGE = 'Continue. Re-read the user\'s original request and the current session state, then take the next safe in-scope action needed to finish the task. Do not repeat completed work. If the task is complete, genuinely blocked, or needs user input, say so explicitly.';
+export const DEFAULT_CONTINUE_MESSAGE = 'Continue. If done already, run /stop';
 export const DEFAULT_FINISHER_DELAY_MINUTES = 3;
 export const DEFAULT_MAX_CONTINUATIONS = 12;
 
@@ -78,6 +78,10 @@ export function stopTaskFinisher(policy = {}, state = 'stopped', reason = '', no
     reason: String(reason || '').trim().slice(0, 300),
     lastCheckedAt: now.getTime(),
   };
+}
+
+export function taskFinisherStopRequested(text) {
+  return String(text || '').split(/\r?\n/).some((line) => line.trim() === '/stop');
 }
 
 export function shouldRunTaskFinisher({ policy, now = new Date(), busy = false } = {}) {

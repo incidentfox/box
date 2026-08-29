@@ -3673,6 +3673,7 @@ async function handleNativeSlash(text) {
   const args = String(match[2] || '').trim();
   if (name === 'schedule') { openScheduleSheet(); return true; }
   if (name === 'autocontinue') { openAutoContinueSheet(); return true; }
+  if (name === 'stop') { await stopAutoContinue(); return true; }
   if (cur.agent !== 'codex') return false;
   if (name === 'goal') return setGoalFromSlash(args);
   if (name === 'model') { openModelSheet(); return true; }
@@ -3707,7 +3708,6 @@ async function handleNativeSlash(text) {
   if (name === 'review') { reviewCurrent(); return true; }
   if (name === 'logout') { confirmCodexLogout(); return true; }
   if (name === 'ps') { openBackgroundTerminals(); return true; }
-  if (name === 'stop') { confirmStopBackgroundTerminals(); return true; }
   return false;
 }
 async function submit() {
@@ -4159,6 +4159,7 @@ const BUILTIN_CMDS = {
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'schedule', desc: 'Wake this session at a scheduled time', action: 'schedule' },
     { name: 'autocontinue', desc: 'Finish tasks with guarded Continue checks', action: 'autocontinue' },
+    { name: 'stop', desc: 'Stop auto-continue for this task', action: 'stop-autocontinue' },
     { name: 'login', desc: 'Add / switch Claude accounts (pool & failover)', action: 'accounts' },
     { name: 'accounts', desc: 'Manage Claude accounts on the box', action: 'accounts' },
     { name: 'switch', desc: 'Move THIS chat to another Claude account', action: 'switch-account' },
@@ -4177,6 +4178,7 @@ const BUILTIN_CMDS = {
     { name: 'workspace', desc: 'Change this chat workspace', action: 'workspace' },
     { name: 'schedule', desc: 'Wake this session at a scheduled time', action: 'schedule' },
     { name: 'autocontinue', desc: 'Finish tasks with guarded Continue checks', action: 'autocontinue' },
+    { name: 'stop', desc: 'Stop auto-continue for this task', action: 'stop-autocontinue' },
     { name: 'theme', desc: 'Switch Box light/dark appearance', action: 'theme' },
     { name: 'model', desc: 'Switch the Codex model / reasoning effort', action: 'model' },
     { name: 'permissions', desc: 'Change approval & sandbox mode', action: 'approvals' },
@@ -4505,6 +4507,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'workspace') return openChatWorkspaceSheet();
   if (cmd.action === 'schedule') return openScheduleSheet();
   if (cmd.action === 'autocontinue') return openAutoContinueSheet();
+  if (cmd.action === 'stop-autocontinue') return stopAutoContinue();
   if (cmd.action === 'model') return openModelSheet();
   if (cmd.action === 'fast') return toggleCodexFast();
   if (cmd.action === 'personality') return openPersonalitySheet();
@@ -5007,14 +5010,25 @@ async function openAutoContinueSheet() {
   catch (error) { toast(String(error.message || error)); }
 }
 
+async function stopAutoContinue() {
+  if (!cur.id) return toast('No active task finisher to stop');
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(cur.id)}/autocontinue`, { method: 'PUT', body: JSON.stringify({ stop: true }) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Could not stop task finisher');
+    await refreshSessionModes();
+    toast('Task finisher stopped. Your next message will restart it.');
+  } catch (error) { toast(String(error.message || error)); }
+}
+
 function openAutoContinueEditor(policy) {
   policy ||= {};
-  const inner = $('sheetInner'); inner.innerHTML = '<h3>Task finisher</h3><p class="sheetText">On by default for each new chat task. After the session is idle, a cheap model decides whether to send one guarded Continue. It stops itself when the task is complete, blocked, waiting for you, canceled, or at the safety limit.</p>';
+  const inner = $('sheetInner'); inner.innerHTML = '<h3>Task finisher</h3><p class="sheetText">On by default for each new chat task. After the session is idle, a cheap model decides whether to send “Continue. If done already, run /stop”. The agent can use /stop to stop this task; your next normal message arms it again. Turn the toggle off to cancel automatic finishing.</p>';
   const field = (label, control) => { const wrap = document.createElement('label'); wrap.className = 'sheetField'; wrap.textContent = label; wrap.appendChild(control); inner.appendChild(wrap); };
   const enabled = document.createElement('select'); enabled.className = 'sheetInput'; enabled.innerHTML = '<option value="on">Enabled</option><option value="off">Disabled</option>'; enabled.value = policy.enabled ? 'on' : 'off'; field('Automatic task finishing', enabled);
   const delay = document.createElement('input'); delay.type = 'number'; delay.min = '1'; delay.max = '60'; delay.className = 'sheetInput'; delay.value = policy.delayMinutes || 3; field('Idle minutes before checking', delay);
   const max = document.createElement('input'); max.type = 'number'; max.min = '1'; max.max = '50'; max.className = 'sheetInput'; max.value = policy.maxContinuations || 12; field('Maximum automatic continuations', max);
-  const message = document.createElement('textarea'); message.className = 'sheetTextarea'; message.value = policy.message || 'Continue. Re-read the user\'s original request and the current session state, then take the next safe in-scope action needed to finish the task. Do not repeat completed work. If the task is complete, genuinely blocked, or needs user input, say so explicitly.'; field('Continue message', message);
+  const message = document.createElement('textarea'); message.className = 'sheetTextarea'; message.value = policy.message || 'Continue. If done already, run /stop'; field('Continue message', message);
   const status = document.createElement('p'); status.className = 'sheetText'; status.textContent = `Current: ${policy.state || 'ready'}${policy.reason ? ` — ${policy.reason}` : ''}`; inner.appendChild(status);
   const error = document.createElement('p'); error.className = 'err sheetErr'; inner.appendChild(error);
   const save = document.createElement('div'); save.className = 'sheetRow sel'; save.innerHTML = '<span class="ic">✓</span><div><div>Save</div><div class="muted" style="font-size:12.5px">Enabling also arms it for the current task</div></div>';

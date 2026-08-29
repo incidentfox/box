@@ -33,7 +33,8 @@ import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import {
   armTaskFinisher, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
-  noteTaskFinisherActivity, shouldRunTaskFinisher, stopTaskFinisher, validTimeZone,
+  noteTaskFinisherActivity, shouldRunTaskFinisher, stopTaskFinisher, taskFinisherStopRequested,
+  validTimeZone,
 } from './session-scheduler.mjs';
 import { judgeTaskFinisher } from './task-finisher.mjs';
 import {
@@ -3385,7 +3386,9 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   const state = loadSchedules();
   const record = scheduleRecord(state, id, agent);
   const merged = normalizeAutoContinue({ ...record.autoContinue, ...raw });
-  if (raw.enabled === false) {
+  if (raw.stop === true) {
+    record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Stopped by /stop');
+  } else if (raw.enabled === false) {
     record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Disabled by user');
   } else if (raw.arm === true || (!record.autoContinue.enabled && raw.enabled === true)) {
     record.autoContinue = armTaskFinisher(merged);
@@ -5658,13 +5661,14 @@ async function runWorker(s) {
         }
       }
     }
+    const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
+    const completedText = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
     if (typeof msg.onComplete === 'function') {
-      const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
-      const text = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
-      try { msg.onComplete({ text, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
+      try { msg.onComplete({ text: completedText, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
     }
     if (s.sessionId && !s.canceled) {
-      if (msg.taskFinisherArm) armTaskFinisherForSession(s.sessionId);
+      if (taskFinisherStopRequested(completedText)) stopTaskFinisherForSession(s.sessionId, 'stopped', 'Stopped by agent /stop');
+      else if (msg.taskFinisherArm) armTaskFinisherForSession(s.sessionId);
       else if (msg.taskFinisherContinuation) noteTaskFinisherActivityForSession(s.sessionId);
     }
     s.inflight = null;
