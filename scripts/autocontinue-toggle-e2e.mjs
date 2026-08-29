@@ -82,8 +82,16 @@ new WebSocketServer({ server, path: '/ws' }).on('connection', (ws) => {
 });
 
 const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
-const PW_DIR = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
-const { webkit } = createRequire(join(PW_DIR, 'package.json'))('@playwright/test');
+async function loadPlaywright() {
+  try {
+    return await import('@playwright/test');
+  } catch {
+    const playwrightDir = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
+    return createRequire(join(playwrightDir, 'package.json'))('@playwright/test');
+  }
+}
+
+const { webkit } = await loadPlaywright();
 const browser = await webkit.launch();
 const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
 
