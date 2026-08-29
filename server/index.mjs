@@ -31,7 +31,11 @@ import { terminateProcessWithEscalation } from './process-termination.mjs';
 import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
-import { assistantStopsAutoContinue, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue, shouldAutoContinue, validTimeZone } from './session-scheduler.mjs';
+import {
+  armTaskFinisher, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
+  noteTaskFinisherActivity, shouldRunTaskFinisher, stopTaskFinisher, validTimeZone,
+} from './session-scheduler.mjs';
+import { judgeTaskFinisher } from './task-finisher.mjs';
 import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
 } from './codex-rollout-history.mjs';
@@ -3380,17 +3384,43 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   if (raw.timeZone && !validTimeZone(raw.timeZone)) throw new Error('Invalid IANA timezone');
   const state = loadSchedules();
   const record = scheduleRecord(state, id, agent);
-  record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, ...raw });
+  const merged = normalizeAutoContinue({ ...record.autoContinue, ...raw });
+  if (raw.enabled === false) {
+    record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Disabled by user');
+  } else if (raw.arm === true || (!record.autoContinue.enabled && raw.enabled === true)) {
+    record.autoContinue = armTaskFinisher(merged);
+  } else {
+    record.autoContinue = merged;
+  }
   saveSchedules(state);
   return { ok: true, autoContinue: record.autoContinue };
 }));
 app.delete('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent) => {
   const state = loadSchedules();
   const record = scheduleRecord(state, id, agent);
-  record.autoContinue = normalizeAutoContinue({ ...record.autoContinue, enabled: false });
+  record.autoContinue = stopTaskFinisher({ ...record.autoContinue, enabled: false }, 'stopped', 'Disabled by user');
   saveSchedules(state);
   return { ok: true, autoContinue: record.autoContinue };
 }));
+
+function updateTaskFinisher(id, updater) {
+  const agent = scheduledSessionAgent(id);
+  if (!agent) return null;
+  const state = loadSchedules();
+  const record = scheduleRecord(state, id, agent);
+  record.autoContinue = updater(record.autoContinue);
+  saveSchedules(state);
+  return record.autoContinue;
+}
+function armTaskFinisherForSession(id) {
+  return updateTaskFinisher(id, (policy) => armTaskFinisher(policy));
+}
+function noteTaskFinisherActivityForSession(id) {
+  return updateTaskFinisher(id, (policy) => noteTaskFinisherActivity(policy));
+}
+function stopTaskFinisherForSession(id, state = 'stopped', reason = 'Stopped by user') {
+  return updateTaskFinisher(id, (policy) => stopTaskFinisher(policy, state, reason));
+}
 
 // ---- Accounts: pool/switch Claude accounts via an external account broker -----
 // The `/login` dialog wraps the headless OAuth flow (authorize URL → paste code) and an
@@ -3589,6 +3619,7 @@ const OPENAI_KEY = cfg('OPENAI_API_KEY');
 const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).replace(/\/$/, '');
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
 const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
+const BOX_TASK_FINISHER_MODEL = cfg('BOX_TASK_FINISHER_MODEL', 'gpt-5-nano');
 const GEMINI_KEY = cfg('GEMINI_API_KEY') || cfg('GOOGLE_AI_STUDIO_API_KEY') || cfg('GOOGLE_API_KEY');
 const DEEPSEEK_KEY = cfg('DEEPSEEK_API_KEY') || '';
 const AGY_CMD = cfg('AGY_CMD') || (existsSync(join(HOME, '.local', 'bin', 'agy')) ? join(HOME, '.local', 'bin', 'agy') : 'agy');
@@ -5036,28 +5067,27 @@ function enqueue(extKey, msg) {
 }
 
 let scheduleTickRunning = false;
-function scheduledNeedsInput(id, agent, session) {
-  if (session.waitingActive) return true;
-  try {
-    let messages = [];
-    if (agent === 'codex') messages = loadCodexMessages(id, (loadCodex().sessions || {})[id]);
-    else if (agent === 'gemini') messages = ((loadGemini().sessions || {})[id] || {}).messages || [];
-    else if (agent === 'deepseek') messages = ((loadDeepSeek().sessions || {})[id] || {}).messages || [];
-    else if (agent === 'agy') messages = ((loadAgy().sessions || {})[id] || {}).messages || [];
-    else if (agent === 'mac') messages = ((loadMac().sessions || {})[id] || {}).messages || [];
-    else messages = fullSessionHistory(id).messages || [];
-    const last = [...messages].reverse().find((message) => message && message.role === 'assistant');
-    const text = (last && last.parts || []).filter((part) => part && part.t === 'text').map((part) => part.text || '').join('\n').trim();
-    return assistantStopsAutoContinue(text);
-  } catch { return false; }
+function scheduledSessionMessages(id, agent) {
+  if (agent === 'codex') return loadCodexMessages(id, (loadCodex().sessions || {})[id]);
+  if (agent === 'gemini') return ((loadGemini().sessions || {})[id] || {}).messages || [];
+  if (agent === 'deepseek') return ((loadDeepSeek().sessions || {})[id] || {}).messages || [];
+  if (agent === 'agy') return ((loadAgy().sessions || {})[id] || {}).messages || [];
+  if (agent === 'mac') return ((loadMac().sessions || {})[id] || {}).messages || [];
+  return fullSessionHistory(id).messages || [];
+}
+
+function taskFinisherBusy(id, agent, session) {
+  const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
+  return session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || processBusy;
 }
 async function runScheduleTick(now = new Date()) {
   if (scheduleTickRunning) return;
   scheduleTickRunning = true;
   try {
-    const state = loadSchedules();
+    let state = loadSchedules();
     let dirty = false;
-    for (const [id] of Object.entries(state.sessions || {})) {
+    const ids = Object.keys(state.sessions || {});
+    for (const id of ids) {
       // A persisted policy may outlive a deleted transcript. Never recreate a
       // phantom session solely because a stale schedule still names its agent.
       const agent = scheduledSessionAgent(id);
@@ -5074,49 +5104,117 @@ async function runScheduleTick(now = new Date()) {
         wake.firedAt = now.toISOString();
         dirty = true;
       }
+    }
+    if (dirty) saveSchedules(state);
 
-      const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
-      let decision = shouldAutoContinue({
-        policy: record.autoContinue,
-        now,
-        busy: session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || processBusy,
-        needsInput: scheduledNeedsInput(id, agent, session),
-      });
+    for (const id of ids) {
+      const agent = scheduledSessionAgent(id);
+      if (!agent) continue;
+      const session = rt(id);
+      state = loadSchedules();
+      let record = scheduleRecord(state, id, agent);
+      let decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
+      if (decision.terminal) {
+        record.autoContinue = stopTaskFinisher(decision.policy, decision.terminal, 'Automatic continuation safety limit reached', now);
+        saveSchedules(state);
+        continue;
+      }
       if (!decision.due) continue;
+      if (session.waitingActive) {
+        record.autoContinue = stopTaskFinisher(decision.policy, 'needs_input', 'The agent is waiting for user input', now);
+        saveSchedules(state);
+        continue;
+      }
 
-      // Codex goals have an authoritative persisted status. A paused, complete,
-      // or blocked goal must never be prodded by the business-hours watchdog.
+      // Codex goals are authoritative. A paused, complete, or blocked goal must
+      // never be prodded by this independent task finisher.
       let goalStatus = null;
       if (agent === 'codex') {
         try { goalStatus = (await codexRpc('thread/goal/get', { threadId: id })).goal?.status || null; }
         catch {}
-        // The goal lookup crosses a process boundary. Re-check the live queue and
-        // input state afterwards so a user message that arrived during the RPC
-        // cannot race with an automatic continuation.
-        decision = shouldAutoContinue({
-          policy: record.autoContinue,
-          now,
-          goalStatus,
-          busy: session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || codexThreadProcessBusy(id),
-          needsInput: scheduledNeedsInput(id, agent, session),
-        });
+        state = loadSchedules();
+        record = scheduleRecord(state, id, agent);
+        decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
+        if (decision.terminal) {
+          record.autoContinue = stopTaskFinisher(decision.policy, decision.terminal, 'Automatic continuation safety limit reached', now);
+          saveSchedules(state);
+          continue;
+        }
         if (!decision.due) continue;
+        if (goalStatus && goalStatus !== 'active') {
+          const terminal = goalStatus === 'complete' ? 'complete' : goalStatus === 'blocked' ? 'blocked' : 'stopped';
+          record.autoContinue = stopTaskFinisher(decision.policy, terminal, `Codex goal is ${goalStatus}`, now);
+          saveSchedules(state);
+          continue;
+        }
       }
 
-      enqueue(id, {
-        text: decision.policy.message,
-        displayText: '↻ Business-hours auto-continue',
-        mode: 'normal', agent, cwd: session.cwd || undefined,
-      });
+      const taskStartedAt = decision.policy.taskStartedAt;
+      const continuationCount = decision.policy.continuationCount;
       record.autoContinue = {
         ...decision.policy,
-        lastEnqueuedAt: now.getTime(),
-        windowDate: decision.clock.date,
-        windowCount: decision.policy.windowCount + 1,
+        state: 'checking',
+        reason: 'Checking whether this task is finished',
+        lastCheckedAt: now.getTime(),
       };
-      dirty = true;
+      saveSchedules(state);
+
+      let verdict;
+      try {
+        verdict = await judgeTaskFinisher({
+          messages: scheduledSessionMessages(id, agent),
+          apiKey: OPENAI_KEY,
+          endpoint: OPENAI_ENDPOINT,
+          model: BOX_TASK_FINISHER_MODEL,
+        });
+      } catch (error) {
+        state = loadSchedules();
+        record = scheduleRecord(state, id, agent);
+        if (record.autoContinue.armed && record.autoContinue.taskStartedAt === taskStartedAt) {
+          record.autoContinue = stopTaskFinisher(record.autoContinue, 'error', `Completion check failed: ${String(error?.message || error).slice(0, 240)}`, now);
+          saveSchedules(state);
+        }
+        console.warn(`task finisher check failed for ${id}: ${String(error?.message || error)}`);
+        continue;
+      }
+
+      // Model calls cross a process boundary. Re-read durable state so a new user
+      // turn, Stop, archive, or another queued message always wins this race.
+      state = loadSchedules();
+      record = scheduleRecord(state, id, agent);
+      const current = record.autoContinue;
+      if (!current.armed || current.taskStartedAt !== taskStartedAt || current.continuationCount !== continuationCount) continue;
+      if (taskFinisherBusy(id, agent, session)) {
+        record.autoContinue = noteTaskFinisherActivity(current, now);
+        saveSchedules(state);
+        continue;
+      }
+      if (verdict.action !== 'continue') {
+        record.autoContinue = stopTaskFinisher(current, verdict.action, verdict.reason, now);
+        saveSchedules(state);
+        continue;
+      }
+      if (current.continuationCount >= current.maxContinuations) {
+        record.autoContinue = stopTaskFinisher(current, 'limit_reached', 'Automatic continuation safety limit reached', now);
+        saveSchedules(state);
+        continue;
+      }
+      record.autoContinue = {
+        ...current,
+        state: 'continuing',
+        reason: verdict.reason,
+        continuationCount: current.continuationCount + 1,
+        lastCheckedAt: now.getTime(),
+        lastEnqueuedAt: now.getTime(),
+      };
+      saveSchedules(state);
+      enqueue(id, {
+        text: current.message,
+        displayText: '↻ Task finisher · Continue',
+        mode: 'normal', agent, cwd: session.cwd || undefined,
+        taskFinisherContinuation: true,
+      });
     }
-    if (dirty) saveSchedules(state);
   } finally {
     scheduleTickRunning = false;
   }
@@ -5196,10 +5294,11 @@ function runVoiceAdapterTurn({ key, sessionId = '', text, agent = 'claude', cwd 
   // Codex CLI turns are atomic.  To accept a caller barge-in, end the current
   // process and place the new instruction directly behind it in the SAME queue.
   // The next resume retains its thread/tool context; it never creates a new chat.
-  if (busy && interrupt) cancelCurrent(s.key);
+  if (busy && interrupt) cancelCurrent(s.key, { stopFinisher: false });
   return new Promise((resolve) => {
     enqueue(s.key, {
       text, displayText: text, mode: 'normal', agent, cwd, title, voiceOnly: true, onStart, onSession, onText,
+      taskFinisherArm: true,
       // A Codex turn can emit a progress note followed by its final answer.
       // The Box chat retains both, but the voice bridge must speak only the
       // final substantive agent message.
@@ -5230,6 +5329,7 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
     parentId: body.parentId || null,
     parentTitle: body.parentTitle || '',
     force: !!body.force,
+    taskFinisherArm: body.mode !== 'bash',
   });
   res.json({ ok: true, key, qid, agent, cwd, title });
 });
@@ -5238,7 +5338,10 @@ function dequeue(extKey, qid) {
   const idx = s.queue.findIndex((q) => q.qid === qid);
   if (idx >= 0) {
     const removedHead = idx === 0;
-    s.queue.splice(idx, 1);
+    const [removed] = s.queue.splice(idx, 1);
+    if (removed?.taskFinisherContinuation && s.sessionId) {
+      stopTaskFinisherForSession(s.sessionId, 'stopped', 'Automatic continuation canceled by user');
+    }
     if (removedHead) interruptWorkerAdmission(s);
     persist(s);
     bcast(s, { type: 'queue', queue: queueView(s) });
@@ -5249,6 +5352,9 @@ function cancelQueued(extKey, qid) {
   const removedHead = s.queue[0]?.qid === qid;
   const result = cancelQueuedMessage(s.queue, qid);
   if (!result.undo) return;
+  if (result.undo.message?.taskFinisherContinuation && s.sessionId) {
+    stopTaskFinisherForSession(s.sessionId, 'stopped', 'Automatic continuation canceled by user');
+  }
   s.queue = result.queue;
   if (removedHead) interruptWorkerAdmission(s);
   s.queueUndo.set(qid, result.undo);
@@ -5268,6 +5374,7 @@ function undoQueuedCancel(extKey, qid) {
   s.queueUndo.delete(qid);
   if (!result.restored) { bcast(s, { type: 'queue_undo_expired', qid }); return; }
   s.queue = result.queue;
+  if (undo?.message?.taskFinisherContinuation && s.sessionId) armTaskFinisherForSession(s.sessionId);
   persist(s);
   bcast(s, { type: 'queue', queue: queueView(s) });
   bcast(s, { type: 'queue_restored', qid });
@@ -5276,8 +5383,9 @@ function undoQueuedCancel(extKey, qid) {
   // message when the previous worker disappeared before clearing s.running.
   kickWorker(s);
 }
-function cancelCurrent(extKey) {
+function cancelCurrent(extKey, { stopFinisher = true } = {}) {
   const s = rt(extKey); s.canceled = true;
+  if (stopFinisher && s.sessionId) stopTaskFinisherForSession(s.sessionId, 'stopped', 'Stopped by user');
   const canceledAdmission = cancelWaitingTurnAdmission(s);
   if (canceledAdmission) {
     persist(s);
@@ -5421,6 +5529,8 @@ function combineQueued(batch) {
     parentId: batch.find((m) => m.parentId)?.parentId || batch[0].parentId || null,
     parentTitle: batch.find((m) => m.parentTitle)?.parentTitle || batch[0].parentTitle || '',
     title: batch.find((m) => m.title)?.title || batch[0].title || '',
+    taskFinisherArm: batch.some((m) => m.taskFinisherArm),
+    taskFinisherContinuation: batch.some((m) => m.taskFinisherContinuation),
   };
 }
 
@@ -5552,6 +5662,10 @@ async function runWorker(s) {
       const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
       const text = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
       try { msg.onComplete({ text, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
+    }
+    if (s.sessionId && !s.canceled) {
+      if (msg.taskFinisherArm) armTaskFinisherForSession(s.sessionId);
+      else if (msg.taskFinisherContinuation) noteTaskFinisherActivityForSession(s.sessionId);
     }
     s.inflight = null;
     persist(s);
@@ -6474,6 +6588,7 @@ wss.on('connection', (ws) => {
         // Who sent THIS turn, as opposed to who owns the session — bash mode is refused
         // per-turn, so a guest can't shell out through a chat the owner started.
         byGuest: isGuest,
+        taskFinisherArm: (m.mode || 'normal') !== 'bash',
         // A guest's turn runs inside a folder the team has been admitted to, no matter what
         // cwd the client asks for; the clamp is here on the server, never in the UI. Since
         // sharing a chat admits its folder, this normally leaves a shared chat exactly where
