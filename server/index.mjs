@@ -3385,17 +3385,21 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   if (raw.timeZone && !validTimeZone(raw.timeZone)) throw new Error('Invalid IANA timezone');
   const state = loadSchedules();
   const record = scheduleRecord(state, id, agent);
-  const merged = normalizeAutoContinue({ ...record.autoContinue, ...raw });
-  if (raw.stop === true) {
+  const requested = raw.toggle === true
+    ? { ...raw, enabled: !record.autoContinue.enabled, arm: !record.autoContinue.enabled }
+    : raw;
+  const merged = normalizeAutoContinue({ ...record.autoContinue, ...requested });
+  if (requested.stop === true) {
     record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Stopped by /stop');
-  } else if (raw.enabled === false) {
+  } else if (requested.enabled === false) {
     record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Disabled by user');
-  } else if (raw.arm === true || (!record.autoContinue.enabled && raw.enabled === true)) {
+  } else if (requested.arm === true || (!record.autoContinue.enabled && requested.enabled === true)) {
     record.autoContinue = armTaskFinisher(merged);
   } else {
     record.autoContinue = merged;
   }
   saveSchedules(state);
+  if (record.autoContinue.armed) requestScheduleTick();
   return { ok: true, autoContinue: record.autoContinue };
 }));
 app.delete('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent) => {
@@ -5070,6 +5074,20 @@ function enqueue(extKey, msg) {
 }
 
 let scheduleTickRunning = false;
+let scheduleTickQueued = false;
+let scheduleTickAgain = false;
+function requestScheduleTick() {
+  if (scheduleTickRunning) {
+    scheduleTickAgain = true;
+    return;
+  }
+  if (scheduleTickQueued) return;
+  scheduleTickQueued = true;
+  setImmediate(() => {
+    scheduleTickQueued = false;
+    runScheduleTick().catch((error) => console.warn(`schedule tick failed: ${String(error?.message || error)}`));
+  });
+}
 function scheduledSessionMessages(id, agent) {
   if (agent === 'codex') return loadCodexMessages(id, (loadCodex().sessions || {})[id]);
   if (agent === 'gemini') return ((loadGemini().sessions || {})[id] || {}).messages || [];
@@ -5117,11 +5135,6 @@ async function runScheduleTick(now = new Date()) {
       state = loadSchedules();
       let record = scheduleRecord(state, id, agent);
       let decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
-      if (decision.terminal) {
-        record.autoContinue = stopTaskFinisher(decision.policy, decision.terminal, 'Automatic continuation safety limit reached', now);
-        saveSchedules(state);
-        continue;
-      }
       if (!decision.due) continue;
       if (session.waitingActive) {
         record.autoContinue = stopTaskFinisher(decision.policy, 'needs_input', 'The agent is waiting for user input', now);
@@ -5138,11 +5151,6 @@ async function runScheduleTick(now = new Date()) {
         state = loadSchedules();
         record = scheduleRecord(state, id, agent);
         decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
-        if (decision.terminal) {
-          record.autoContinue = stopTaskFinisher(decision.policy, decision.terminal, 'Automatic continuation safety limit reached', now);
-          saveSchedules(state);
-          continue;
-        }
         if (!decision.due) continue;
         if (goalStatus && goalStatus !== 'active') {
           const terminal = goalStatus === 'complete' ? 'complete' : goalStatus === 'blocked' ? 'blocked' : 'stopped';
@@ -5197,11 +5205,6 @@ async function runScheduleTick(now = new Date()) {
         saveSchedules(state);
         continue;
       }
-      if (current.continuationCount >= current.maxContinuations) {
-        record.autoContinue = stopTaskFinisher(current, 'limit_reached', 'Automatic continuation safety limit reached', now);
-        saveSchedules(state);
-        continue;
-      }
       record.autoContinue = {
         ...current,
         state: 'continuing',
@@ -5220,9 +5223,13 @@ async function runScheduleTick(now = new Date()) {
     }
   } finally {
     scheduleTickRunning = false;
+    if (scheduleTickAgain) {
+      scheduleTickAgain = false;
+      requestScheduleTick();
+    }
   }
 }
-setTimeout(() => runScheduleTick().catch(() => {}), 1500).unref?.();
+requestScheduleTick();
 setInterval(() => runScheduleTick().catch(() => {}), 30_000).unref?.();
 
 // `lastActivityAt` is only advanced by live tail events, and the tail runs ONLY while someone
@@ -5676,6 +5683,7 @@ async function runWorker(s) {
     bcast(s, { type: 'queue', queue: queueView(s) });
   }
   s.running = false; s.curText = ''; s.curParts = []; s.curUser = ''; s.curUserImages = []; s.curAuthor = null; s.lastActivityAt = 0; s.activityLabel = ''; if (s.sessionId) deleteRunning(s.sessionId); bcast(s, { type: 'idle' });
+  if (s.sessionId) requestScheduleTick();
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
 // Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
@@ -5834,6 +5842,7 @@ function runCodexTurn(s, msg, resolve) {
       ownedProc.once('close', () => {
         if (s.codexGoalProc === ownedProc) s.codexGoalProc = null;
         if (s.queue.length) setTimeout(() => runWorker(s), 0);
+        else requestScheduleTick();
       });
     }
     // Finalize the streamed assistant row (same ordered {text|tool} shape Claude history

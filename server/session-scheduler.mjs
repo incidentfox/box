@@ -1,9 +1,7 @@
 export const DEFAULT_TIME_ZONE = 'America/Los_Angeles';
 export const DEFAULT_CONTINUE_MESSAGE = 'Continue. If done already, run /stop';
-export const DEFAULT_FINISHER_DELAY_MINUTES = 3;
-export const DEFAULT_MAX_CONTINUATIONS = 12;
 
-const TERMINAL_STATES = new Set(['complete', 'blocked', 'needs_input', 'stopped', 'error', 'limit_reached']);
+const TERMINAL_STATES = new Set(['complete', 'blocked', 'needs_input', 'stopped', 'error']);
 
 export function validTimeZone(value) {
   if (typeof value !== 'string' || !value.trim()) return false;
@@ -11,9 +9,9 @@ export function validTimeZone(value) {
   catch { return false; }
 }
 
-function boundedInt(value, fallback, min, max) {
+function nonNegativeInt(value, fallback = 0) {
   const number = Number(value);
-  return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : fallback;
 }
 
 export function normalizeAutoContinue(raw = {}) {
@@ -29,10 +27,8 @@ export function normalizeAutoContinue(raw = {}) {
     state,
     reason: String(raw.reason || '').trim().slice(0, 300),
     timeZone: validTimeZone(raw.timeZone) ? raw.timeZone : DEFAULT_TIME_ZONE,
-    delayMinutes: boundedInt(raw.delayMinutes, DEFAULT_FINISHER_DELAY_MINUTES, 1, 60),
-    maxContinuations: boundedInt(raw.maxContinuations ?? raw.maxPerWindow, DEFAULT_MAX_CONTINUATIONS, 1, 50),
-    continuationCount: boundedInt(raw.continuationCount, 0, 0, 50),
-    message: String(raw.message || DEFAULT_CONTINUE_MESSAGE).trim().slice(0, 4000) || DEFAULT_CONTINUE_MESSAGE,
+    continuationCount: nonNegativeInt(raw.continuationCount),
+    message: DEFAULT_CONTINUE_MESSAGE,
     taskStartedAt: Math.max(0, Number(raw.taskStartedAt) || 0),
     lastActivityAt: Math.max(0, Number(raw.lastActivityAt) || 0),
     lastCheckedAt: Math.max(0, Number(raw.lastCheckedAt) || 0),
@@ -87,11 +83,6 @@ export function taskFinisherStopRequested(text) {
 export function shouldRunTaskFinisher({ policy, now = new Date(), busy = false } = {}) {
   const normalized = normalizeAutoContinue(policy);
   if (!normalized.enabled || !normalized.armed || busy) return { due: false, policy: normalized };
-  if (normalized.continuationCount >= normalized.maxContinuations) {
-    return { due: false, terminal: 'limit_reached', policy: normalized };
-  }
-  const activityAt = Math.max(normalized.taskStartedAt, normalized.lastActivityAt, normalized.lastEnqueuedAt);
-  if (!activityAt || now.getTime() - activityAt < normalized.delayMinutes * 60_000) return { due: false, policy: normalized };
   return { due: true, policy: normalized };
 }
 

@@ -31,8 +31,14 @@ assert.match(server, /const take = queuedTurnBatchSize\(s\);/);
 assert.match(server, /const batch = s\.queue\.splice\(0, take\);/);
 assert.match(server, /const msg = combineQueued\(batch\.map/);
 assert.match(app, /name: 'stop'.+action: 'stop-autocontinue'/);
+assert.match(app, /name: 'autocontinue'.+desc: 'Toggle automatic task finishing'/);
+assert.match(app, /if \(name === 'autocontinue'\) \{ await toggleAutoContinue\(\)/);
+assert.match(app, /JSON\.stringify\(\{ toggle: true \}\)/);
+assert.doesNotMatch(app, /openAutoContinueEditor|Idle minutes before checking|Maximum automatic continuations/);
 assert.match(app, /JSON\.stringify\(\{ stop: true \}\)/);
-assert.match(server, /if \(raw\.stop === true\)/);
+assert.match(server, /if \(requested\.stop === true\)/);
 assert.match(server, /taskFinisherStopRequested\(completedText\)/);
+assert.match(server, /if \(s\.sessionId\) requestScheduleTick\(\);/);
+assert.doesNotMatch(server, /Automatic continuation safety limit reached|current\.maxContinuations/);
 
 console.log('Codex Stop preserves batching; normal turns are unlimited and recovery stays wakeable');
