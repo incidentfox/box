@@ -29,7 +29,9 @@ export function taskFinisherReminder(sessionId, stopCommand = 'bash ~/stop.sh') 
   return `This is an automated message. Continue. If done already, run the command \`${stopCommand} ${shellQuote(sessionId)}\` to stop future automated continuation reminders and prevent going in a loop.`;
 }
 
-export function ensureTaskFinisherStopScript({ home, stateDir }) {
+export function ensureTaskFinisherStopScript({
+  home, stateDir, commandPath = '~/stop.sh', preserveExisting = true, shared = false,
+}) {
   const fallbackDir = join(stateDir, 'autocontinue-bin');
   const fallbackPath = join(fallbackDir, 'stop.sh');
   const homePath = join(home, 'stop.sh');
@@ -39,7 +41,7 @@ ${MANAGED_SENTINEL}
 set -eu
 session_id="\${1:-}"
 if [ -z "$session_id" ]; then
-  echo "Usage: bash ~/stop.sh <session-id>" >&2
+  echo "Usage: bash ${commandPath} <session-id>" >&2
   exit 2
 fi
 marker_dir=${shellQuote(markerDir)}
@@ -50,19 +52,28 @@ umask 077
 printf 'Automatic continuation reminders stopped for session %s.\n' "$session_id"
 `;
 
-  mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
-  writeFileSync(fallbackPath, script, { mode: 0o700 });
-  chmodSync(fallbackPath, 0o700);
+  const dirMode = shared ? 0o2770 : 0o700;
+  const fileMode = shared ? 0o750 : 0o700;
+  mkdirSync(home, { recursive: true, mode: dirMode });
+  if (shared) chmodSync(home, dirMode);
+  mkdirSync(markerDir, { recursive: true, mode: dirMode });
+  mkdirSync(fallbackDir, { recursive: true, mode: dirMode });
+  if (shared) {
+    chmodSync(markerDir, dirMode);
+    chmodSync(fallbackDir, dirMode);
+  }
+  writeFileSync(fallbackPath, script, { mode: fileMode });
+  chmodSync(fallbackPath, fileMode);
 
-  let homeManaged = !existsSync(homePath);
+  let homeManaged = !preserveExisting || !existsSync(homePath);
   if (!homeManaged) {
     try { homeManaged = readFileSync(homePath, 'utf8').includes(MANAGED_SENTINEL); }
     catch { homeManaged = false; }
   }
   if (homeManaged) {
-    writeFileSync(homePath, script, { mode: 0o700 });
-    chmodSync(homePath, 0o700);
-    return 'bash ~/stop.sh';
+    writeFileSync(homePath, script, { mode: fileMode });
+    chmodSync(homePath, fileMode);
+    return `bash ${commandPath}`;
   }
   return 'bash ~/.cc-mobile/autocontinue-bin/stop.sh';
 }

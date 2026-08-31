@@ -34,6 +34,19 @@ try {
   const fallback = ensureTaskFinisherStopScript({ home, stateDir });
   assert.equal(fallback, 'bash ~/.cc-mobile/autocontinue-bin/stop.sh');
   assert.equal(readFileSync(join(home, 'stop.sh'), 'utf8'), '#!/bin/sh\necho user-owned\n');
+
+  const teamRuntime = join(root, 'team', '.box-runtime');
+  const teamCommand = ensureTaskFinisherStopScript({
+    home: teamRuntime,
+    stateDir: teamRuntime,
+    commandPath: '/workspace/.box-runtime/stop.sh',
+    preserveExisting: false,
+    shared: true,
+  });
+  assert.equal(teamCommand, 'bash /workspace/.box-runtime/stop.sh');
+  const teamStopped = spawnSync('bash', [join(teamRuntime, 'stop.sh'), sessionId], { encoding: 'utf8' });
+  assert.equal(teamStopped.status, 0, teamStopped.stderr);
+  assert.equal(taskFinisherStopped(teamRuntime, sessionId), true);
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

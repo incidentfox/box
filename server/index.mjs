@@ -146,6 +146,14 @@ function findSessionFile(id) {
 const STATE_DIR = join(HOME, '.cc-mobile');
 mkdirSync(STATE_DIR, { recursive: true });
 const TASK_FINISHER_STOP_COMMAND = ensureTaskFinisherStopScript({ home: HOME, stateDir: STATE_DIR });
+const TEAM_TASK_FINISHER_STATE_DIR = join(team.ensureWorkspace(), '.box-runtime');
+const TEAM_TASK_FINISHER_STOP_COMMAND = ensureTaskFinisherStopScript({
+  home: TEAM_TASK_FINISHER_STATE_DIR,
+  stateDir: TEAM_TASK_FINISHER_STATE_DIR,
+  commandPath: '/workspace/.box-runtime/stop.sh',
+  preserveExisting: false,
+  shared: true,
+});
 const NAMES_FILE = join(STATE_DIR, 'names.json');
 const SCHEDULES_FILE = join(STATE_DIR, 'session-schedules.json');
 const UPLOAD_DIR = join(STATE_DIR, 'uploads');
@@ -3397,7 +3405,7 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   } else if (requested.enabled === false) {
     record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Disabled by user');
   } else if (requested.arm === true || (!record.autoContinue.enabled && requested.enabled === true)) {
-    clearTaskFinisherStop(STATE_DIR, id);
+    clearTaskFinisherStops(id);
     record.autoContinue = armTaskFinisher(merged);
   } else {
     record.autoContinue = merged;
@@ -3423,8 +3431,20 @@ function updateTaskFinisher(id, updater) {
   saveSchedules(state);
   return record.autoContinue;
 }
+function taskFinisherStateDirs(id, session = rt(id)) {
+  return sessionUsesTeamSandbox(session) ? [STATE_DIR, TEAM_TASK_FINISHER_STATE_DIR] : [STATE_DIR];
+}
+function taskFinisherWasStopped(id, session = rt(id)) {
+  return taskFinisherStateDirs(id, session).some((stateDir) => taskFinisherStopped(stateDir, id));
+}
+function clearTaskFinisherStops(id, session = rt(id)) {
+  for (const stateDir of taskFinisherStateDirs(id, session)) clearTaskFinisherStop(stateDir, id);
+}
+function taskFinisherStopCommand(session) {
+  return sessionUsesTeamSandbox(session) ? TEAM_TASK_FINISHER_STOP_COMMAND : TASK_FINISHER_STOP_COMMAND;
+}
 function armTaskFinisherForSession(id) {
-  clearTaskFinisherStop(STATE_DIR, id);
+  clearTaskFinisherStops(id);
   return updateTaskFinisher(id, (policy) => armTaskFinisher(policy));
 }
 function noteTaskFinisherActivityForSession(id) {
@@ -5131,8 +5151,8 @@ async function runScheduleTick(now = new Date()) {
       let record = scheduleRecord(state, id, agent);
       let decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
       if (!decision.due) continue;
-      if (taskFinisherStopped(STATE_DIR, id)) {
-        record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by ~/stop.sh', now);
+      if (taskFinisherWasStopped(id, session)) {
+        record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by the session stop command', now);
         saveSchedules(state);
         continue;
       }
@@ -5152,8 +5172,8 @@ async function runScheduleTick(now = new Date()) {
         record = scheduleRecord(state, id, agent);
         decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
         if (!decision.due) continue;
-        if (taskFinisherStopped(STATE_DIR, id)) {
-          record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by ~/stop.sh', now);
+        if (taskFinisherWasStopped(id, session)) {
+          record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by the session stop command', now);
           saveSchedules(state);
           continue;
         }
@@ -5173,8 +5193,8 @@ async function runScheduleTick(now = new Date()) {
       record = scheduleRecord(state, id, agent);
       const current = record.autoContinue;
       if (!current.armed || current.taskStartedAt !== taskStartedAt || current.continuationCount !== continuationCount) continue;
-      if (taskFinisherStopped(STATE_DIR, id)) {
-        record.autoContinue = stopTaskFinisher(current, 'stopped', 'Stopped by ~/stop.sh', now);
+      if (taskFinisherWasStopped(id, session)) {
+        record.autoContinue = stopTaskFinisher(current, 'stopped', 'Stopped by the session stop command', now);
         saveSchedules(state);
         continue;
       }
@@ -5193,7 +5213,7 @@ async function runScheduleTick(now = new Date()) {
       };
       saveSchedules(state);
       enqueue(id, {
-        text: taskFinisherReminder(id, TASK_FINISHER_STOP_COMMAND),
+        text: taskFinisherReminder(id, taskFinisherStopCommand(session)),
         displayText: '↻ Automatic continuation reminder',
         mode: 'normal', agent, cwd: session.cwd || undefined,
         taskFinisherContinuation: true,
