@@ -1,5 +1,5 @@
 export const DEFAULT_TIME_ZONE = 'America/Los_Angeles';
-export const DEFAULT_CONTINUE_MESSAGE = 'Continue. If done already, run /stop';
+export const DEFAULT_CONTINUE_MESSAGE = 'This is an automated message. Continue. If done already, run the command `bash ~/stop.sh` to stop future automated continuation reminders and prevent going in a loop.';
 
 const TERMINAL_STATES = new Set(['complete', 'blocked', 'needs_input', 'stopped', 'error']);
 

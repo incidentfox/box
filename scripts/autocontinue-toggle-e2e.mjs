@@ -100,14 +100,14 @@ try {
   await page.goto(`http://127.0.0.1:${port}/sessions/${SID}`, { waitUntil: 'networkidle' });
   const finisher = page.locator('.sessionMode.auto');
   await finisher.waitFor();
-  if (!(await finisher.innerText()).includes('checks immediately after each response')) throw new Error('immediate-check copy is missing');
+  if (!(await finisher.innerText()).includes('sends immediately after each response')) throw new Error('immediate-send copy is missing');
 
   await finisher.click();
   await page.waitForFunction(() => document.querySelector('.sessionMode.auto')?.innerText.includes('Tap to turn on'));
   if (await page.locator('#sheet').isVisible()) throw new Error('task finisher toggle opened a configuration sheet');
 
   await finisher.click();
-  await page.waitForFunction(() => document.querySelector('.sessionMode.auto')?.innerText.includes('checks immediately after each response'));
+  await page.waitForFunction(() => document.querySelector('.sessionMode.auto')?.innerText.includes('sends immediately after each response'));
   if (toggleRequests !== 2 || !enabled) throw new Error(`unexpected toggle state: requests=${toggleRequests} enabled=${enabled}`);
 
   if (process.env.BOX_E2E_SCREENSHOT) await page.screenshot({ path: process.env.BOX_E2E_SCREENSHOT, fullPage: true });

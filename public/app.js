@@ -4780,8 +4780,8 @@ function renderSessionModes({ goal = null, schedule = null } = {}) {
     const description = !policy.enabled
       ? 'Tap to turn on'
       : policy.armed
-        ? `${count} continuation${count === 1 ? '' : 's'} · checks immediately after each response${policy.reason ? ` · ${policy.reason}` : ''}`
-        : (policy.reason || 'Arms after each message · checks immediately');
+        ? `${count} continuation${count === 1 ? '' : 's'} · sends immediately after each response${policy.reason ? ` · ${policy.reason}` : ''}`
+        : (policy.reason || 'Arms after each message · sends immediately');
     add('auto', policy.armed ? '↻' : policy.enabled ? '✓' : '○', `Task finisher · ${state}`, description, toggleAutoContinue);
   }
 
@@ -4991,7 +4991,7 @@ async function openScheduleSheet() {
       ic: finisher.armed ? '●' : finisher.enabled ? '✓' : '○',
       label: 'Task finisher',
       desc: !finisher.enabled ? 'Off' : finisher.armed
-        ? `${finisherCount} continuation${finisherCount === 1 ? '' : 's'} · checks immediately after each response`
+        ? `${finisherCount} continuation${finisherCount === 1 ? '' : 's'} · sends immediately after each response`
         : (finisher.reason || 'On by default · arms after each message'),
       fn: toggleAutoContinue,
     },
