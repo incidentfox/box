@@ -36,7 +36,9 @@ import {
   noteTaskFinisherActivity, shouldRunTaskFinisher, stopTaskFinisher, taskFinisherStopRequested,
   validTimeZone,
 } from './session-scheduler.mjs';
-import { judgeTaskFinisher } from './task-finisher.mjs';
+import {
+  clearTaskFinisherStop, ensureTaskFinisherStopScript, taskFinisherReminder, taskFinisherStopped,
+} from './task-finisher-stop.mjs';
 import {
   codexRolloutHistory, codexRolloutMeta, codexRolloutState, tailCodexRollout,
 } from './codex-rollout-history.mjs';
@@ -143,6 +145,15 @@ function findSessionFile(id) {
 }
 const STATE_DIR = join(HOME, '.cc-mobile');
 mkdirSync(STATE_DIR, { recursive: true });
+const TASK_FINISHER_STOP_COMMAND = ensureTaskFinisherStopScript({ home: HOME, stateDir: STATE_DIR });
+const TEAM_TASK_FINISHER_STATE_DIR = join(team.ensureWorkspace(), '.box-runtime');
+const TEAM_TASK_FINISHER_STOP_COMMAND = ensureTaskFinisherStopScript({
+  home: TEAM_TASK_FINISHER_STATE_DIR,
+  stateDir: TEAM_TASK_FINISHER_STATE_DIR,
+  commandPath: '/workspace/.box-runtime/stop.sh',
+  preserveExisting: false,
+  shared: true,
+});
 const NAMES_FILE = join(STATE_DIR, 'names.json');
 const SCHEDULES_FILE = join(STATE_DIR, 'session-schedules.json');
 const UPLOAD_DIR = join(STATE_DIR, 'uploads');
@@ -3394,6 +3405,7 @@ app.put('/api/sessions/:id/autocontinue', ...scheduleRoute((id, agent, req) => {
   } else if (requested.enabled === false) {
     record.autoContinue = stopTaskFinisher(merged, 'stopped', 'Disabled by user');
   } else if (requested.arm === true || (!record.autoContinue.enabled && requested.enabled === true)) {
+    clearTaskFinisherStops(id);
     record.autoContinue = armTaskFinisher(merged);
   } else {
     record.autoContinue = merged;
@@ -3419,7 +3431,20 @@ function updateTaskFinisher(id, updater) {
   saveSchedules(state);
   return record.autoContinue;
 }
+function taskFinisherStateDirs(id, session = rt(id)) {
+  return sessionUsesTeamSandbox(session) ? [STATE_DIR, TEAM_TASK_FINISHER_STATE_DIR] : [STATE_DIR];
+}
+function taskFinisherWasStopped(id, session = rt(id)) {
+  return taskFinisherStateDirs(id, session).some((stateDir) => taskFinisherStopped(stateDir, id));
+}
+function clearTaskFinisherStops(id, session = rt(id)) {
+  for (const stateDir of taskFinisherStateDirs(id, session)) clearTaskFinisherStop(stateDir, id);
+}
+function taskFinisherStopCommand(session) {
+  return sessionUsesTeamSandbox(session) ? TEAM_TASK_FINISHER_STOP_COMMAND : TASK_FINISHER_STOP_COMMAND;
+}
 function armTaskFinisherForSession(id) {
+  clearTaskFinisherStops(id);
   return updateTaskFinisher(id, (policy) => armTaskFinisher(policy));
 }
 function noteTaskFinisherActivityForSession(id) {
@@ -3626,7 +3651,6 @@ const OPENAI_KEY = cfg('OPENAI_API_KEY');
 const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).replace(/\/$/, '');
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
 const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
-const BOX_TASK_FINISHER_MODEL = cfg('BOX_TASK_FINISHER_MODEL', 'gpt-5-nano');
 const GEMINI_KEY = cfg('GEMINI_API_KEY') || cfg('GOOGLE_AI_STUDIO_API_KEY') || cfg('GOOGLE_API_KEY');
 const DEEPSEEK_KEY = cfg('DEEPSEEK_API_KEY') || '';
 const AGY_CMD = cfg('AGY_CMD') || (existsSync(join(HOME, '.local', 'bin', 'agy')) ? join(HOME, '.local', 'bin', 'agy') : 'agy');
@@ -5088,15 +5112,6 @@ function requestScheduleTick() {
     runScheduleTick().catch((error) => console.warn(`schedule tick failed: ${String(error?.message || error)}`));
   });
 }
-function scheduledSessionMessages(id, agent) {
-  if (agent === 'codex') return loadCodexMessages(id, (loadCodex().sessions || {})[id]);
-  if (agent === 'gemini') return ((loadGemini().sessions || {})[id] || {}).messages || [];
-  if (agent === 'deepseek') return ((loadDeepSeek().sessions || {})[id] || {}).messages || [];
-  if (agent === 'agy') return ((loadAgy().sessions || {})[id] || {}).messages || [];
-  if (agent === 'mac') return ((loadMac().sessions || {})[id] || {}).messages || [];
-  return fullSessionHistory(id).messages || [];
-}
-
 function taskFinisherBusy(id, agent, session) {
   const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
   return session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || processBusy;
@@ -5136,6 +5151,11 @@ async function runScheduleTick(now = new Date()) {
       let record = scheduleRecord(state, id, agent);
       let decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
       if (!decision.due) continue;
+      if (taskFinisherWasStopped(id, session)) {
+        record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by the session stop command', now);
+        saveSchedules(state);
+        continue;
+      }
       if (session.waitingActive) {
         record.autoContinue = stopTaskFinisher(decision.policy, 'needs_input', 'The agent is waiting for user input', now);
         saveSchedules(state);
@@ -5152,6 +5172,11 @@ async function runScheduleTick(now = new Date()) {
         record = scheduleRecord(state, id, agent);
         decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
         if (!decision.due) continue;
+        if (taskFinisherWasStopped(id, session)) {
+          record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by the session stop command', now);
+          saveSchedules(state);
+          continue;
+        }
         if (goalStatus && goalStatus !== 'active') {
           const terminal = goalStatus === 'complete' ? 'complete' : goalStatus === 'blocked' ? 'blocked' : 'stopped';
           record.autoContinue = stopTaskFinisher(decision.policy, terminal, `Codex goal is ${goalStatus}`, now);
@@ -5162,61 +5187,34 @@ async function runScheduleTick(now = new Date()) {
 
       const taskStartedAt = decision.policy.taskStartedAt;
       const continuationCount = decision.policy.continuationCount;
-      record.autoContinue = {
-        ...decision.policy,
-        state: 'checking',
-        reason: 'Checking whether this task is finished',
-        lastCheckedAt: now.getTime(),
-      };
-      saveSchedules(state);
-
-      let verdict;
-      try {
-        verdict = await judgeTaskFinisher({
-          messages: scheduledSessionMessages(id, agent),
-          apiKey: OPENAI_KEY,
-          endpoint: OPENAI_ENDPOINT,
-          model: BOX_TASK_FINISHER_MODEL,
-        });
-      } catch (error) {
-        state = loadSchedules();
-        record = scheduleRecord(state, id, agent);
-        if (record.autoContinue.armed && record.autoContinue.taskStartedAt === taskStartedAt) {
-          record.autoContinue = stopTaskFinisher(record.autoContinue, 'error', `Completion check failed: ${String(error?.message || error).slice(0, 240)}`, now);
-          saveSchedules(state);
-        }
-        console.warn(`task finisher check failed for ${id}: ${String(error?.message || error)}`);
-        continue;
-      }
-
-      // Model calls cross a process boundary. Re-read durable state so a new user
-      // turn, Stop, archive, or another queued message always wins this race.
+      // Re-read durable state after the Codex goal check so a new user turn, Stop,
+      // archive, or another queued message always wins this race.
       state = loadSchedules();
       record = scheduleRecord(state, id, agent);
       const current = record.autoContinue;
       if (!current.armed || current.taskStartedAt !== taskStartedAt || current.continuationCount !== continuationCount) continue;
-      if (taskFinisherBusy(id, agent, session)) {
-        record.autoContinue = noteTaskFinisherActivity(current, now);
+      if (taskFinisherWasStopped(id, session)) {
+        record.autoContinue = stopTaskFinisher(current, 'stopped', 'Stopped by the session stop command', now);
         saveSchedules(state);
         continue;
       }
-      if (verdict.action !== 'continue') {
-        record.autoContinue = stopTaskFinisher(current, verdict.action, verdict.reason, now);
+      if (taskFinisherBusy(id, agent, session)) {
+        record.autoContinue = noteTaskFinisherActivity(current, now);
         saveSchedules(state);
         continue;
       }
       record.autoContinue = {
         ...current,
         state: 'continuing',
-        reason: verdict.reason,
+        reason: 'Sent an automatic continuation reminder',
         continuationCount: current.continuationCount + 1,
         lastCheckedAt: now.getTime(),
         lastEnqueuedAt: now.getTime(),
       };
       saveSchedules(state);
       enqueue(id, {
-        text: current.message,
-        displayText: '↻ Task finisher · Continue',
+        text: taskFinisherReminder(id, taskFinisherStopCommand(session)),
+        displayText: '↻ Automatic continuation reminder',
         mode: 'normal', agent, cwd: session.cwd || undefined,
         taskFinisherContinuation: true,
       });

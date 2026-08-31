@@ -38,6 +38,10 @@ assert.doesNotMatch(app, /openAutoContinueEditor|Idle minutes before checking|Ma
 assert.match(app, /JSON\.stringify\(\{ stop: true \}\)/);
 assert.match(server, /if \(requested\.stop === true\)/);
 assert.match(server, /taskFinisherStopRequested\(completedText\)/);
+assert.match(server, /taskFinisherStateDirs\(id, session\)\.some\(\(stateDir\) => taskFinisherStopped\(stateDir, id\)\)/);
+assert.match(server, /sessionUsesTeamSandbox\(session\) \? TEAM_TASK_FINISHER_STOP_COMMAND : TASK_FINISHER_STOP_COMMAND/);
+assert.match(server, /text: taskFinisherReminder\(id, taskFinisherStopCommand\(session\)\)/);
+assert.doesNotMatch(server, /judgeTaskFinisher|BOX_TASK_FINISHER_MODEL/);
 assert.match(server, /if \(s\.sessionId\) requestScheduleTick\(\);/);
 assert.doesNotMatch(server, /Automatic continuation safety limit reached|current\.maxContinuations/);
 
