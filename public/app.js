@@ -4603,7 +4603,7 @@ const CLAUDE_MODELS = [
   { id: 'claude-opus-5[1m]', label: 'Opus 5 · 1M', desc: 'Default — explicit 1M context' },
   { id: 'opus', label: 'Opus 4.8', desc: 'Previous Opus' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
-  { id: 'fable', label: 'Fable 5', desc: 'Fast, fewer check-ins (heavier usage)' },
+  { id: 'fable', label: 'Fable 5.1', desc: 'Fast, fewer check-ins (heavier usage)' },
 ];
 const CLAUDE_EFFORTS = [
   { id: 'low', label: 'Low' },
