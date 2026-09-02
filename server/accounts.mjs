@@ -17,6 +17,23 @@ const ACCTS_DIR = path.join(HOME, '.cc-accounts');
 const PENDING_FILE = path.join(ACCTS_DIR, 'pending-oauth.json');
 const PENDING_TTL_MS = 15 * 60 * 1000;
 
+const normalizedEmail = (email) => String(email || '').trim().toLowerCase();
+
+// The Add account form is also the natural recovery path when Claude says an OAuth
+// token expired. If the completed login belongs to an account already known by the
+// broker, refresh that account's credential in place. Otherwise the newly chosen name
+// creates a duplicate config dir while every existing session remains pinned to the
+// expired account. Prefer the primary account when stale duplicates already exist.
+export function existingOAuthAccountForEmail(accounts, email) {
+  const wanted = normalizedEmail(email);
+  if (!wanted) return null;
+  const matches = (accounts || []).filter((account) =>
+    account?.type === 'oauth'
+      && account.configDir
+      && normalizedEmail(account.email) === wanted);
+  return matches.find((account) => account.primary) || matches[0] || null;
+}
+
 export const brokerInstalled = () => fs.existsSync(BROKER);
 
 async function broker(args) {
@@ -71,7 +88,6 @@ export async function listAccounts() {
 export async function startOAuth({ id, label, email }) {
   const accountId = sanitizeId(id);
   const dir = dirForId(accountId);
-  prepareDir(dir);
   const { verifier, challenge } = genPkce();
   const state = genState();
   const url = buildAuthUrl({ challenge, state, loginHint: email });
@@ -92,13 +108,18 @@ export async function completeOAuth({ flowId, code }) {
   const profile = await fetchProfile(tok.access_token);
   const subscriptionType = subscriptionFromProfile(profile);
   const email = profile?.account?.email || tok.account?.email_address || null;
+  const current = await listAccounts();
+  const existing = existingOAuthAccountForEmail(current.accounts, email);
+  const target = existing
+    ? { id: existing.id, label: existing.label || existing.id, dir: existing.configDir }
+    : f;
 
-  fs.mkdirSync(f.dir, { recursive: true });
-  fs.writeFileSync(path.join(f.dir, '.credentials.json'), JSON.stringify(credentialsJson(tok, subscriptionType)), { mode: 0o600 });
+  prepareDir(target.dir);
+  fs.writeFileSync(path.join(target.dir, '.credentials.json'), JSON.stringify(credentialsJson(tok, subscriptionType)), { mode: 0o600 });
 
-  await broker(['register', f.id, '--dir', f.dir, '--label', f.label, '--type', 'oauth', ...(email ? ['--email', email] : [])]);
+  await broker(['register', target.id, '--dir', target.dir, '--label', target.label, '--type', 'oauth', ...(email ? ['--email', email] : [])]);
   delete p[flowId]; savePending(p);
-  return { ok: true, id: f.id, email, subscriptionType };
+  return { ok: true, id: target.id, email, subscriptionType, reauthenticated: !!existing };
 }
 
 export async function saveApiKey({ id, label, apiKey }) {

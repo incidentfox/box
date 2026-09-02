@@ -6539,7 +6539,8 @@ function renderAddAccount() {
       const j = await (await api('/api/accounts/oauth/complete', { method: 'POST', body: JSON.stringify({ flowId, code }) })).json();
       if (j.error) return toast(j.error);
       const sub = j.subscriptionType ? j.subscriptionType.toUpperCase() : 'plan unknown';
-      toast(`Logged in${j.email ? ' as ' + j.email : ''} · ${sub}`);
+      const action = j.reauthenticated ? 'Re-authenticated' : 'Logged in';
+      toast(`${action}${j.email ? ' as ' + j.email : ''} · ${sub}`);
       if (j.subscriptionType && j.subscriptionType !== 'max') setTimeout(() => toast('Heads up: not a Max plan'), 1500);
       renderAccountsList();
     } catch { toast('Login failed'); }
