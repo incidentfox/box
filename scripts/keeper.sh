@@ -109,6 +109,7 @@ start_server() {
     # A child helper OOM must not tear down the healthy Node server. If Node itself is
     # killed, its main process still exits and the keeper starts a fresh generation.
     if systemd-run --user --collect --unit="$unit" --working-directory="$APP_DIR" \
+      --setenv=CC_BROKER_JS="${CC_BROKER_JS:-}" \
       --property=Type=exec \
       --property=KillMode=control-group \
       --property=OOMPolicy=continue \
