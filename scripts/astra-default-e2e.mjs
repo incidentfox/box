@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,13 +56,8 @@ let browser;
 try {
   await waitForServer(baseUrl, child);
   const playwrightDir = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
-  const { chromium } = createRequire(join(playwrightDir, 'package.json'))('@playwright/test');
-  const browserExecutable = process.env.BOX_BROWSER_EXECUTABLE
-    || (existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' : undefined);
-  browser = await chromium.launch({
-    headless: true,
-    ...(browserExecutable ? { executablePath: browserExecutable } : {}),
-  });
+  const { webkit } = createRequire(join(playwrightDir, 'package.json'))('@playwright/test');
+  browser = await webkit.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
   await page.locator('#tokenInput').fill(TOKEN);
