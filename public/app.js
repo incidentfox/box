@@ -58,11 +58,11 @@ function onTeamAccessLost() {
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-sol', reasoningEffort: 'high', sandbox: 'off', serviceTier: '', personality: '' },
+  codex: { model: 'gpt-6-astra', reasoningEffort: 'high', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },
   agy: { model: '' },
-  mac: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
+  mac: { model: 'gpt-6-astra', reasoningEffort: 'medium' },
   claude: { model: 'claude-opus-5[1m]', effort: 'xhigh' },
 };
 const AGENT_META = {
@@ -77,7 +77,7 @@ const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) =
 const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, deepseek: 65536, agy: 1000000, mac: 258400 };
 function defaultContextWindow(agent) {
   const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
-  if ((agent === 'codex' || agent === 'mac') && (!model || model.startsWith('gpt-5.6'))) return 1050000;
+  if ((agent === 'codex' || agent === 'mac') && (!model || model === 'gpt-6-astra' || model.startsWith('gpt-5.6'))) return 1050000;
   if (agent === 'claude') return /\[1m\]$/.test(model) ? 1000000 : 200000;
   return DEFAULT_CONTEXT_WINDOW[agent];
 }
@@ -4545,6 +4545,7 @@ function renderSuggest(items) {
 }
 
 const CODEX_MODELS = [
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra', desc: 'Most capable GPT-6 model' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'Strongest GPT-5.6 model' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'Everyday workhorse' },
   { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', desc: 'Fast high-volume work' },
@@ -4583,14 +4584,14 @@ const CODEX_EFFORTS = [
   { id: 'max', label: 'Max', desc: 'Maximum reasoning depth' },
   { id: 'ultra', label: 'Ultra', desc: 'Maximum reasoning + automatic task delegation' },
 ];
-// Mirrors `supported_reasoning_levels` in Codex's own ~/.codex/models_cache.json: only the
-// GPT-5.6 family goes past xhigh, and `ultra` is Sol/Terra only. This used to be inverted —
+// Mirrors the model capabilities Codex accepts: Astra supports through Max, while the
+// GPT-5.6 family goes past xhigh and `ultra` is Sol/Terra only. This used to be inverted —
 // it hid Max on 5.6 (where it works) and offered it on 5.5/5.4 (where it does not), so a
 // chat on Max showed NO effort selected and older models could be sent an effort they
 // reject. Codex takes whatever we pass, so the picker has to match the model.
 const codexEffortsForModel = (model) => {
   const m = String(model || '');
-  const deepest = !m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max');
+  const deepest = m === 'gpt-6-astra' ? 'max' : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
   return CODEX_EFFORTS.slice(0, CODEX_EFFORTS.findIndex((e) => e.id === deepest) + 1);
 };
 // Switching models can strand an effort the new model doesn't take (Sol on Ultra → 5.5).

@@ -19,6 +19,7 @@ const ids = (model) => Array.from(ctx.efforts(model), (e) => e.id);
 // Expected values are Codex's own `supported_reasoning_levels` (~/.codex/models_cache.json).
 // If Codex adds a level or a model, update BOTH this table and codexEffortsForModel.
 test('effort list matches what each model actually supports', () => {
+  assert.deepEqual(ids('gpt-6-astra'), ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.deepEqual(ids('gpt-5.6-sol'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   assert.deepEqual(ids('gpt-5.6-terra'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   assert.deepEqual(ids('gpt-5.6-luna'), ['low', 'medium', 'high', 'xhigh', 'max']);
@@ -27,8 +28,8 @@ test('effort list matches what each model actually supports', () => {
   }
 });
 
-test('Max stays selectable on 5.6 — the regression that hid it', () => {
-  for (const m of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+test('Max stays selectable on Astra and 5.6 — the regression that hid it', () => {
+  for (const m of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
     assert.ok(ids(m).includes('max'), `${m} must offer Max`);
   }
   assert.ok(!ids('gpt-5.5').includes('max'), '5.5 must not offer Max');
@@ -41,6 +42,7 @@ test('an unknown or empty model falls back to the universally-safe list', () => 
 });
 
 test('switching models clamps a stranded effort to the deepest supported', () => {
+  assert.equal(ctx.clamp('gpt-6-astra', 'ultra'), 'max');
   assert.equal(ctx.clamp('gpt-5.5', 'ultra'), 'xhigh');
   assert.equal(ctx.clamp('gpt-5.5', 'max'), 'xhigh');
   assert.equal(ctx.clamp('gpt-5.6-luna', 'ultra'), 'max');
@@ -48,4 +50,10 @@ test('switching models clamps a stranded effort to the deepest supported', () =>
   assert.equal(ctx.clamp('gpt-5.6-sol', 'ultra'), 'ultra');
   assert.equal(ctx.clamp('gpt-5.6-luna', 'max'), 'max');
   assert.equal(ctx.clamp('gpt-5.5', 'high'), 'high');
+});
+
+test('Astra is the default and first Codex picker option', () => {
+  assert.match(app, /codex: \{ model: 'gpt-6-astra', reasoningEffort: 'high'/);
+  assert.match(app, /mac: \{ model: 'gpt-6-astra', reasoningEffort: 'medium'/);
+  assert.ok(app.indexOf("{ id: 'gpt-6-astra'") < app.indexOf("{ id: 'gpt-5.6-sol'"));
 });
