@@ -34,6 +34,15 @@ async function waitForServer(baseUrl, child) {
   throw new Error('Timed out waiting for isolated Box server');
 }
 
+async function loadPlaywright() {
+  try {
+    return await import('@playwright/test');
+  } catch {
+    const playwrightDir = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
+    return createRequire(join(playwrightDir, 'package.json'))('@playwright/test');
+  }
+}
+
 const tempHome = mkdtempSync(join(tmpdir(), 'box-astra-e2e-'));
 const port = await reservePort();
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -55,8 +64,7 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
 let browser;
 try {
   await waitForServer(baseUrl, child);
-  const playwrightDir = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
-  const { webkit } = createRequire(join(playwrightDir, 'package.json'))('@playwright/test');
+  const { webkit } = await loadPlaywright();
   browser = await webkit.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
