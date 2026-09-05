@@ -139,7 +139,10 @@ export class CodexExecEngine {
     // Team sandboxes carry their own explicit Codex configuration. Only owner/guest turns inherit
     // the host's global sessiongrep MCP entry and need the Box-specific override.
     const extraConfig = team ? [] : buildOwnerCodexConfigArgs();
-    const args = buildCodexArgs({ sessionId, cwd, prompt, images, settings, extraConfig });
+    // Linux limits each argv entry to ~128 KiB. Feed large owner prompts through
+    // Codex's stdin mode; Team stdin is reserved for the sandbox environment.
+    const promptOnStdin = !team && Buffer.byteLength(prompt || '', 'utf8') >= 64 * 1024;
+    const args = buildCodexArgs({ sessionId, cwd, prompt: promptOnStdin ? '-' : prompt, images, settings, extraConfig });
 
     // Optionally source an env file before codex (set CODEX_ENV_FILE). Owner turns then
     // discard metered API credentials so Codex uses the current file-backed login.
@@ -151,10 +154,17 @@ export class CodexExecEngine {
     const child = this.spawnImpl(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,
-      stdio: [launch.envInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      stdio: [launch.envInput || promptOnStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
-    if (launch.envInput) child.stdin.end(launch.envInput);
+    if (launch.envInput || promptOnStdin) {
+      // A child that exits before consuming its input must fail only this turn.
+      child.stdin.on('error', (error) => {
+        terminateCodexProcess(child, 'SIGTERM');
+        child.emit('error', error);
+      });
+      child.stdin.end(promptOnStdin ? prompt : launch.envInput);
+    }
     child.killTree = (signal = 'SIGTERM') => terminateCodexProcess(child, signal);
 
     const rl = createInterface({ input: child.stdout });

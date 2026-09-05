@@ -5873,6 +5873,7 @@ function runCodexTurn(s, msg, resolve) {
     if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
     finish({ timedOut: true });
   }, CODEX_TURN_TIMEOUT_MS);
+  try {
   s.proc = codexEngine.run({
     sessionId: s.sessionId,
     cwd: s.cwd,
@@ -5965,8 +5966,16 @@ function runCodexTurn(s, msg, resolve) {
       }
     },
   });
-s.proc.on('close', () => finish());
+  s.proc.on('close', () => finish());
   s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
+  } catch (error) {
+    // spawn can throw synchronously (E2BIG, invalid cwd/config). Contain startup
+    // failures so one queued turn cannot crash the server and recovery loop.
+    lastError = cleanCodexError(error && error.message || error);
+    s.lastTurnError = lastError;
+    bcast(s, { type: 'error', msg: lastError });
+    finish();
+  }
 }
 // Team Claude is intentionally separate from the owner’s remote-control Claude path:
 // it always goes through the Unix/bwrap launcher and retains its Team-only transcript.
