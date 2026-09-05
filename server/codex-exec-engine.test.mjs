@@ -4,6 +4,10 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import {
   buildCodexArgs,
   buildOwnerCodexConfigArgs,
@@ -190,6 +194,58 @@ assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_m
   const child = { pid: 9876, kill: () => { calls.push(['fallback']); return true; } };
   assert.equal(terminateCodexProcess(child, 'SIGKILL', { platform: 'linux', killImpl: (...args) => calls.push(args) }), true);
   assert.deepEqual(calls, [[-9876, 'SIGKILL']], 'POSIX termination targets the whole process group');
+}
+
+// Exercise a real OS pipe with a multibyte prompt larger than Linux's argv limit,
+// for both new and resumed turns with attachments. Never invoke a paid model.
+for (const sessionId of [undefined, 'test-resumed-session']) {
+  const prompt = '測試🙂\n'.repeat(20000);
+  const events = [];
+  const engine = new CodexExecEngine({ spawnImpl: (_command, args, options) => {
+    assert.ok(!args.includes(prompt));
+    assert.ok(args.indexOf('-') < args.indexOf('-i'));
+    if (sessionId) assert.ok(args.indexOf(sessionId) < args.indexOf('-'));
+    assert.equal(options.stdio[0], 'pipe');
+    return spawn(process.execPath, ['-e', `
+      const chunks = [];
+      process.stdin.on('data', chunk => chunks.push(chunk));
+      process.stdin.on('end', () => console.log(JSON.stringify({
+        type: 'item.completed', item: { type: 'agent_message',
+          text: require('node:crypto').createHash('sha256').update(Buffer.concat(chunks)).digest('hex') }
+      })));
+    `], { ...options, cwd: process.cwd() });
+  } });
+  const child = engine.run({ sessionId, prompt, images: ['/test.png'], onEvent: event => events.push(event) });
+  await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', code => code === 0 ? resolve() : reject(new Error(`exit ${code}`))); });
+  assert.equal(events.find(event => event.type === 'text')?.delta, createHash('sha256').update(prompt).digest('hex'));
+}
+
+// Execute the actual server turn handler with a failing launcher. Synchronous
+// spawn failures must resolve the worker and clear its timer instead of escaping.
+{
+  const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
+  const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
+  const events = [];
+  const notes = [];
+  const context = {
+    CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
+    setTimeout, clearTimeout, sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
+    stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
+    codexEngine: { run() { throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' }); } },
+    cleanCodexError: String, codexAssistantParts: () => [], flushCodexAssistant() {},
+    appendCodexMessage: (...args) => notes.push(args), ensureTail() {}, triggerAttentionUpdate() {},
+    bcast: (_session, event) => events.push(event),
+  };
+  vm.createContext(context);
+  vm.runInContext(handler, context);
+  const session = { sessionId: 'test-existing', cwd: '/tmp', curParts: [] };
+  let resolved = 0;
+  context.runCodexTurn(session, { text: 'test', qid: 'test-qid' }, () => resolved++);
+  assert.equal(resolved, 1);
+  assert.equal(session.proc, null);
+  assert.equal(session.lastTurnError, 'spawn E2BIG');
+  assert.deepEqual(events.map(event => event.type), ['error', 'done']);
+  assert.ok(notes[0][2].includes('spawn E2BIG'));
 }
 
 console.log('✅ codex-exec-engine.test.mjs passed');
