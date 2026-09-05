@@ -165,6 +165,7 @@ respawns it):
 | `CC_WORKSPACE` | Install-time fallback for the default directory new chats open in. You can override this later in the app's Settings sheet. |
 | `OWNER_NAME` | Your name, used in the per-session morning brief. |
 | `TUNNEL_MODE` | `quick` (free random URL, default), `named` (your domain), or `none`. |
+| `EXPLABS_API_KEY` / `EXPLABS_API_KEY_FILE` | Enable owner-only Experiential chats with GPT-6 Astra. The file option points at a private env file containing `EXPLABS_API_KEY`. Requires the Codex CLI. |
 | `BOX_SESSIONGREP_MCP` | Set to `on` only to opt Box Codex turns into the global sessiongrep MCP; Box disables it by default because its built-in search is bounded and avoids one helper per turn. |
 | `ELEVENLABS_API_KEY` / `DEEPGRAM_API_KEY` | Enable voice input (optional). Set either or both; `STT_ENGINE` picks which leads. |
 | `STT_ENGINE` | `eleven` (default — best accuracy, the only one that transcribes Mandarin) or `deepgram` (~3x faster, English only in practice). |
@@ -176,6 +177,12 @@ respawns it):
 | `SLACK_COOKIE` / `SLACK_COOKIE_D` | Optional Slack web-session `d` cookie for an extracted `xoxc-...` `SLACK_USER_TOKEN`. Prefer a real OAuth user token when available; this fallback expires with the browser session. |
 | `SLACK_CHANNELS` | Optional comma-separated Slack channel names/ids to scope recent-message context, e.g. `#ops,C1234567890`. |
 | `DREAM_LOG` | Surface decisions from an external scheduled-agent / issue-filing loop (optional). |
+
+To use Experiential, configure its key, restart Box, then choose **+ → Experiential**.
+These chats use GPT-6 Astra with Low, Medium, High (default), or Max reasoning, and retain
+their own conversation history. Each launch configures the Experiential Responses provider
+without changing your global Codex configuration. Provider quota or account activation
+errors appear in the chat; resolve them on Experiential's Credits page before retrying.
 
 When an integration isn't configured, its UI hides itself — Box stays a clean chat app.
 Runtime defaults that are safe to change live, including default workspace, default agent,
