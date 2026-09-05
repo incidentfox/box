@@ -35,8 +35,69 @@ assert.equal(codexGeneratedImage({ type: 'image_generation_end', status: 'pendin
 assert.equal(codexGeneratedImage({ type: 'image_generation_end', status: 'completed', saved_path: 'relative.png' }), null);
 assert.equal(codexGeneratedImage({ type: 'image_generation_end', status: 'completed', saved_path: '/tmp/generated/not-image.txt' }), null);
 
+const responseMessage = (role, text, phase = '', timestamp = '2026-09-05T07:00:00Z') => ({
+  timestamp, type: 'response_item', payload: { type: 'message', role, phase,
+    content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] },
+});
+const modernRows = [
+  responseMessage('developer', 'private developer instructions'),
+  responseMessage('user', '# AGENTS.md instructions for /tmp/private'),
+  responseMessage('user', '<environment_context>private environment</environment_context>'),
+  responseMessage('user', 'Show the Astra conversation'),
+  responseMessage('assistant', 'private reasoning', 'analysis'),
+  { type: 'response_item', payload: { type: 'agent_message', author: 'private agent', content: [{ type: 'input_text', text: 'private delegation' }] } },
+  responseMessage('assistant', 'Checking the transcript.', 'commentary'),
+  { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'modern-tool', arguments: '{"cmd":"echo verified"}' } },
+  { type: 'response_item', payload: { type: 'function_call_output', call_id: 'modern-tool', output: 'verified' } },
+  responseMessage('assistant', 'Astra messages are visible again.', 'final_answer'),
+];
+const modernRaw = modernRows.map(JSON.stringify).join('\n');
+const modernMessages = parseCodexRollout(modernRaw);
+assert.deepEqual(modernMessages.map((m) => m.role), ['user', 'assistant']);
+assert.deepEqual(modernMessages[1].parts.map((p) => p.text || p.result), ['Checking the transcript.', 'verified', 'Astra messages are visible again.']);
+assert.ok(!JSON.stringify(modernMessages).includes('private'));
+assert.deepEqual(modernRows.flatMap((r) => parseCodexLiveEntry(r)).map((e) => e.kind), ['user', 'text', 'tool', 'tool_result', 'text', 'turn_end']);
+for (const emptyFinal of [responseMessage('assistant', '', 'final_answer'),
+  { type: 'event_msg', payload: { type: 'agent_message', message: '', phase: 'final_answer' } }]) {
+  assert.deepEqual(parseCodexLiveEntry(emptyFinal).map((e) => e.kind), ['turn_end']);
+  assert.deepEqual(parseCodexRollout(JSON.stringify(emptyFinal)), []);
+}
+
+// Legacy mirrors occur in both orders. User attachment metadata lives on the event.
+const mirroredRows = [
+  responseMessage('user', 'Repeat'),
+  { timestamp: '2026-09-05T07:00:00.005Z', type: 'event_msg', payload: { type: 'user_message', message: 'Repeat', local_images: ['/tmp/example.png'] } },
+  { timestamp: '2026-09-05T07:00:00Z', type: 'event_msg', payload: { type: 'agent_message', message: 'Done', phase: 'final_answer' } },
+  responseMessage('assistant', 'Done', 'final_answer'),
+  responseMessage('user', 'Repeat', '', '2026-09-05T07:01:00Z'),
+  responseMessage('assistant', 'Done', 'final_answer', '2026-09-05T07:01:01Z'),
+];
+const mirrored = parseCodexRollout(mirroredRows.map(JSON.stringify).join('\n'));
+assert.deepEqual(mirrored.map((m) => m.role), ['user', 'assistant', 'user', 'assistant']);
+assert.equal(mirrored[0].parts[1].path, '/tmp/example.png');
+assert.equal(mirrored[1].parts.length, 1);
+const liveState = {};
+assert.deepEqual(mirroredRows.flatMap((r) => parseCodexLiveEntry(r, liveState)).map((e) => e.kind), ['user', 'text', 'turn_end', 'user', 'text', 'turn_end']);
+
 const root = mkdtempSync(join(tmpdir(), 'box-codex-rollout-'));
 try {
+  const modernFile = join(root, 'rollout-modern.jsonl');
+  writeFileSync(modernFile, JSON.stringify({ type: 'session_meta', payload: { id: 'modern', cwd: '/tmp' } }) + '\n' + modernRaw + '\n');
+  assert.deepEqual((await codexRolloutHistory(modernFile)).messages, modernMessages);
+  assert.equal(codexRolloutMeta(modernFile).opening, 'Show the Astra conversation');
+  assert.equal(codexRolloutState(modernFile).busy, false);
+  assert.equal(codexRolloutState(modernFile).preview, 'Astra messages are visible again.');
+  const modernLive = [];
+  const stopModern = tailCodexRollout(modernFile, (event) => modernLive.push(event));
+  try {
+    appendFileSync(modernFile, JSON.stringify(responseMessage('user', 'Live Astra prompt')) + '\n');
+    assert.equal(codexRolloutState(modernFile).busy, true);
+    appendFileSync(modernFile, JSON.stringify(responseMessage('assistant', 'Live Astra answer', 'final_answer')) + '\n');
+    appendFileSync(modernFile, JSON.stringify({ timestamp: '2026-09-05T07:00:00Z', type: 'event_msg', payload: { type: 'agent_message', message: 'Live Astra answer', phase: 'final_answer' } }) + '\n');
+    for (let i = 0; i < 50 && modernLive.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(modernLive.map((event) => event.kind), ['user', 'text', 'turn_end']);
+    assert.equal(codexRolloutState(modernFile).busy, false);
+  } finally { stopModern(); }
   const file = join(root, 'rollout-test.jsonl');
   const diskRows = [
     { timestamp: '2026-07-17T16:59:59Z', type: 'session_meta', payload: { id: 'thread-1', cwd: '/tmp/work', timestamp: '2026-07-17T16:59:59Z' } },
