@@ -16,6 +16,48 @@ const textOutput = (value) => {
   return value == null ? '' : JSON.stringify(value);
 };
 
+// Recent Codex versions persist visible text as response_item/message without the
+// older event_msg mirror. Normalize both formats, excluding injected/private context.
+function conversationMessage(row) {
+  const p = row?.payload || {};
+  let role, text;
+  if (row?.type === 'event_msg' && ['user_message', 'agent_message'].includes(p.type)) {
+    role = p.type === 'user_message' ? 'user' : 'assistant';
+    text = String(p.message || '').trim();
+  } else if (row?.type === 'response_item' && p.type === 'message'
+    && ['user', 'assistant'].includes(p.role)) {
+    role = p.role;
+    if (['analysis', 'summary'].includes(p.channel || p.phase)
+      || (p.recipient && p.recipient !== 'all')) return null;
+    text = (Array.isArray(p.content) ? p.content : [])
+      .filter((part) => ['input_text', 'output_text', 'text'].includes(part?.type))
+      .map((part) => String(part.text || ''))
+      .filter((text) => role !== 'user' || !isContext(text.trim()))
+      .join('\n').trim();
+  } else return null;
+  if (role === 'user' && (!text || isContext(text))) return null;
+  return { role, text, phase: p.phase || p.channel || '', paths: [...(p.local_images || []), ...(p.local_files || [])] };
+}
+
+function isContext(text) {
+  return text.startsWith('<') || text.startsWith('Caveat:') || text.startsWith('# AGENTS.md instructions for ');
+}
+
+// Older rollouts contain both representations, in either order. Match only a
+// neighboring cross-format pair; repeated messages in later turns remain visible.
+function isMirror(message, row, state) {
+  const previous = state.last;
+  const time = Date.parse(row.timestamp || '');
+  if (previous && previous.source !== row.type && previous.role === message.role
+    && previous.text === message.text && previous.phase === message.phase
+    && Number.isFinite(time) && Math.abs(time - previous.time) < 1000) {
+    state.last = null;
+    return true;
+  }
+  state.last = { ...message, source: row.type, time };
+  return false;
+}
+
 const GENERATED_IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|svg|bmp|heic|heif|avif|tiff?)$/i;
 
 // Codex persists generated images to disk and also places a large base64 result in the
@@ -84,6 +126,7 @@ function toolPart(payload) {
 export function parseCodexRollout(raw) {
   const messages = [];
   const pending = new Map();
+  const conversationState = {};
   let assistant = null;
   const ensureAssistant = (ts) => {
     if (!assistant) { assistant = { role: 'assistant', parts: [], ts: ts || null }; messages.push(assistant); }
@@ -98,20 +141,21 @@ export function parseCodexRollout(raw) {
       ensureAssistant(row.timestamp).parts.push({ t: 'image', ...generatedImage });
       continue;
     }
-    if (row.type === 'event_msg' && p.type === 'user_message') {
-      const text = String(p.message || '').trim();
-      if (!text || text.startsWith('<') || text.startsWith('Caveat:')) continue;
-      const parts = [{ t: 'text', text }];
-      for (const path of [...(p.local_images || []), ...(p.local_files || [])]) parts.push({ t: /\.(png|jpe?g|gif|webp)$/i.test(path) ? 'image' : 'file', path });
-      const prev = messages[messages.length - 1];
-      const prevText = prev && prev.role === 'user' ? prev.parts.filter((x) => x.t === 'text').map((x) => x.text).join('\n') : '';
-      if (prevText !== text) messages.push({ role: 'user', parts, ts: row.timestamp || null });
-      assistant = null;
-      continue;
-    }
-    if (row.type === 'event_msg' && p.type === 'agent_message') {
-      const text = String(p.message || '').trim();
-      if (text) ensureAssistant(row.timestamp).parts.push({ t: 'text', text });
+    const message = conversationMessage(row);
+    if (message) {
+      const mirrored = isMirror(message, row, conversationState);
+      if (message.role === 'user') {
+        const parts = [{ t: 'text', text: message.text }];
+        for (const path of message.paths) parts.push({ t: /\.(png|jpe?g|gif|webp)$/i.test(path) ? 'image' : 'file', path });
+        if (!mirrored) messages.push({ role: 'user', parts, ts: row.timestamp || null });
+        else {
+          const previous = messages[messages.length - 1];
+          if (previous?.role === 'user') for (const part of parts.slice(1)) {
+            if (!previous.parts.some((existing) => existing.path === part.path)) previous.parts.push(part);
+          }
+        }
+        assistant = null;
+      } else if (!mirrored && message.text) ensureAssistant(row.timestamp).parts.push({ t: 'text', text: message.text });
       continue;
     }
     if (row.type !== 'response_item') continue;
@@ -136,7 +180,8 @@ function relevantRolloutLine(line) {
       || line.includes('"type":"image_generation_end"');
   }
   if (!line.includes('"type":"response_item"')) return false;
-  return line.includes('"type":"custom_tool_call"')
+  return line.includes('"type":"message"')
+    || line.includes('"type":"custom_tool_call"')
     || line.includes('"type":"custom_tool_call_output"')
     || line.includes('"type":"function_call"')
     || line.includes('"type":"function_call_output"');
@@ -261,10 +306,8 @@ export function codexRolloutMeta(file) {
           source: p.source || p.originator || 'native',
         };
       }
-      if (!opening && row.type === 'event_msg' && p.type === 'user_message') {
-        const text = String(p.message || '').replace(/\s+/g, ' ').trim();
-        if (text && !text.startsWith('<') && !text.startsWith('Caveat:')) opening = text.slice(0, 100);
-      }
+      const message = conversationMessage(row);
+      if (!opening && message?.role === 'user') opening = message.text.replace(/\s+/g, ' ').slice(0, 100);
       if (meta && opening) break;
     }
     return meta ? { ...meta, opening, size } : null;
@@ -283,23 +326,18 @@ export function codexRolloutState(file) {
     // and dtach checks in the caller still surface a connected terminal as live.
     let phase = '', preview = '', ts = 0, busy = false;
     for (const line of raw.split('\n')) {
-      if (!line.includes('"type":"event_msg"')) continue;
+      if (!relevantRolloutLine(line)) continue;
       let row; try { row = JSON.parse(line); } catch { continue; }
-      const p = row.payload || {};
-      if (row.type !== 'event_msg') continue;
-      if (p.type === 'user_message') {
-        const message = String(p.message || '').trim();
-        // Persisted compaction/context rows are not a new interactive turn.
-        if (message && !message.startsWith('<') && !message.startsWith('Caveat:')) {
-          phase = ''; preview = ''; ts = Date.parse(row.timestamp || '') || ts; busy = true;
-        }
-        continue;
-      }
-      if (p.type !== 'agent_message') continue;
-      phase = p.phase || '';
-      preview = String(p.message || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      const message = conversationMessage(row);
+      if (!message) continue;
       ts = Date.parse(row.timestamp || '') || ts;
-      busy = phase !== 'final_answer';
+      if (message.role === 'user') {
+        phase = ''; preview = ''; busy = true;
+      } else {
+        phase = message.phase;
+        preview = message.text.replace(/\s+/g, ' ').slice(0, 160);
+        busy = !['final_answer', 'final'].includes(phase);
+      }
     }
     // Terminal task/goal records often append after final_answer. They are not a new turn;
     // only a real user message or a later non-final assistant phase can make this busy again.
@@ -307,18 +345,16 @@ export function codexRolloutState(file) {
   } catch { return { phase: '', busy: false, preview: '', ts: 0, mtimeMs: 0 }; }
 }
 
-export function parseCodexLiveEntry(row) {
+export function parseCodexLiveEntry(row, conversationState = {}) {
   const p = row && row.payload || {};
   const generatedImage = row && row.type === 'event_msg' ? codexGeneratedImage(p) : null;
   if (generatedImage) return [{ kind: 'image', ...generatedImage, ts: row.timestamp }];
-  if (row && row.type === 'event_msg' && p.type === 'user_message') {
-    const text = String(p.message || '').trim();
-    return text && !text.startsWith('<') && !text.startsWith('Caveat:') ? [{ kind: 'user', text, ts: row.timestamp }] : [];
-  }
-  if (row && row.type === 'event_msg' && p.type === 'agent_message') {
-    const text = String(p.message || '').trim();
-    const out = text ? [{ kind: 'text', text, phase: p.phase || '', ts: row.timestamp }] : [];
-    if (p.phase === 'final_answer') out.push({ kind: 'turn_end', ts: row.timestamp });
+  const message = conversationMessage(row);
+  if (message) {
+    if (isMirror(message, row, conversationState)) return [];
+    if (message.role === 'user') return [{ kind: 'user', text: message.text, ts: row.timestamp }];
+    const out = message.text ? [{ kind: 'text', text: message.text, phase: message.phase, ts: row.timestamp }] : [];
+    if (['final_answer', 'final'].includes(message.phase)) out.push({ kind: 'turn_end', ts: row.timestamp });
     return out;
   }
   if (!row || row.type !== 'response_item') return [];
@@ -343,6 +379,7 @@ export function tailCodexRollout(file, onEvent, { fromOffset = null } = {}) {
   } catch {}
   let pending = Buffer.alloc(0), droppingOversize = false, reading = false, dirty = false;
   let activeStream = null, stopped = false;
+  const conversationState = {};
 
   const consume = (chunk) => {
     if (stopped) return;
@@ -358,7 +395,7 @@ export function tailCodexRollout(file, onEvent, { fromOffset = null } = {}) {
         if (line.length && line.length <= MAX_JSONL_RECORD_BYTES) {
           const text = line.toString('utf8');
           if (relevantRolloutLine(text) || text.includes('"type":"reasoning"')) {
-            try { for (const ev of parseCodexLiveEntry(JSON.parse(text))) onEvent(ev); } catch {}
+            try { for (const ev of parseCodexLiveEntry(JSON.parse(text), conversationState)) onEvent(ev); } catch {}
           }
         }
       }
