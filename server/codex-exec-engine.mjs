@@ -131,14 +131,16 @@ export function buildCodexArgs({ sessionId, cwd, prompt, images = [], settings =
 }
 
 export class CodexExecEngine {
-  constructor({ spawnImpl = spawn } = {}) {
+  constructor({ spawnImpl = spawn, ownerProvider = null } = {}) {
     this.spawnImpl = spawnImpl;
+    this.ownerProvider = ownerProvider;
   }
 
   run({ sessionId, cwd, prompt, images = [], settings = {}, guest = false, team = false, teamWorkspace = '', teamEnv = {}, teamUser = '', onEvent }) {
     // Team sandboxes carry their own explicit Codex configuration. Only owner/guest turns inherit
     // the host's global sessiongrep MCP entry and need the Box-specific override.
-    const extraConfig = team ? [] : buildOwnerCodexConfigArgs();
+    const provider = !team && !guest ? this.ownerProvider : null;
+    const extraConfig = team ? [] : [...buildOwnerCodexConfigArgs(), ...(provider?.configArgs || [])];
     // Linux limits each argv entry to ~128 KiB. Feed large owner prompts through
     // Codex's stdin mode; Team stdin is reserved for the sandbox environment.
     const promptOnStdin = !team && Buffer.byteLength(prompt || '', 'utf8') >= 64 * 1024;
@@ -147,10 +149,10 @@ export class CodexExecEngine {
     // Optionally source an env file before codex (set CODEX_ENV_FILE). Owner turns then
     // discard metered API credentials so Codex uses the current file-backed login.
     const envFile = process.env.CODEX_ENV_FILE;
-    const script = buildOwnerCodexScript(envFile);
+    const script = provider ? provider.buildScript(envFile) : buildOwnerCodexScript(envFile);
     const launch = team
       ? buildUnixTeamSandbox({ workspaceRoot: teamWorkspace, cwd, args, env: teamEnv, user: teamUser })
-      : { command: 'bash', args: ['-lc', script, 'codex-mobile', ...args], cwd: cwd || process.cwd(), env: buildOwnerCodexEnv() };
+      : { command: 'bash', args: ['-lc', script, 'codex-mobile', ...args], cwd: cwd || process.cwd(), env: provider ? provider.buildEnv() : buildOwnerCodexEnv() };
     const child = this.spawnImpl(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,

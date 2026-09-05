@@ -8,7 +8,7 @@ export function normalizeTurnLimit(value, fallback = 3) {
 export function turnAdmissionQid(state) {
   const message = state?.queue?.[0];
   if (!message || message.mode === 'bash') return null;
-  return (message.agent || state.agent || 'claude') === 'codex' ? message.qid || null : null;
+  return ['codex', 'experiential'].includes(message.agent || state.agent || 'claude') ? message.qid || null : null;
 }
 
 // A worker may coalesce rapid messages from one sender, but only when they use the

@@ -48,6 +48,7 @@ import {
 import { sttEngineOrder, stripNonSpeechTags } from './stt-engine.mjs';
 import { findCodexRollout, readCodexCompactionInfo, readCodexTokenInfo } from './codex-context.mjs';
 import { GeminiExecEngine } from './gemini-exec-engine.mjs';
+import { EXPERIENTIAL_MODEL, ExperientialExecEngine, normalizeExperientialSettings } from './experiential-exec-engine.mjs';
 import { DEEPSEEK_DEFAULT_EFFORT, DEEPSEEK_MODEL, DeepSeekExecEngine, normalizeDeepSeekSettings } from './deepseek-exec-engine.mjs';
 import { AgyExecEngine } from './agy-exec-engine.mjs';
 import { MacExecEngine, macAvailable, macScreenshotStream } from './mac-exec-engine.mjs';
@@ -69,6 +70,7 @@ const rcEngine = new RCEngine();
 const codexEngine = new CodexExecEngine();
 const teamClaudeEngine = new ClaudeExecEngine();
 const geminiEngine = new GeminiExecEngine();
+const experientialEngine = new ExperientialExecEngine();
 const deepseekEngine = new DeepSeekExecEngine();
 const agyEngine = new AgyExecEngine();
 const macEngine = new MacExecEngine();
@@ -201,7 +203,7 @@ const CODEX_RECOVERY_LIMITER = createTurnLimiter(MAX_CONCURRENT_CODEX_RECOVERIES
 // set CC_WORKSPACE to your main code dir (e.g. ~/code) for a nicer default.
 const ENV_DEFAULT_CWD = cfg('CC_WORKSPACE') || HOME;
 const APP_SETTINGS_FILE = join(STATE_DIR, 'app-settings.json');
-const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy', 'mac', 'deepseek']);
+const VALID_APP_AGENTS = new Set(['claude', 'codex', 'gemini', 'agy', 'mac', 'deepseek', 'experiential']);
 const VALID_CODEX_SANDBOX = new Set(['off', 'read-only', 'workspace-write']);
 const expandUserPath = (p) => {
   const s = String(p || '').trim();
@@ -934,6 +936,7 @@ function removeTeamFavoriteEverywhere(id) {
   if (changed) { writeJsonAtomic(TEAM_FAVORITES_FILE, all); invalidateSessionLists(); }
 }
 const storedSessionRecord = (id) => (loadCodex().sessions || {})[id]
+  || (loadExperiential().sessions || {})[id]
   || (loadTeamClaude().sessions || {})[id]
   || { id };
 // Team ownership is normally recorded in team.json once an engine emits its real
@@ -1157,6 +1160,9 @@ const saveGemini = (state) => { writeJsonAtomic(GEMINI_FILE, state); rememberJso
 const DEEPSEEK_FILE = join(STATE_DIR, 'deepseek-sessions.json');
 const loadDeepSeek = () => loadJsonCached(DEEPSEEK_FILE, () => ({ sessions: {} }));
 const saveDeepSeek = (state) => { writeJsonAtomic(DEEPSEEK_FILE, state); rememberJsonCache(DEEPSEEK_FILE, state); invalidateSessionLists(); };
+const EXPERIENTIAL_FILE = join(STATE_DIR, 'experiential-sessions.json');
+const loadExperiential = () => loadJsonCached(EXPERIENTIAL_FILE, () => ({ sessions: {} }));
+const saveExperiential = (state) => { writeJsonAtomic(EXPERIENTIAL_FILE, state); rememberJsonCache(EXPERIENTIAL_FILE, state); invalidateSessionLists(); };
 const AGY_FILE = join(STATE_DIR, 'agy-sessions.json');
 const loadAgy = () => loadJsonCached(AGY_FILE, () => ({ sessions: {} }));
 const saveAgy = (state) => { writeJsonAtomic(AGY_FILE, state); rememberJsonCache(AGY_FILE, state); invalidateSessionLists(); };
@@ -1204,7 +1210,7 @@ function codexUserMessagesFromSession(session) {
 function conversationMarkdown({ title, agent = 'Claude', messages = [] }) {
   const safeTitle = title || 'conversation';
   const header = `# ${safeTitle}\n\nExported ${messages.length} messages\n\n`;
-  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'deepseek' ? 'DeepSeek' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
+  const assistantName = agent === 'codex' ? 'Codex' : agent === 'gemini' ? 'Gemini' : agent === 'experiential' ? 'Experiential' : agent === 'deepseek' ? 'DeepSeek' : agent === 'agy' ? 'Antigravity' : agent === 'mac' ? 'Computer Use' : 'Claude';
   const body = messages.map((m) => {
     const role = m.role === 'user' ? '**You**' : `**${assistantName}**`;
     const text = (m.parts || []).filter((p) => p.t === 'text').map((p) => p.text).join('\n').trim();
@@ -1217,6 +1223,7 @@ const SESSION_STORES = [
   { agent: 'codex', load: loadCodex, save: saveCodex },
   { agent: 'claude', load: loadTeamClaude, save: saveTeamClaude },
   { agent: 'gemini', load: loadGemini, save: saveGemini },
+  { agent: 'experiential', load: loadExperiential, save: saveExperiential },
   { agent: 'deepseek', load: loadDeepSeek, save: saveDeepSeek },
   { agent: 'agy', load: loadAgy, save: saveAgy },
   { agent: 'mac', load: loadMac, save: saveMac },
@@ -1383,6 +1390,7 @@ const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.l
 const DEFAULT_SETTINGS = {
   codex: { model: 'gpt-6-astra', reasoningEffort: 'high', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
+  experiential: { model: EXPERIENTIAL_MODEL, reasoningEffort: 'high' },
   deepseek: { model: DEEPSEEK_MODEL, reasoningEffort: DEEPSEEK_DEFAULT_EFFORT },
   agy: { model: '' },
   mac: { model: 'gpt-6-astra', reasoningEffort: 'medium' },
@@ -1398,6 +1406,7 @@ function normalizeSettings(settings = {}) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
+    experiential: normalizeExperientialSettings(settings.experiential || {}),
     deepseek: normalizeDeepSeekSettings((settings && settings.deepseek) || {}),
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
@@ -1429,7 +1438,7 @@ const DEFAULT_CONTEXT_WINDOWS = {
 };
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
-  if (agent === 'codex' || agent === 'mac') {
+  if (agent === 'codex' || agent === 'mac' || agent === 'experiential') {
     if (!m || m === 'gpt-6-astra' || m.startsWith('gpt-5.6')) return 1050000;
     return DEFAULT_CONTEXT_WINDOWS.codex;
   }
@@ -1978,6 +1987,98 @@ function updateDeepSeekContext(id, info) {
   }
   return ctx;
 }
+function ensureExperientialSession(id, attrs = {}) {
+  if (!id) return null;
+  const state = loadExperiential();
+  const now = Date.now();
+  const prev = state.sessions[id] || {};
+  const established = prev.title && prev.title !== 'Experiential chat' ? prev.title : '';
+  state.sessions[id] = {
+    id,
+    agent: 'experiential',
+    title: established || attrs.title || prev.title || 'Experiential chat',
+    cwd: attrs.cwd || prev.cwd || DEFAULT_CWD,
+    created: prev.created || attrs.created || now,
+    lastUsed: attrs.lastUsed || now,
+    updatedAt: attrs.updatedAt || now,
+    preview: attrs.preview != null ? attrs.preview : (prev.preview || ''),
+    messages: attrs.messages || prev.messages || [],
+    settings: normalizeSettings(attrs.settings || prev.settings || {}),
+    parentId: attrs.parentId || prev.parentId || null,
+    parentTitle: attrs.parentTitle || prev.parentTitle || '',
+    context: attrs.context != null ? attrs.context : (prev.context || null),
+  };
+  saveExperiential(state);
+  return state.sessions[id];
+}
+function appendExperientialMessage(id, role, text, extra = {}) {
+  if (!id || (!text && !extra.parts)) return;
+  const state = loadExperiential();
+  const now = Date.now();
+  const prev = state.sessions[id] || { id, agent: 'experiential', title: 'Experiential chat', cwd: DEFAULT_CWD, created: now, messages: [] };
+  const parts = extra.parts || [{ t: 'text', text: String(text || '') }];
+  prev.messages = [...(prev.messages || []), { role, parts, ...(extra.qid ? { qid: extra.qid } : {}) }].slice(-160);
+  const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
+  if (role === 'user' && (!prev.title || prev.title === 'Experiential chat')) prev.title = plain.slice(0, 80) || 'Experiential chat';
+  if (role === 'assistant' && plain) prev.preview = plain.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = now;
+  prev.updatedAt = now;
+  state.sessions[id] = prev;
+  saveExperiential(state);
+}
+let EXPERIENTIAL_TURN_SEQ = 0;
+function flushExperientialAssistant(s, { finalize = false } = {}) {
+  if (!s || !s.sessionId) return;
+  const parts = codexAssistantParts(s.curParts);
+  if (!parts.length) return;
+  const state = loadExperiential();
+  const prev = state.sessions[s.sessionId];
+  if (!prev) return;
+  const msgs = prev.messages ? [...prev.messages] : [];
+  const last = msgs[msgs.length - 1];
+  const row = { role: 'assistant', parts, turnId: s.expTurnId, ts: (last && last.turnId === s.expTurnId && last.ts) || Date.now() };
+  if (!finalize) row.live = true;
+  if (last && last.role === 'assistant' && last.turnId === s.expTurnId) msgs[msgs.length - 1] = row;
+  else msgs.push(row);
+  prev.messages = msgs.slice(-160);
+  const text = parts.filter((p) => p.t === 'text').map((p) => p.text).join('\n\n').trim();
+  if (text) prev.preview = text.replace(/\s+/g, ' ').slice(0, 160);
+  prev.lastUsed = Date.now();
+  prev.updatedAt = Date.now();
+  state.sessions[s.sessionId] = prev;
+  saveExperiential(state);
+}
+// Move a provisional (`new-…`) Experiential entry onto the real codex thread id once
+// `thread.started` arrives. Transcripts live inline on the entry, so this is a plain move.
+function migrateExperientialSession(fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return null;
+  const state = loadExperiential();
+  const prev = state.sessions[fromId];
+  if (!prev) return null;
+  const dest = state.sessions[toId] || {};
+  state.sessions[toId] = {
+    ...prev, ...dest,
+    id: toId,
+    title: (dest.title && dest.title !== 'Experiential chat') ? dest.title : (prev.title || dest.title || 'Experiential chat'),
+    preview: dest.preview || prev.preview || '',
+    messages: (dest.messages && dest.messages.length) ? dest.messages : (prev.messages || []),
+    created: prev.created || dest.created || Date.now(),
+  };
+  delete state.sessions[fromId];
+  saveExperiential(state);
+  try { ALIAS.delete(fromId); } catch {}
+  return state.sessions[toId];
+}
+function updateExperientialContext(id, info) {
+  const used = (info && Number(info.last_token_usage?.input_tokens ?? info.input_tokens)) || 0;
+  const ctx = normalizeContext({ ...(codexContext(id, EXPERIENTIAL_MODEL) || { usedTokens: used, source: used ? 'reported' : 'estimated' }), agent: 'experiential', model: EXPERIENTIAL_MODEL });
+  if (id) {
+    const state = loadExperiential();
+    const prev = state.sessions[id];
+    if (prev) { prev.context = ctx; prev.lastUsed = Date.now(); state.sessions[id] = prev; saveExperiential(state); }
+  }
+  return ctx;
+}
 function ensureAgySession(id, attrs = {}) {
   if (!id) return null;
   const state = loadAgy();
@@ -2196,7 +2297,7 @@ function adoptLiveCodexSessions(liveThreadIds) {
   const state = loadCodex();
   let changed = false;
   for (const id of liveThreadIds) {
-    if ((state.sessions || {})[id]) continue;
+    if ((state.sessions || {})[id] || (loadExperiential().sessions || {})[id]) continue;
     const transcriptPath = findCodexRollout(CODEX_HOME, id);
     const meta = codexRolloutMeta(transcriptPath);
     if (!transcriptPath || !meta || meta.id !== id) continue;
@@ -2287,6 +2388,10 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     id: s.id, agent: 'deepseek', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'DeepSeek chat', cwd: s.cwd || DEFAULT_CWD,
   }));
+  const experientialSessions = Object.values(loadExperiential().sessions || {}).map((s) => ({
+    ...s, id: s.id, agent: 'experiential', file: null, mtime: s.lastUsed || s.created || 0,
+    title: s.title || 'Experiential chat', cwd: s.cwd || DEFAULT_CWD,
+  }));
   const agySessions = Object.values(loadAgy().sessions || {}).map((s) => ({
     id: s.id, agent: 'agy', file: null, mtime: s.lastUsed || s.created || 0,
     title: s.title || 'Antigravity chat', cwd: s.cwd || DEFAULT_CWD, preview: s.preview || '',
@@ -2298,7 +2403,7 @@ function listSessions({ limit = 40, filter = 'all', workspace = 'personal', prin
     parentId: s.parentId || null, parentTitle: s.parentTitle || '',
   }));
   files.sort((a, b) => b.mtime - a.mtime);
-  const items = files.concat(codexSessions, teamClaudeSessions, geminiSessions, deepseekSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
+  const items = files.concat(codexSessions, teamClaudeSessions, geminiSessions, deepseekSessions, experientialSessions, agySessions, macSessions).sort((a, b) => b.mtime - a.mtime);
   const now = Date.now();
   const rcIds = new Set(Object.keys(rc));
   const codexLiveIds = liveCodexSessionIds(codexSessions, codexProcessIds, terminalCodexIds);
@@ -2572,6 +2677,8 @@ async function sessionHistory(id, { before = null } = {}) {
   if (gemini) return { messages: (gemini.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: gemini.cwd || DEFAULT_CWD, agent: 'gemini', settings: normalizeSettings(gemini.settings || {}), parentId: gemini.parentId || null, parentTitle: gemini.parentTitle || '', context: normalizeContext(gemini.context || { agent: 'gemini' }) };
   const deepseek = (loadDeepSeek().sessions || {})[id];
   if (deepseek) return { messages: (deepseek.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: deepseek.cwd || DEFAULT_CWD, agent: 'deepseek', settings: normalizeSettings(deepseek.settings || {}), parentId: deepseek.parentId || null, parentTitle: deepseek.parentTitle || '', context: normalizeContext({ agent: 'deepseek' }) };
+  const experiential = (loadExperiential().sessions || {})[id];
+  if (experiential) return { messages: (experiential.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: experiential.cwd || DEFAULT_CWD, agent: 'experiential', settings: normalizeSettings(experiential.settings || {}), parentId: experiential.parentId || null, parentTitle: experiential.parentTitle || '', context: experiential.context || normalizeContext({ agent: 'experiential', model: EXPERIENTIAL_MODEL }) };
   const agy = (loadAgy().sessions || {})[id];
   if (agy) return { messages: (agy.messages || []).slice(-HIST_MSG_LIMIT), hasMore: false, cursor: 0, cwd: agy.cwd || DEFAULT_CWD, agent: 'agy', settings: normalizeSettings(agy.settings || {}), parentId: agy.parentId || null, parentTitle: agy.parentTitle || '', context: normalizeContext({ agent: 'agy' }) };
   const mac = (loadMac().sessions || {})[id];
@@ -3131,7 +3238,7 @@ app.get('/api/sessions/:id/snapshot', requireAuth, (req, res) => {
 });
 // All user messages from the full JSONL (for the "my messages" browser)
 app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
-  const stored = (loadCodex().sessions || {})[req.params.id] || (loadTeamClaude().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadDeepSeek().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
+  const stored = (loadCodex().sessions || {})[req.params.id] || (loadTeamClaude().sessions || {})[req.params.id] || (loadGemini().sessions || {})[req.params.id] || (loadExperiential().sessions || {})[req.params.id] || (loadDeepSeek().sessions || {})[req.params.id] || (loadAgy().sessions || {})[req.params.id] || (loadMac().sessions || {})[req.params.id];
   if (stored) return res.json({ messages: codexUserMessagesFromSession(stored) });
   const file = findSessionFile(req.params.id);
   if (!file) return res.json({ messages: [] });
@@ -3191,6 +3298,14 @@ app.get('/api/sessions/:id/export', requireAuth, (req, res) => {
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     return res.send(conversationMarkdown({ title, agent: 'deepseek', messages: deepseekExport.messages || [] }));
+  }
+  const experientialExport = (loadExperiential().sessions || {})[req.params.id];
+  if (experientialExport) {
+    const title = experientialExport.title || 'Experiential chat';
+    const fname = title.replace(/[^a-z0-9]/gi, '-').slice(0, 50).replace(/-+$/, '') + '.md';
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.send(conversationMarkdown({ title, agent: 'experiential', messages: experientialExport.messages || [] }));
   }
   const agy = (loadAgy().sessions || {})[req.params.id];
   if (agy) {
@@ -3343,6 +3458,7 @@ function scheduledSessionAgent(id) {
   if ((loadCodex().sessions || {})[id]) return 'codex';
   if ((loadTeamClaude().sessions || {})[id]) return 'claude';
   if ((loadGemini().sessions || {})[id]) return 'gemini';
+  if ((loadExperiential().sessions || {})[id]) return 'experiential';
   if ((loadDeepSeek().sessions || {})[id]) return 'deepseek';
   if ((loadAgy().sessions || {})[id]) return 'agy';
   if ((loadMac().sessions || {})[id]) return 'mac';
@@ -3652,6 +3768,7 @@ const OPENAI_ENDPOINT = (cfg('OPENAI_ENDPOINT', 'https://api.openai.com/v1')).re
 const BOX_ATTENTION_MODEL = cfg('BOX_ATTENTION_MODEL', 'gpt-4o-mini'); // cheap; override via env
 const BOX_TITLE_MODEL = cfg('BOX_TITLE_MODEL', BOX_ATTENTION_MODEL); // same cheap path, shorter output
 const GEMINI_KEY = cfg('GEMINI_API_KEY') || cfg('GOOGLE_AI_STUDIO_API_KEY') || cfg('GOOGLE_API_KEY');
+const EXPERIENTIAL_KEY = cfg('EXPLABS_API_KEY') || loadEnvFile(cfg('EXPLABS_API_KEY_FILE') || '').EXPLABS_API_KEY || '';
 const DEEPSEEK_KEY = cfg('DEEPSEEK_API_KEY') || '';
 const AGY_CMD = cfg('AGY_CMD') || (existsSync(join(HOME, '.local', 'bin', 'agy')) ? join(HOME, '.local', 'bin', 'agy') : 'agy');
 
@@ -3779,7 +3896,7 @@ app.get('/api/config', requireAuth, (req, res) => {
       workspaceRoot: root,
       appSettings: { defaultCwd: root, defaultAgent: appDefaultAgent() },
       features: { linear: false, brain: false, voice: false, voiceAssistant: false, slack: false,
-        codex: codexAvailable(), gemini: false, agy: false, mac: false },
+        codex: codexAvailable(), experiential: false, gemini: false, agy: false, mac: false },
       subLabels: {},
     });
   }
@@ -3797,6 +3914,7 @@ app.get('/api/config', requireAuth, (req, res) => {
     slack: slackConfigured(cfg),
     codex: codexAvailable(),
     gemini: geminiAvailable(),
+    experiential: !!EXPERIENTIAL_KEY && codexAvailable(),
     deepseek: !!DEEPSEEK_KEY,
     agy: agyAvailable(),
     mac: macAvailable(),
@@ -4161,7 +4279,7 @@ app.post('/api/linear/:id/delegation', requireAuth, async (req, res) => {
       const det = await linearGql(`{ issues(filter:{ number:{ eq:${issueNum(inc)} }${TEAM_KEY_FILTER} }){ nodes { id state{ type } labels{ nodes{ id } } } } }`);
       const it = (det.issues.nodes || [])[0];
       if (it) {
-        const agentName = rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : rec.agent === 'mac' ? 'Computer Use' : 'Claude';
+        const agentName = rec.agent === 'experiential' ? 'Experiential' : rec.agent === 'codex' ? 'Codex' : rec.agent === 'gemini' ? 'Gemini' : rec.agent === 'agy' ? 'Antigravity' : rec.agent === 'mac' ? 'Computer Use' : 'Claude';
         const verb = rec.kind === 'resume' ? 'Resumed in' : 'Delegated to';
         const body = `🤖 ${verb} a box ${agentName} agent${rec.sessionTitle ? ` — “${rec.sessionTitle}”` : ''}.`
           + (rec.sessionId ? `\n<!-- box-session:${rec.sessionId} -->` : '');
@@ -4644,10 +4762,11 @@ function rt(extKey) {
     try { p = JSON.parse(readFileSync(qpath(key), 'utf8')); } catch {}
     const codex = (loadCodex().sessions || {})[key] || null;
     const teamClaude = (loadTeamClaude().sessions || {})[key] || null;
-    const stored = codex || teamClaude;
+    const experiential = (loadExperiential().sessions || {})[key] || null;
+    const stored = codex || teamClaude || experiential;
     const hasOwn = (name) => Object.prototype.hasOwnProperty.call(p, name);
     const manualTitle = isUuid(key) ? loadNames()[key] : '';
-    RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (stored && stored.cwd) || null, agent: p.agent || (codex ? 'codex' : teamClaude ? 'claude' : null),
+    RT.set(key, { key, sessionId: p.sessionId || (isUuid(key) ? key : null), cwd: p.cwd || (stored && stored.cwd) || null, agent: p.agent || (codex ? 'codex' : teamClaude ? 'claude' : experiential ? 'experiential' : null),
       parentId: p.parentId || null, parentTitle: p.parentTitle || '', title: manualTitle || p.title || (stored && stored.title) || '',
       settings: normalizeSettings(p.settings || (stored && stored.settings) || {}),
       context: p.context || (stored && stored.context) || null,
@@ -4960,6 +5079,7 @@ ${recentImgs.map(({ paths, caption }) => `- ${paths.join(', ')}${caption ? `\n  
   })();
 }
 function ensureTail(s, fromLine, codexFromOffset = null) {
+  if (s.agent === 'experiential') return;
   if (sessionUsesTeamSandbox(s) || !s.sessionId || s.tailStop || s._tailWait) return;
   if (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId]) {
     const rec = (loadCodex().sessions || {})[s.sessionId] || {};
@@ -5236,7 +5356,7 @@ setInterval(() => runScheduleTick().catch(() => {}), 30_000).unref?.();
 // had stalled. The rollout file's mtime is the honest answer; refresh from it on (re)subscribe.
 function refreshCodexActivity(s) {
   if (!s || !s.sessionId) return;
-  const rec = (loadCodex().sessions || {})[s.sessionId];
+  const rec = (loadCodex().sessions || {})[s.sessionId] || (loadExperiential().sessions || {})[s.sessionId];
   if (!rec && s.agent !== 'codex') return;
   try {
     const file = findCodexRollout(CODEX_HOME, s.sessionId) || (rec && rec.transcriptPath);
@@ -5266,7 +5386,7 @@ function codexThreadProcessBusy(id) {
 }
 
 function nativeCodexTurnActive(s) {
-  if (!s || !s.sessionId || (s.agent && s.agent !== 'codex')) return false;
+  if (!s || !s.sessionId || (s.agent && !['codex', 'experiential'].includes(s.agent))) return false;
   return codexThreadProcessBusy(s.sessionId);
 }
 
@@ -5415,7 +5535,7 @@ function cancelCurrent(extKey, { stopFinisher = true } = {}) {
   // A server restart loses ChildProcess handles while a pre-existing Codex resume may
   // remain alive. Stop must still work: find only resume processes naming this exact
   // thread and terminate them. Owned processes may appear here too; SIGTERM is idempotent.
-  const stoppedCodex = s.sessionId && (s.agent === 'codex' || (loadCodex().sessions || {})[s.sessionId])
+  const stoppedCodex = s.sessionId && (['codex', 'experiential'].includes(s.agent) || (loadCodex().sessions || {})[s.sessionId])
     ? terminateUnmanagedCodexThread(s.sessionId, 'SIGTERM')
     : [];
   if (s.sessionId) rcEngine.interrupt(s.sessionId); // ESC into the RC TUI
@@ -5549,6 +5669,11 @@ function codexUserQidPersisted(sessionId, qid) {
 }
 
 function prepareRecoveredMessage(s, message) {
+  if (message?.recovered && message.agent === 'experiential') {
+    const rec = (loadExperiential().sessions || {})[s.sessionId || s.key];
+    const originalLanded = !!rec?.messages?.some((row) => row.role === 'user' && row.qid === message.qid);
+    return { ...prepareRecoveredCodexMessage({ ...message, agent: 'codex' }, { originalLanded }), agent: 'experiential' };
+  }
   if (!message || !message.recovered || message.agent !== 'codex') return message;
   // If the original user row made it to durable history, replaying its exact text after a
   // service restart creates a duplicate user turn and may repeat completed writes. Resume with
@@ -5588,7 +5713,7 @@ async function runWorker(s) {
   // durably queued and launch it against the same id immediately after the terminal emits its
   // final answer (or exits).
   if (nativeCodexTurnActive(s)) {
-    const rec = (loadCodex().sessions || {})[s.sessionId];
+    const rec = (loadCodex().sessions || {})[s.sessionId] || (loadExperiential().sessions || {})[s.sessionId];
     // A Box-created resume that survived a server restart is ours to reclaim. A fresh
     // phone message is an explicit steer, so stop that orphan and resume the same thread.
     // Native terminal sessions remain wait-only so Box never steals a desktop turn.
@@ -5722,6 +5847,7 @@ function runTurn(s, msg) {
     if (requestedAgent === 'codex') return runCodexTurn(s, msg, resolve);
     if (sandboxed && requestedAgent === 'claude') return runTeamClaudeTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'gemini') return runGeminiTurn(s, msg, resolve);
+    if ((msg.agent || s.agent) === 'experiential') return runExperientialTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'deepseek') return runDeepSeekTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'agy') return runAgyTurn(s, msg, resolve);
     if ((msg.agent || s.agent) === 'mac') return runMacTurn(s, msg, resolve);
@@ -6404,6 +6530,157 @@ function runDeepSeekTurn(s, msg, resolve) {
   s.proc.on('close', finish);
   s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 300); bcast(s, { type: 'error', msg: lastError }); finish(); });
 }
+function runExperientialTurn(s, msg, resolve) {
+  if (!s.cwd) s.cwd = msg.cwd || DEFAULT_CWD;
+  let done = false;
+  let lastError = '';
+  s.expTurnId = `${Date.now()}-${++EXPERIENTIAL_TURN_SEQ}`;
+  s.expLastFlush = 0;
+  const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
+  const userParts = codexUserParts(userText, msg.images || []);
+  const isNew = !s.sessionId;
+  const explicitTitle = isNew ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  if (isNew && initialTitle) s.title = initialTitle;
+  // Save the first message before launch, then adopt the thread id emitted by Codex.
+  if (isNew) {
+    s.provKey = s.key;
+    ensureExperientialSession(s.provKey, {
+      cwd: s.cwd,
+      title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
+      lastUsed: Date.now(),
+      settings: s.settings,
+      parentId: msg.parentId || s.parentId || null,
+      parentTitle: msg.parentTitle || s.parentTitle || '',
+    });
+    appendExperientialMessage(s.provKey, 'user', userText, { parts: userParts, qid: msg.qid });
+    addRunning(s.provKey);
+  } else {
+    ensureExperientialSession(s.sessionId, {
+      cwd: s.cwd,
+      title: s.title || msg.title || '',
+      lastUsed: Date.now(),
+      settings: s.settings,
+      parentId: msg.parentId || s.parentId || null,
+      parentTitle: msg.parentTitle || s.parentTitle || '',
+    });
+    appendExperientialMessage(s.sessionId, 'user', userText, { parts: userParts, qid: msg.qid });
+    ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+  }
+  s.agent = 'experiential';
+  persist(s);
+
+  const finish = ({ completed = false, keepAlive = false } = {}) => {
+    if (done) return; done = true;
+    const ownedProc = s.proc;
+    clearTimeout(s.turnTimer); s.proc = null;
+    if (keepAlive && ownedProc && ownedProc.exitCode == null && ownedProc.signalCode == null) {
+      s.codexGoalProc = ownedProc;
+      ownedProc.once('close', () => {
+        if (s.codexGoalProc === ownedProc) s.codexGoalProc = null;
+        if (s.queue.length) setTimeout(() => runWorker(s), 0);
+        else requestScheduleTick();
+      });
+    }
+    s.lastTurnError = lastError;
+    if (s.sessionId) {
+      flushExperientialAssistant(s, { finalize: true });
+      if (lastError && !s.canceled) appendExperientialMessage(s.sessionId, 'assistant', `⚠️ Experiential error: ${lastError}`);
+      else if (!s.canceled && !completed && !codexAssistantParts(s.curParts).length) appendExperientialMessage(s.sessionId, 'assistant', '⚠️ Experiential exited without a response. Send again to retry.');
+    } else if (s.provKey) {
+      // codex never emitted a thread id (startup failure / bad key). Keep the provisional chat
+      // with the user's message so it's retryable in place, and clear its "working" marker.
+      deleteRunning(s.provKey);
+      if (!s.canceled) appendExperientialMessage(s.provKey, 'assistant', lastError ? `⚠️ Experiential didn't start: ${lastError}` : "⚠️ Experiential didn't start — send again to retry.");
+    }
+    bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
+    resolve();
+  };
+  s.turnTimer = setTimeout(() => {
+    lastError = 'Turn timed out.';
+    killAgentProcess(s.proc, 'SIGTERM');
+    finish();
+  }, CODEX_TURN_TIMEOUT_MS);
+  if (!isNew) bcast(s, { type: 'session', id: s.sessionId, agent: 'experiential', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '' });
+  try { s.proc = experientialEngine.run({
+    sessionId: s.sessionId,
+    isNew,
+    cwd: s.cwd,
+    prompt: msg.text || '',
+    images: msg.images || [],
+    settings: (s.settings || {}).experiential || DEFAULT_SETTINGS.experiential,
+    guest: sessionIsGuest(s),
+    team: sessionUsesTeamSandbox(s),
+    apiKey: EXPERIENTIAL_KEY,
+    onEvent: (ev) => {
+      if (ev.type === 'session' && ev.id) {
+        // codex reported its real thread id — adopt it so the NEXT turn resumes a rollout
+        // that actually exists, and fold the provisional entry into it.
+        const provKey = s.provKey || null;
+        s.sessionId = ev.id; s.agent = 'experiential';
+        ALIAS.set(s.sessionId, s.key); addRunning(s.sessionId);
+        if (provKey && provKey !== s.sessionId) { deleteRunning(provKey); migrateExperientialSession(provKey, s.sessionId); }
+        s.provKey = null;
+        if (s.key !== s.sessionId) { try { unlinkSync(qpath(s.key)); } catch {} }
+        ensureExperientialSession(s.sessionId, {
+          cwd: s.cwd,
+          title: s.title || initialTitle || msg.title || (msg.text || '').slice(0, 80),
+          lastUsed: Date.now(),
+          settings: s.settings,
+          parentId: msg.parentId || s.parentId || null,
+          parentTitle: msg.parentTitle || s.parentTitle || '',
+        });
+        if (isNew && !provKey) appendExperientialMessage(s.sessionId, 'user', userText, { parts: userParts, qid: msg.qid });
+        persist(s);
+        if (typeof msg.onSession === 'function') { try { msg.onSession({ sessionId: s.sessionId, agent: 'experiential' }); } catch {} }
+        bcast(s, { type: 'session', id: s.sessionId, agent: 'experiential', parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || initialTitle || '' });
+      } else if (ev.type === 'thinking') {
+        bcast(s, { type: 'thinking', text: '' });
+      } else if (ev.type === 'image') {
+        s.curParts.push({ t: 'image', path: ev.path, alt: ev.alt });
+        flushExperientialAssistant(s);
+        bcast(s, ev);
+      } else if (ev.type === 'text') {
+        const delta = (s.curParts.at(-1)?.t === 'text' ? '\n\n' : '') + (ev.delta || '');
+        pushTextPart(s, delta);
+        if (s.sessionId) { s.expLastFlush = Date.now(); flushExperientialAssistant(s); }
+        bcast(s, { type: 'text', delta });
+      } else if (ev.type === 'context') {
+        s.context = updateExperientialContext(s.sessionId, ev.info);
+        persist(s);
+        bcast(s, { type: 'context', context: s.context });
+      } else if (ev.type === 'tool') {
+        s.curTools.push({ id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        s.curParts.push({ t: 'tool', id: ev.id, name: ev.name, input: ev.input, detail: ev.detail });
+        const now = Date.now();
+        if (s.sessionId && (!s.expLastFlush || now - s.expLastFlush > 2000)) { s.expLastFlush = now; flushExperientialAssistant(s); }
+        bcast(s, ev);
+      } else if (ev.type === 'tool_result') {
+        const tp = s.curParts.find((p) => p.t === 'tool' && p.id === ev.id); if (tp) tp.result = ev.content;
+        const tool = s.curTools.find((t) => t.id === ev.id); if (tool) tool.result = ev.content;
+        flushExperientialAssistant(s);
+        bcast(s, ev);
+      } else if (ev.type === 'turn_end') {
+        flushExperientialAssistant(s, { finalize: true });
+        finish({ completed: true, keepAlive: true });
+      } else if (ev.type === 'notice' || ev.type === 'error') {
+        if (ev.type === 'error') lastError = String(ev.msg || '').slice(0, 1000);
+        bcast(s, ev);
+      }
+    },
+  });
+  } catch (error) {
+    lastError = String(error.message || error).slice(0, 1000);
+    bcast(s, { type: 'error', msg: lastError });
+    finish(); return;
+  }
+  s.proc.on('close', (code) => {
+    flushExperientialAssistant(s, { finalize: true });
+    if (code && !lastError && !s.canceled) lastError = `Agent exited with code ${code}.`;
+    finish();
+  });
+  s.proc.on('error', (e) => { lastError = String((e && e.message) || e).slice(0, 1000); bcast(s, { type: 'error', msg: lastError }); finish(); });
+}
 // resume persisted, non-empty queues on startup (after a restart) so a queued message is never
 // lost. Covers both an existing session (keyed by sessionId) AND a brand-new chat whose first
 // message was queued before its session was created (keyed by the filename, e.g. `new-abc123`) —
@@ -6654,6 +6931,7 @@ wss.on('connection', (ws) => {
       if (s.sessionId && s.agent === 'codex') ensureCodexSession(s.sessionId, attrs);
       if (s.sessionId && s.agent === 'claude' && teamSession) ensureTeamClaudeSession(s.sessionId, attrs);
       if (s.sessionId && s.agent === 'gemini') ensureGeminiSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
+      if (s.sessionId && s.agent === 'experiential') ensureExperientialSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'deepseek') ensureDeepSeekSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'agy') ensureAgySession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
       if (s.sessionId && s.agent === 'mac') ensureMacSession(s.sessionId, { cwd: s.cwd, settings: s.settings, lastUsed: Date.now() });
