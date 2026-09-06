@@ -32,9 +32,9 @@ import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import {
-  armTaskFinisher, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
-  noteTaskFinisherActivity, shouldRunTaskFinisher, stopTaskFinisher, taskFinisherStopRequested,
-  validTimeZone,
+  armTaskFinisher, clearTaskFinisherFailureCount, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
+  noteTaskFinisherActivity, recordTaskFinisherFailure, shouldRunTaskFinisher, stopTaskFinisher,
+  taskFinisherStopRequested, validTimeZone,
 } from './session-scheduler.mjs';
 import {
   clearTaskFinisherStop, ensureTaskFinisherStopScript, taskFinisherReminder, taskFinisherStopped,
@@ -3569,6 +3569,17 @@ function noteTaskFinisherActivityForSession(id) {
 function stopTaskFinisherForSession(id, state = 'stopped', reason = 'Stopped by user') {
   return updateTaskFinisher(id, (policy) => stopTaskFinisher(policy, state, reason));
 }
+function handleTaskFinisherFailureForSession(id, error) {
+  const updated = updateTaskFinisher(id, (policy) => recordTaskFinisherFailure(policy));
+  if (updated && !updated.armed) {
+    const s = rt(id);
+    const msg = `Auto-continuation stopped after repeated errors — open the chat and check the model's status. Last error: ${String(error || '').slice(0, 120)}`;
+    if (s) bcast(s, { type: 'error', msg });
+  } else if (updated && updated.failoverAgent) {
+    const s = rt(id);
+    if (s) bcast(s, { type: 'error', msg: `Continuation error — retrying once with Claude. Last error: ${String(error || '').slice(0, 120)}` });
+  }
+}
 
 // ---- Accounts: pool/switch Claude accounts via an external account broker -----
 // The `/login` dialog wraps the headless OAuth flow (authorize URL → paste code) and an
@@ -5335,7 +5346,7 @@ async function runScheduleTick(now = new Date()) {
       enqueue(id, {
         text: taskFinisherReminder(id, taskFinisherStopCommand(session)),
         displayText: '↻ Automatic continuation reminder',
-        mode: 'normal', agent, cwd: session.cwd || undefined,
+        mode: 'normal', agent: current.failoverAgent || agent, cwd: session.cwd || undefined,
         taskFinisherContinuation: true,
       });
     }
@@ -5799,7 +5810,14 @@ async function runWorker(s) {
     if (s.sessionId && !s.canceled) {
       if (taskFinisherStopRequested(completedText)) stopTaskFinisherForSession(s.sessionId, 'stopped', 'Stopped by agent /stop');
       else if (msg.taskFinisherArm) armTaskFinisherForSession(s.sessionId);
-      else if (msg.taskFinisherContinuation) noteTaskFinisherActivityForSession(s.sessionId);
+      else if (msg.taskFinisherContinuation) {
+        if (s.lastTurnError) {
+          handleTaskFinisherFailureForSession(s.sessionId, s.lastTurnError);
+        } else {
+          updateTaskFinisher(s.sessionId, clearTaskFinisherFailureCount);
+          noteTaskFinisherActivityForSession(s.sessionId);
+        }
+      }
     }
     s.inflight = null;
     persist(s);

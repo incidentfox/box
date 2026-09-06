@@ -28,6 +28,8 @@ export function normalizeAutoContinue(raw = {}) {
     reason: String(raw.reason || '').trim().slice(0, 300),
     timeZone: validTimeZone(raw.timeZone) ? raw.timeZone : DEFAULT_TIME_ZONE,
     continuationCount: nonNegativeInt(raw.continuationCount),
+    consecutiveFailureCount: nonNegativeInt(raw.consecutiveFailureCount),
+    failoverAgent: typeof raw.failoverAgent === 'string' && raw.failoverAgent ? raw.failoverAgent : null,
     message: DEFAULT_CONTINUE_MESSAGE,
     taskStartedAt: Math.max(0, Number(raw.taskStartedAt) || 0),
     lastActivityAt: Math.max(0, Number(raw.lastActivityAt) || 0),
@@ -84,6 +86,31 @@ export function shouldRunTaskFinisher({ policy, now = new Date(), busy = false }
   const normalized = normalizeAutoContinue(policy);
   if (!normalized.enabled || !normalized.armed || busy) return { due: false, policy: normalized };
   return { due: true, policy: normalized };
+}
+
+// Called when a taskFinisherContinuation turn errors out. Increments the failure counter;
+// on the first failure degrades to Claude for the next attempt, on the second stops the
+// reminder entirely so a stuck model doesn't burn tokens in an infinite loop.
+export function recordTaskFinisherFailure(policy = {}, now = new Date()) {
+  const normalized = normalizeAutoContinue(policy);
+  if (!normalized.armed) return normalized;
+  const newCount = normalized.consecutiveFailureCount + 1;
+  if (newCount >= 2) {
+    return stopTaskFinisher(normalized, 'error', 'Auto-continuation stopped after repeated errors', now);
+  }
+  return {
+    ...normalized,
+    consecutiveFailureCount: newCount,
+    failoverAgent: 'claude',
+    state: 'watching',
+    reason: 'Continuation failed — retrying once with Claude',
+  };
+}
+
+// Reset the failure counter after a successful continuation turn.
+export function clearTaskFinisherFailureCount(policy = {}) {
+  const normalized = normalizeAutoContinue(policy);
+  return { ...normalized, consecutiveFailureCount: 0, failoverAgent: null };
 }
 
 export function dueWakeups(wakeups = [], now = new Date()) {
