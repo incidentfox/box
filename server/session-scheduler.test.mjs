@@ -58,12 +58,12 @@ assert.deepEqual(dueWakeups(wakeups, now).map((wake) => wake.id), ['past']);
 
 // failure tracking
 assert.equal(normalizeAutoContinue({}).consecutiveFailureCount, 0, 'default failure count');
-assert.equal(normalizeAutoContinue({}).failoverAgent, null, 'default failoverAgent');
+assert.equal(normalizeAutoContinue({}).failoverModel, null, 'default failoverModel');
 
 const after1Failure = recordTaskFinisherFailure(armed, now);
 assert.equal(after1Failure.armed, true, 'still armed after first error');
 assert.equal(after1Failure.consecutiveFailureCount, 1, 'failure count incremented');
-assert.equal(after1Failure.failoverAgent, 'claude', 'degrades to claude on first error');
+assert.equal(after1Failure.failoverModel, 'gpt-5.6-sol', 'degrades to gpt-5.6-sol on first error');
 
 const after2Failures = recordTaskFinisherFailure(after1Failure, now);
 assert.equal(after2Failures.armed, false, 'stops after second error');
@@ -71,7 +71,7 @@ assert.equal(after2Failures.state, 'error', 'terminal state is error');
 
 const cleared = clearTaskFinisherFailureCount(after1Failure);
 assert.equal(cleared.consecutiveFailureCount, 0, 'failure count reset');
-assert.equal(cleared.failoverAgent, null, 'failoverAgent cleared');
+assert.equal(cleared.failoverModel, null, 'failoverModel cleared');
 assert.equal(cleared.armed, true, 'remains armed after reset');
 
 const failureOnStopped = recordTaskFinisherFailure(stopped, now);
