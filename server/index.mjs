@@ -3575,9 +3575,9 @@ function handleTaskFinisherFailureForSession(id, error) {
     const s = rt(id);
     const msg = `Auto-continuation stopped after repeated errors — open the chat and check the model's status. Last error: ${String(error || '').slice(0, 120)}`;
     if (s) bcast(s, { type: 'error', msg });
-  } else if (updated && updated.failoverAgent) {
+  } else if (updated && updated.failoverModel) {
     const s = rt(id);
-    if (s) bcast(s, { type: 'error', msg: `Continuation error — retrying once with Claude. Last error: ${String(error || '').slice(0, 120)}` });
+    if (s) bcast(s, { type: 'error', msg: `Continuation error — retrying once with ${updated.failoverModel}. Last error: ${String(error || '').slice(0, 120)}` });
   }
 }
 
@@ -5346,8 +5346,9 @@ async function runScheduleTick(now = new Date()) {
       enqueue(id, {
         text: taskFinisherReminder(id, taskFinisherStopCommand(session)),
         displayText: '↻ Automatic continuation reminder',
-        mode: 'normal', agent: current.failoverAgent || agent, cwd: session.cwd || undefined,
+        mode: 'normal', agent, cwd: session.cwd || undefined,
         taskFinisherContinuation: true,
+        codexModelOverride: current.failoverModel || null,
       });
     }
   } finally {
@@ -6023,7 +6024,9 @@ function runCodexTurn(s, msg, resolve) {
     cwd: s.cwd,
     prompt: `${msg.text || ''}${inTeamWorkspace && s.sessionId ? teamChatContextForAgent(s.sessionId) : ''}`,
     images: msg.images || [],
-    settings: (s.settings || {}).codex || DEFAULT_SETTINGS.codex,
+    settings: msg.codexModelOverride
+      ? { ...((s.settings || {}).codex || DEFAULT_SETTINGS.codex), model: msg.codexModelOverride }
+      : ((s.settings || {}).codex || DEFAULT_SETTINGS.codex),
     guest: sessionIsGuest(s),
     team: sandboxed,
     teamWorkspace: sandboxed ? team.ensureWorkspace() : '',

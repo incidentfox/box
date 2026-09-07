@@ -29,7 +29,7 @@ export function normalizeAutoContinue(raw = {}) {
     timeZone: validTimeZone(raw.timeZone) ? raw.timeZone : DEFAULT_TIME_ZONE,
     continuationCount: nonNegativeInt(raw.continuationCount),
     consecutiveFailureCount: nonNegativeInt(raw.consecutiveFailureCount),
-    failoverAgent: typeof raw.failoverAgent === 'string' && raw.failoverAgent ? raw.failoverAgent : null,
+    failoverModel: typeof raw.failoverModel === 'string' && raw.failoverModel ? raw.failoverModel : null,
     message: DEFAULT_CONTINUE_MESSAGE,
     taskStartedAt: Math.max(0, Number(raw.taskStartedAt) || 0),
     lastActivityAt: Math.max(0, Number(raw.lastActivityAt) || 0),
@@ -88,9 +88,11 @@ export function shouldRunTaskFinisher({ policy, now = new Date(), busy = false }
   return { due: true, policy: normalized };
 }
 
+const CONTINUATION_FALLBACK_MODEL = 'gpt-5.6-sol';
+
 // Called when a taskFinisherContinuation turn errors out. Increments the failure counter;
-// on the first failure degrades to Claude for the next attempt, on the second stops the
-// reminder entirely so a stuck model doesn't burn tokens in an infinite loop.
+// on the first failure degrades to gpt-5.6-sol for the next attempt, on the second stops
+// the reminder entirely so a stuck model doesn't burn tokens in an infinite loop.
 export function recordTaskFinisherFailure(policy = {}, now = new Date()) {
   const normalized = normalizeAutoContinue(policy);
   if (!normalized.armed) return normalized;
@@ -101,16 +103,16 @@ export function recordTaskFinisherFailure(policy = {}, now = new Date()) {
   return {
     ...normalized,
     consecutiveFailureCount: newCount,
-    failoverAgent: 'claude',
+    failoverModel: CONTINUATION_FALLBACK_MODEL,
     state: 'watching',
-    reason: 'Continuation failed — retrying once with Claude',
+    reason: `Continuation failed — retrying once with ${CONTINUATION_FALLBACK_MODEL}`,
   };
 }
 
 // Reset the failure counter after a successful continuation turn.
 export function clearTaskFinisherFailureCount(policy = {}) {
   const normalized = normalizeAutoContinue(policy);
-  return { ...normalized, consecutiveFailureCount: 0, failoverAgent: null };
+  return { ...normalized, consecutiveFailureCount: 0, failoverModel: null };
 }
 
 export function dueWakeups(wakeups = [], now = new Date()) {
