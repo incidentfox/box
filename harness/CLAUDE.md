@@ -5,10 +5,9 @@ fire a short request from your phone, the agent does the whole thing end-to-end,
 come back to a result you can ship. Drop it in your main working directory as `CLAUDE.md`
 (or merge it into `~/.claude/CLAUDE.md`). Edit freely — it's yours.
 
-> The setup that makes this hum: you say **"work this task autonomously"**, the agent does
-> the work and reports back, you say **"looks good — merge & deploy, file the leftovers as
-> new tasks"**, and you launch the next one with another one-line request. Many small,
-> well-scoped, parallel agents beat one big babysat session.
+Define completion in the request: implementation and verification, or the full merge/deploy workflow.
+Carry out the authorized scope and report concrete results. Follow the project's deployment and safety
+boundaries, and honor any explicit request to stop for review.
 
 ## How to work
 
@@ -20,12 +19,12 @@ come back to a result you can ship. Drop it in your main working directory as `C
 - **A new request is usually an ADDITIONAL item, not a replacement.** I fire fast, different
   asks. Keep doing what you were on, fold the new thing in, and tell me what you're
   continuing.
-- **When you finish, leave it ready to ship.** State plainly what's done and verified (with
-  the evidence — test output, a screenshot, the command you ran), what's left, and what you'd
-  do next. If I say "merge & deploy and file the rest," the leftovers should already be
-  crisp enough to become tasks.
-- **Report faithfully.** If tests fail, say so with the output. If you skipped a step, say
-  that. Don't claim done without having verified.
+- **Finish the authorized workflow.** If shipping is included, complete the rollout and affected
+  production smoke checks before reporting completion. If the request stops at implementation or
+  review, hand off there. State what is verified, any unresolved blockers, and useful evidence.
+- **Resolve failures and report faithfully.** Fix failures caused by the requested change and
+  rerun affected checks. Report unresolved failures and skipped steps accurately; do not claim
+  completion without verification.
 
 ## Assume the context window can vanish
 
@@ -36,8 +35,8 @@ Treat every session as resumable from durable state, never from this chat:
   the Linear integration, file these as Linear issues so they survive compaction and show up
   in the Box app.
 - **Durable knowledge lives in a file** — a note, a skill, or memory — not just in this chat.
-- When you build durable scaffolding (a script, a skill, a test account), record where it
-  lives in the relevant `CLAUDE.md` so the next blank session finds it without being told.
+- Document reusable scripts and workflows in the relevant skill or area documentation. Keep
+  `CLAUDE.md` to stable constraints and short, conditional pointers.
 
 ## Coordinate — many agents may run at once
 
@@ -74,15 +73,15 @@ These are optional; use whichever are set up (see `concierge/50-power-ups.md`):
 
 - **`google` CLI** (if `~/.config/box/google.env` exists): act on my Google account.
   - `google gmail list "is:unread newer_than:2d" 10` — triage my mail
-  - `google gmail send <me> "<subject>" "<body>"` — **email me a result/digest when you finish
-    something I'd want to know about** (great for long autonomous runs)
+  - `google gmail send <me> "<subject>" "<body>"` — email an authorized result/digest using the
+    configured sending policy.
   - `google cal list 5` — what's on my calendar; `google drive list "name contains 'x'"` — find a file
-- **A "brain"** (if `BRAIN_DIR` is set): a notes/markdown folder. Read it for context; append
-  durable facts, decisions, and how-tos so the whole fleet benefits.
+- **A "brain"** (if `BRAIN_DIR` is set): a notes/markdown folder. Read relevant context; follow
+  its write policy when saving durable facts, decisions, and how-tos.
 
 ## Memory
 
-If you keep a memory directory (or a brain), write down durable, non-obvious facts (preferences
+When memory updates are authorized, save durable, non-obvious facts (preferences
 I've stated, decisions and their rationale, ongoing goals) — one fact per file with a short
 index. Don't memorize what the code or git history already records. Verify a remembered fact
 still holds (file/flag/command exists) before acting on it.

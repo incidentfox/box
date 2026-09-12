@@ -2,7 +2,7 @@
 
 **You are an installation agent (Claude Code or Codex).** The user cloned this repo, started
 you inside it, and said something like *"install this."* Your job: get **Box** running on
-**this machine** and reachable from the user's phone, then hand back the URL + token. Do the
+**this machine** and reachable from the user's phone, then hand back the URL and private token-retrieval instructions. Do the
 work — run the commands, don't just describe them. Keep the user in the loop for the few
 choices and secrets only they can provide.
 
@@ -75,7 +75,7 @@ without a JSON file and paste the client id/secret interactively.) The installer
 checks/installs prereqs (node, dtach, build tools, cloudflared), runs `npm install`, ensures
 `.env`, installs the bundled `google` CLI to `~/.local/bin/google`, installs the harness into
 `~/.claude/`, adds the @reboot keeper to cron, starts the server + a Cloudflare quick-tunnel,
-and prints the URL + token.
+and prints the URL with instructions for retrieving the token privately.
 
 If `install.sh` reports a missing prerequisite it couldn't auto-install (often the `claude`
 CLI or `node`), install it per its hint and re-run — the script is idempotent.
@@ -91,12 +91,27 @@ macOS: `xcode-select --install`), or just `npm rebuild node-pty`. Full npm log:
 Don't trust, verify:
 
 ```bash
-PORT=$(grep -E '^PORT=' .env | cut -d= -f2-); PORT=${PORT:-7321}
-TOKEN=$(grep -E '^CC_AUTH_TOKEN=' .env | cut -d= -f2-)
-curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:$PORT/api/config"   # expect JSON with "features"
-cat ~/.cc-mobile/url.txt                                                          # the public URL
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+const env = {};
+for (const line of readFileSync('.env', 'utf8').split('\n')) {
+  const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+  if (match) env[match[1]] = match[2].replace(/^["']|["']$/g, '');
+}
+const token = process.env.CC_AUTH_TOKEN || env.CC_AUTH_TOKEN;
+if (!token) throw new Error('CC_AUTH_TOKEN is missing');
+const port = process.env.PORT || env.PORT || '7321';
+const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
+  headers: { Authorization: `Bearer ${token}` },
+  signal: AbortSignal.timeout(10000),
+});
+if (!response.ok) throw new Error(`Config check failed: HTTP ${response.status}`);
+console.log(JSON.stringify({ features: (await response.json()).features }));
+NODE
+cat ~/.cc-mobile/url.txt # the public URL
 ```
 
+This reads the token inside Node, keeping it out of shell traces and process arguments.
 `/api/config` should return JSON; `features.linear` should be `true` only if you configured
 Linear. If the tunnel URL is empty, wait ~10s and re-check `~/.cc-mobile/url.txt`
 (cloudflared takes a moment), or check `~/.cc-mobile/tunnel.log`.
@@ -114,7 +129,9 @@ completed yet. Run `node harness/google-auth.mjs --from /path/client_secret.json
 
 ## Step 5 — Hand off to the user
 Give them, clearly:
-- **The URL** (from `~/.cc-mobile/url.txt`) and **the token** (from `.env`).
+- **The URL** (from `~/.cc-mobile/url.txt`) and the absolute path to this checkout's `.env`.
+  Have the user open that file in a private local editor and copy the `CC_AUTH_TOKEN` value
+  into Box's login screen. Do not print the value in chat, installer output, or logs.
 - *Open the URL on your phone → enter the token → Share → Add to Home Screen* (installs the PWA).
 - If `claude` wasn't logged in: *run `claude` in a terminal on this machine once and log in;
   Box drives your logged-in CLI.* (Codex similarly: `codex` once, if they want Codex chats.)
@@ -129,8 +146,8 @@ Give them, clearly:
 - **Quick tunnel URL changes on restart.** For a stable `box.yourdomain.com`, see
   `concierge/40-stable-url.md` (Cloudflare named tunnel) and set `TUNNEL_MODE=named` in `.env`.
 - **No public access wanted?** Set `TUNNEL_MODE=none`; Box serves on `http://localhost:PORT`.
-- **Restart after editing `.env`:** `pkill -f "node server/index.mjs"` — the keeper respawns
-  it within ~30s with the new config.
+- **Restart after editing `.env`:** follow the [scoped restart procedure](README.md#restarting-an-existing-installation).
+  The keeper loads configuration at startup, so a server-only restart may not apply new settings.
 - **Everything lives under** `~/.cc-mobile/` (logs, url.txt, uploads) and `~/.claude/` (the
   harness + your Claude sessions). Box reads your existing Claude sessions automatically.
 - This is a powerful setup: the harness defaults to `bypassPermissions` so agents act without

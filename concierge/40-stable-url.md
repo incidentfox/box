@@ -42,9 +42,10 @@ TUNNEL_NAME=box
 TUNNEL_HOSTNAME=box.mydomain.com
 ```
 
-```bash
-pkill -f "node server/index.mjs"   # keeper respawns server + the named tunnel
-```
+Follow the [scoped restart procedure](../README.md#restarting-an-existing-installation):
+reload this installation's keeper and stop only its verified old tunnel process. The keeper
+reads tunnel settings at startup; restarting only the Node server does not apply this change.
+Preserve session bridges and unrelated processes.
 
 After that, `https://box.mydomain.com` is my permanent Box URL. Summarize what I did and the
 final URL.

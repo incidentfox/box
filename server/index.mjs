@@ -7017,7 +7017,7 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   console.log(`\ncc-mobile (chat) on http://localhost:${PORT}`);
-  console.log(`auth token: ${AUTH_TOKEN}`);
+  console.log('authentication: bearer token required');
   console.log(`default cwd: ${DEFAULT_CWD}`);
   const sttLabel = { eleven: `ElevenLabs Scribe(${STT_MODELS[0].trim()})`, deepgram: `Deepgram(${DG_MODEL})` };
   const sttOrder = sttEngineOrder(STT_ENGINE, sttAvailable()).map((e) => sttLabel[e]);

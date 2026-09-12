@@ -104,7 +104,8 @@ git clone https://github.com/incidentfox/box.git && cd box && ./install.sh
 ```
 
 Either way you get: prerequisites installed, an access token generated, the server started
-behind a free Cloudflare tunnel, and your **phone URL + token** printed. One manual step
+behind a free Cloudflare tunnel, and your **phone URL** printed with private token-retrieval
+instructions. One manual step
 remains — run `claude` once to log in (Box drives your logged-in CLI; no API key needed on a
 subscription).
 
@@ -155,8 +156,8 @@ OAuth desktop-client JSON. Add `--google-account work` to save a named account a
 ## Configuration
 
 Everything is optional except the access token (auto-generated). Edit `.env` (see
-[`.env.example`](.env.example)) and restart (`pkill -f "node server/index.mjs"`; the keeper
-respawns it):
+[`.env.example`](.env.example)) and use the [scoped restart procedure](#restarting-an-existing-installation)
+for settings that need a restart:
 
 | Key | What it does |
 |---|---|
@@ -190,6 +191,55 @@ and Codex permission mode, are also available from the in-app Settings sheet.
 The same Settings sheet includes **Prompts & hooks** for viewing/editing the built-in
 dispatch/review/fork/status prompts and the known Box hook scripts. Prompt overrides live in
 `~/.cc-mobile/prompt-overrides.json`; hook edits are written to `~/.claude/hooks/`.
+
+## Restarting an existing installation
+
+For server code changes, identify the current Box server PID and confirm its command is
+`node server/index.mjs` and its working directory is the intended checkout. On systemd hosts,
+inspect the current server unit named in `~/.cc-mobile/server-unit`; it may be separate from
+`box-app.service`, whose main PID is the keeper. On portable installs, inspect the keeper's
+process tree and each candidate's working directory. Send `TERM` only to the verified server
+PID; the keeper starts a replacement within about 30 seconds. Preserve the keeper and unrelated
+session bridges, and never use a broad process-name kill. The transient server unit uses
+`KillMode=control-group`, so its Box-owned descendants are reaped on restart; inspect unit
+membership and preserve queue/recovery state before a cutover. Confirm the replacement PID, local page,
+authenticated sessions endpoint, and public URL before declaring recovery complete.
+
+Configuration changes need a keeper reload: `scripts/keeper.sh` sources `.env` once at startup
+and holds a singleton lock. Starting a second keeper while the old one runs does nothing.
+First identify this installation's keeper, server, and tunnel PIDs by command, working
+directory, and parent/unit membership. Inspect supervisor kill scope and preserve queue/recovery
+state. A keeper reload alone leaves an existing server or tunnel running with old settings.
+
+For the default cron/portable installation, use a shell on the host. Set `box_dir` to the
+verified absolute checkout path and `keeper_pid` to its verified keeper PID, then:
+
+```bash
+kill -TERM "$keeper_pid"
+# Wait for this keeper to exit and release its singleton lock before proceeding.
+while kill -0 "$keeper_pid" 2>/dev/null; do sleep 1; done
+```
+
+While the keeper is stopped, send `kill -TERM "$server_pid"` to the verified server if its
+port or environment changed. Send `kill -TERM "$tunnel_pid"` to this installation's verified
+old tunnel if the port or tunnel configuration changed (including switching to `none`).
+Wait for each targeted process to exit; never substitute process-name kills. Then launch:
+
+```bash
+nohup bash "$box_dir/scripts/keeper.sh" >> "$HOME/.cc-mobile/keeper.log" 2>&1 &
+```
+
+For a systemd-managed keeper, identify its unit separately from the transient server unit.
+Use `systemctl --user stop "$keeper_unit"`, verify its keeper PID exited, perform the affected
+server/tunnel stops above, then `systemctl --user start "$keeper_unit"`. Inspect the keeper
+unit's `KillMode` and cgroup before stopping it; don't assume only its main PID will stop.
+Use the system manager instead of `--user` only when that is the verified installation.
+
+Confirm one new keeper is running, the affected server/tunnel PIDs changed, and the local page,
+authenticated sessions endpoint, and configured public URL work. A quick-tunnel URL may change;
+verify the new URL rather than relying on an old `url.txt`. If another installation's tunnel
+prevents this keeper's global tunnel-presence check from launching one, investigate ownership
+rather than stopping unrelated tunnels. Do not print credential values during these checks.
 
 ## The harness (optional, recommended)
 
