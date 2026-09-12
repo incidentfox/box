@@ -355,7 +355,7 @@ if [ "$DO_START" = 1 ]; then
   echo  "│   → Open the URL on your phone, enter the token, then Share → Add to Home Screen."
   [ "$NEED_CLAUDE_LOGIN" = 1 ] && bold "│   ⚠ LAST STEP: run 'claude' on this machine and log in (one-time browser sign-in)."
   echo "└──────────────────────────────────────────────────────────────"
-  info "Voice + a Linear board are optional — add keys to .env and restart (pkill -f 'node server/index.mjs') to enable."
+  info "Voice + a Linear board are optional — add keys to .env, then follow README.md's 'Restarting an existing installation' procedure."
   if [ -f "$(google_cred_file "$GOOGLE_ACCOUNT")" ]; then
     info "Google is ready: agents can run 'google gmail list', 'google cal list', and 'google drive list'."
   else
