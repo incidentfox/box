@@ -91,12 +91,27 @@ macOS: `xcode-select --install`), or just `npm rebuild node-pty`. Full npm log:
 Don't trust, verify:
 
 ```bash
-PORT=$(grep -E '^PORT=' .env | cut -d= -f2-); PORT=${PORT:-7321}
-TOKEN=$(grep -E '^CC_AUTH_TOKEN=' .env | cut -d= -f2-)
-curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:$PORT/api/config"   # expect JSON with "features"
-cat ~/.cc-mobile/url.txt                                                          # the public URL
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+const env = {};
+for (const line of readFileSync('.env', 'utf8').split('\n')) {
+  const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+  if (match) env[match[1]] = match[2].replace(/^["']|["']$/g, '');
+}
+const token = process.env.CC_AUTH_TOKEN || env.CC_AUTH_TOKEN;
+if (!token) throw new Error('CC_AUTH_TOKEN is missing');
+const port = process.env.PORT || env.PORT || '7321';
+const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
+  headers: { Authorization: `Bearer ${token}` },
+  signal: AbortSignal.timeout(10000),
+});
+if (!response.ok) throw new Error(`Config check failed: HTTP ${response.status}`);
+console.log(JSON.stringify({ features: (await response.json()).features }));
+NODE
+cat ~/.cc-mobile/url.txt # the public URL
 ```
 
+This reads the token inside Node, keeping it out of shell traces and process arguments.
 `/api/config` should return JSON; `features.linear` should be `true` only if you configured
 Linear. If the tunnel URL is empty, wait ~10s and re-check `~/.cc-mobile/url.txt`
 (cloudflared takes a moment), or check `~/.cc-mobile/tunnel.log`.
