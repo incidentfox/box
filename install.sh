@@ -345,13 +345,13 @@ if [ "$DO_START" = 1 ]; then
   URL_FILE="$HOME/.cc-mobile/url.txt"; URL=""
   for _ in $(seq 1 20); do [ -s "$URL_FILE" ] && { URL="$(cat "$URL_FILE")"; break; }; sleep 1; done
   echo
-  TOKEN_VAL="$(grep '^CC_AUTH_TOKEN=' .env | cut -d= -f2-)"
   [ -n "$URL" ] || URL="(tunnel still starting — re-check ~/.cc-mobile/url.txt in a few seconds)"
   # Crisp, unmistakable hand-off block — an installing agent should relay this verbatim.
   echo "┌──────────────────────────────────────────────────────────────"
   bold "│ ✅ Box is up — REPORT THIS TO THE USER:"
   echo  "│   URL:   $URL"
-  echo  "│   Token: $TOKEN_VAL"
+  echo  "│   Token: open $APP_DIR/.env in a private local editor and copy CC_AUTH_TOKEN."
+  echo  "│   Keep the token out of chat and logs; enter it only on the Box login screen."
   echo  "│   → Open the URL on your phone, enter the token, then Share → Add to Home Screen."
   [ "$NEED_CLAUDE_LOGIN" = 1 ] && bold "│   ⚠ LAST STEP: run 'claude' on this machine and log in (one-time browser sign-in)."
   echo "└──────────────────────────────────────────────────────────────"

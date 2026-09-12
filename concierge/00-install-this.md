@@ -32,9 +32,10 @@ that costs money.
      in-app **task board**, set up Linear
      (https://github.com/incidentfox/box/blob/main/concierge/30-linear.md). Note any keys for the next step.
 5. **Install:** run `./install.sh`. Answer its prompts with my choices and paste any keys you got.
-6. **Verify and report.** Read `~/.cc-mobile/url.txt` (the public URL) and the access token
-   (the `CC_AUTH_TOKEN` line in `.env`, also printed by the installer). Tell me, clearly:
-   - the **URL** and the **token**, and
+6. **Verify and report.** Follow `INSTALL.md` to verify the installation. Tell me, clearly:
+   - the **URL** from `~/.cc-mobile/url.txt` and the absolute path to this checkout's `.env`,
+   - how to open `.env` in a private local editor and copy `CC_AUTH_TOKEN` into Box's login
+     screen; keep the token value out of chat, installer output, and logs, and
    - *"open the URL on your phone → enter the token → Share → Add to Home Screen."*
 
 Keep me posted at each step, and ask before any purchase. If a step fails, show me the error

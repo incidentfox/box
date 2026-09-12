@@ -2,7 +2,7 @@
 
 **You are an installation agent (Claude Code or Codex).** The user cloned this repo, started
 you inside it, and said something like *"install this."* Your job: get **Box** running on
-**this machine** and reachable from the user's phone, then hand back the URL + token. Do the
+**this machine** and reachable from the user's phone, then hand back the URL and private token-retrieval instructions. Do the
 work — run the commands, don't just describe them. Keep the user in the loop for the few
 choices and secrets only they can provide.
 
@@ -75,7 +75,7 @@ without a JSON file and paste the client id/secret interactively.) The installer
 checks/installs prereqs (node, dtach, build tools, cloudflared), runs `npm install`, ensures
 `.env`, installs the bundled `google` CLI to `~/.local/bin/google`, installs the harness into
 `~/.claude/`, adds the @reboot keeper to cron, starts the server + a Cloudflare quick-tunnel,
-and prints the URL + token.
+and prints the URL with instructions for retrieving the token privately.
 
 If `install.sh` reports a missing prerequisite it couldn't auto-install (often the `claude`
 CLI or `node`), install it per its hint and re-run — the script is idempotent.
@@ -114,7 +114,9 @@ completed yet. Run `node harness/google-auth.mjs --from /path/client_secret.json
 
 ## Step 5 — Hand off to the user
 Give them, clearly:
-- **The URL** (from `~/.cc-mobile/url.txt`) and **the token** (from `.env`).
+- **The URL** (from `~/.cc-mobile/url.txt`) and the absolute path to this checkout's `.env`.
+  Have the user open that file in a private local editor and copy the `CC_AUTH_TOKEN` value
+  into Box's login screen. Do not print the value in chat, installer output, or logs.
 - *Open the URL on your phone → enter the token → Share → Add to Home Screen* (installs the PWA).
 - If `claude` wasn't logged in: *run `claude` in a terminal on this machine once and log in;
   Box drives your logged-in CLI.* (Codex similarly: `codex` once, if they want Codex chats.)
