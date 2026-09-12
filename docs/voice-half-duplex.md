@@ -153,7 +153,8 @@ git -C <canonical> fetch origin && git -C <canonical> merge --ff-only origin/mai
 
 Restart only the verified Box server PID using the
 [scoped restart procedure](../README.md#restarting-an-existing-installation), preserving the
-keeper and session bridges.
+keeper and unrelated session bridges, with the unit kill scope and queue/recovery precautions
+described there.
 
 Then hard-reload the box app (`box.mindbill.org`) so the browser loads the new `voice.js`.
 
@@ -168,12 +169,14 @@ Then hard-reload the box app (`box.mindbill.org`) so the browser loads the new `
 
 ## Rollback plan
 
-Low-risk, fully env-reversible without a code revert:
+Low-risk, fully env-reversible without a code revert. After editing `.env`, use the
+[configuration reload procedure](../README.md#restarting-an-existing-installation) to reload
+the keeper and affected server:
 
-- **Disable half-duplex only:** set `VOICE_ASSISTANT_HALF_DUPLEX=0` and restart the server —
+- **Disable half-duplex only:** set `VOICE_ASSISTANT_HALF_DUPLEX=0` and reload —
   reverts to the previous full-duplex mic behavior. The echo guard stays on.
-- **Disable the echo guard only:** `VOICE_ASSISTANT_ECHO_GUARD=0` + restart.
-- **Both off = original behavior:** set both to `0` + restart; the code paths become no-ops.
+- **Disable the echo guard only:** `VOICE_ASSISTANT_ECHO_GUARD=0` + reload.
+- **Both off = original behavior:** set both to `0` + reload; the code paths become no-ops.
 - **Full revert:** `git revert <merge sha>` on a branch → PR → merge → reconcile + restart.
 
 If the mic ever seems "stuck" (can't talk after a reply), the max-hold safety re-opens it
