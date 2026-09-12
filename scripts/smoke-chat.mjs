@@ -208,6 +208,9 @@ try {
     }
     results.push(result);
   }
+  if (stdout.includes(TOKEN) || stderr.includes(TOKEN)) {
+    throw new Error('server logs exposed the authentication token');
+  }
   const result = results.at(-1);
   console.log(JSON.stringify({
     ok: true,
@@ -225,8 +228,8 @@ try {
   console.error(JSON.stringify({
     ok: false,
     error: err,
-    stdout: stdout.slice(-2000),
-    stderr: stderr.slice(-2000),
+    stdout: stdout.replaceAll(TOKEN, '[REDACTED]').slice(-2000),
+    stderr: stderr.replaceAll(TOKEN, '[REDACTED]').slice(-2000),
   }, null, 2));
   process.exitCode = 1;
 } finally {

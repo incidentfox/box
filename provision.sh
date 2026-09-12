@@ -30,4 +30,5 @@ ssh -t "${KEY[@]}" "$TARGET" "curl -fsSL $RAW | bash -s -- ${EXTRA[*]:-}"
 echo
 echo "✅ Done. If Box reported it needs a login, SSH in and run:  claude   (one-time browser sign-in)."
 echo "   Your Box URL was printed above (also in ~/.cc-mobile/url.txt on the server)."
-echo "   Open ~/box/.env privately on the server; copy CC_AUTH_TOKEN into Box login, never chat or logs."
+echo "   Open .env in the installed Box directory privately on the server (default ~/box; BOX_DIR may override)."
+echo "   Copy CC_AUTH_TOKEN into Box login, never chat or logs."
