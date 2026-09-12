@@ -33,9 +33,9 @@ review-only request:
    the service's `WorkingDirectory` and canonical `git status`, then reconcile the intended merged
    source with a fast-forward. Preserve unrelated edits; never use `reset --hard` to reconcile.
    Server changes also require a restart (`public/` is served from disk): identify the actual server
-   Node child in the service process tree and terminate only that process so the keeper respawns it.
-   Preserve the keeper and session bridges; avoid broad process-name kills that can hit other servers.
-   Verify the replacement process and the affected local/public workflow before reporting completion.
+   Node process using the [scoped restart procedure](README.md#restarting-an-existing-installation),
+   then terminate only that verified PID so the keeper respawns it. Preserve the keeper and session
+   bridges. Verify the replacement process and the affected local/public workflow before reporting completion.
 
 **Emergency override** (rare, admin only): lift protection in Settings → Branches, or
 `gh api -X DELETE repos/incidentfox/box/branches/main/protection`, push, then re-apply it.

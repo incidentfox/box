@@ -155,8 +155,8 @@ OAuth desktop-client JSON. Add `--google-account work` to save a named account a
 ## Configuration
 
 Everything is optional except the access token (auto-generated). Edit `.env` (see
-[`.env.example`](.env.example)) and restart (`pkill -f "node server/index.mjs"`; the keeper
-respawns it):
+[`.env.example`](.env.example)) and use the [scoped restart procedure](#restarting-an-existing-installation)
+for settings that need a restart:
 
 | Key | What it does |
 |---|---|
@@ -190,6 +190,25 @@ and Codex permission mode, are also available from the in-app Settings sheet.
 The same Settings sheet includes **Prompts & hooks** for viewing/editing the built-in
 dispatch/review/fork/status prompts and the known Box hook scripts. Prompt overrides live in
 `~/.cc-mobile/prompt-overrides.json`; hook edits are written to `~/.claude/hooks/`.
+
+## Restarting an existing installation
+
+For server code changes, identify the current Box server PID and confirm its command is
+`node server/index.mjs` and its working directory is the intended checkout. On systemd hosts,
+inspect the current server unit named in `~/.cc-mobile/server-unit`; it may be separate from
+`box-app.service`, whose main PID is the keeper. On portable installs, inspect the keeper's
+process tree and each candidate's working directory. Send `TERM` only to the verified server
+PID; the keeper starts a replacement within about 30 seconds. Preserve the keeper and session
+bridges, and never use a broad process-name kill. Confirm the replacement PID, local page,
+authenticated sessions endpoint, and public URL before declaring recovery complete.
+
+Configuration changes need an additional check: `scripts/keeper.sh` loads `.env` at startup.
+Changes to its port, tunnel, or inherited environment require reloading the keeper through the
+installation's supervisor (systemd or the portable keeper launcher). Inspect the supervisor's
+kill scope first to preserve active sessions. When switching tunnels, identify and stop only
+this installation's old tunnel process so the reloaded keeper can launch the configured one;
+restarting the Node server alone does not switch tunnels. Verify the new public URL. Do not
+print credential values during these checks.
 
 ## The harness (optional, recommended)
 

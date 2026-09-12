@@ -129,8 +129,8 @@ Give them, clearly:
 - **Quick tunnel URL changes on restart.** For a stable `box.yourdomain.com`, see
   `concierge/40-stable-url.md` (Cloudflare named tunnel) and set `TUNNEL_MODE=named` in `.env`.
 - **No public access wanted?** Set `TUNNEL_MODE=none`; Box serves on `http://localhost:PORT`.
-- **Restart after editing `.env`:** `pkill -f "node server/index.mjs"` — the keeper respawns
-  it within ~30s with the new config.
+- **Restart after editing `.env`:** follow the [scoped restart procedure](README.md#restarting-an-existing-installation).
+  The keeper loads configuration at startup, so a server-only restart may not apply new settings.
 - **Everything lives under** `~/.cc-mobile/` (logs, url.txt, uploads) and `~/.claude/` (the
   harness + your Claude sessions). Box reads your existing Claude sessions automatically.
 - This is a powerful setup: the harness defaults to `bypassPermissions` so agents act without

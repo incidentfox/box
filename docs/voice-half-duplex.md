@@ -149,8 +149,11 @@ to activate; browsers pick up the new `voice.js` on reload.
 ```bash
 # from the canonical checkout that box-app.service runs (see CLAUDE.md):
 git -C <canonical> fetch origin && git -C <canonical> merge --ff-only origin/main
-pkill -f "node server/index.mjs"   # keeper respawns in ~30s; dtach bridges survive
 ```
+
+Restart only the verified Box server PID using the
+[scoped restart procedure](../README.md#restarting-an-existing-installation), preserving the
+keeper and session bridges.
 
 Then hard-reload the box app (`box.mindbill.org`) so the browser loads the new `voice.js`.
 
