@@ -35,6 +35,19 @@ const PROMPT = v.prompt || `Respond with exactly ${EXPECT} and nothing else.`;
 const REAL_HOME = process.env.HOME || homedir();
 const REAL_CODEX_HOME = process.env.CODEX_HOME || join(REAL_HOME, '.codex');
 
+// Redact before truncating or embedding diagnostics in another JSON string.
+function redact(text) {
+  for (const secret of [TOKEN, JSON.stringify(TOKEN).slice(1, -1), encodeURIComponent(TOKEN)].sort((a, b) => b.length - a.length)) {
+    text = text.replaceAll(secret, '[REDACTED]');
+  }
+  return text;
+}
+
+function report(value, failed = false) {
+  const output = JSON.stringify(value, (_key, item) => typeof item === 'string' ? redact(item) : item, 2);
+  (failed ? console.error : console.log)(output);
+}
+
 function freePort() {
   return new Promise((resolvePort, reject) => {
     const srv = createServer();
@@ -126,8 +139,9 @@ function smokeTurn(base, token, { key, cwd, agent, model, deadline }) {
     const timer = setInterval(() => {
       if (Date.now() < deadline || finished) return;
       finished = true;
+      clearInterval(timer);
       try { ws.close(); } catch {}
-      reject(new Error(`smoke timed out; session=${sessionId || '(none)'} text=${JSON.stringify(text.slice(-240))}`));
+      reject(new Error(`smoke timed out; session=${redact(sessionId) || '(none)'} text=${JSON.stringify(redact(text).slice(-240))}`));
     }, 500);
     const done = (value) => {
       if (finished) return;
@@ -169,7 +183,7 @@ function smokeTurn(base, token, { key, cwd, agent, model, deadline }) {
       } else if (msg.type === 'done') {
         sessionId = msg.sessionId || sessionId;
         const ok = text.includes(EXPECT) && activity.length > 0;
-        done({ ok, sessionId, text, activity, error: ok ? '' : activity.length ? `expected ${EXPECT}, got ${JSON.stringify(text.slice(-500))}` : 'turn emitted no live activity metadata' });
+        done({ ok, sessionId, text, activity, error: ok ? '' : activity.length ? `expected ${redact(EXPECT)}, got ${JSON.stringify(redact(text).slice(-500))}` : 'turn emitted no live activity metadata' });
       }
     });
     ws.on('error', (e) => done({ ok: false, error: String(e && e.message || e), sessionId, text }));
@@ -212,7 +226,7 @@ try {
     throw new Error('server logs exposed the authentication token');
   }
   const result = results.at(-1);
-  console.log(JSON.stringify({
+  report({
     ok: true,
     agent: AGENT,
     model: AGENT === 'codex' ? MODEL : '',
@@ -221,16 +235,16 @@ try {
     turns: TURNS,
     sessionId: result.sessionId,
     activity: result.activity.slice(0, 8),
-    response: result.text.trim().slice(0, 500),
-  }, null, 2));
+    response: redact(result.text).trim().slice(0, 500),
+  });
 } catch (e) {
   const err = String(e && e.stack || e);
-  console.error(JSON.stringify({
+  report({
     ok: false,
     error: err,
-    stdout: stdout.replaceAll(TOKEN, '[REDACTED]').slice(-2000),
-    stderr: stderr.replaceAll(TOKEN, '[REDACTED]').slice(-2000),
-  }, null, 2));
+    stdout: redact(stdout).slice(-2000),
+    stderr: redact(stderr).slice(-2000),
+  }, true);
   process.exitCode = 1;
 } finally {
   if (server) {
@@ -241,6 +255,6 @@ try {
   if (!v.keep) {
     try { rmSync(tmp, { recursive: true, force: true }); } catch {}
   } else {
-    console.error(`kept ${tmp}`);
+    console.error(redact(`kept ${tmp}`));
   }
 }
