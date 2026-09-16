@@ -119,3 +119,14 @@ export function dueWakeups(wakeups = [], now = new Date()) {
   const nowMs = now.getTime();
   return wakeups.filter((wake) => !wake.firedAt && Number.isFinite(Date.parse(wake.at)) && Date.parse(wake.at) <= nowMs);
 }
+
+// Account exhaustion needs a top-up or a usage reset; switching models cannot
+// repair it. Keep ordinary request rate limits on the existing retry path.
+export function codexCreditExhausted(error) {
+  const text = typeof error === 'string' ? error : JSON.stringify(error || '');
+  return /\b(?:insufficient_quota|usage_limit_reached|credit_balance_exhausted|billing_hard_limit_reached)\b/i.test(text)
+    || /\b(?:hit|reached|exceeded)\s+(?:your\s+|the\s+)?(?:usage|credit|billing|spending)\s+limit\b/i.test(text)
+    || /\bexceeded\s+(?:your\s+)?current\s+quota\b/i.test(text)
+    || /\b(?:out of|insufficient|not enough)\s+(?:remaining\s+)?credits?\b/i.test(text)
+    || /\bcredits?\s+(?:balance\s+)?(?:is\s+|are\s+|has been\s+)?(?:exhausted|depleted)\b/i.test(text);
+}

@@ -1,3 +1,4 @@
+import { codexCreditExhausted, armTaskFinisher, stopTaskFinisher, recordTaskFinisherFailure } from './session-scheduler.mjs';
 // Tests for buildCodexArgs — guards the variadic `-i/--image` ordering bug, where images placed
 // before the positional prompt made codex's variadic `-i` swallow the prompt (and the session id
 // on resume), so an image message silently vanished. Run: node server/codex-exec-engine.test.mjs
@@ -187,6 +188,9 @@ assert.equal(reasoningHeartbeat({ type: 'item.completed', item: { type: 'agent_m
   assert.equal(events.at(-1).status, 'completed');
   assert.equal(spawnOptions.detached, process.platform !== 'win32');
   assert.ok(spawnArgs.includes('mcp_servers.sessiongrep.enabled=false'), 'owner turn disables sessiongrep MCP');
+  child.stdout.write(`${JSON.stringify({ type: 'turn.failed', error: { code: 'insufficient_quota', message: 'Account unavailable' } })}\n`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.at(-1), { type: 'error', code: 'insufficient_quota', msg: 'Account unavailable' });
 }
 
 {
@@ -232,7 +236,7 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     setTimeout, clearTimeout, sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
     stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
     codexEngine: { run() { throw Object.assign(new Error('spawn E2BIG'), { code: 'E2BIG' }); } },
-    cleanCodexError: String, codexAssistantParts: () => [], flushCodexAssistant() {},
+    stopTaskFinisherOnCodexCreditError: () => false, cleanCodexError: String, codexAssistantParts: () => [], flushCodexAssistant() {},
     appendCodexMessage: (...args) => notes.push(args), ensureTail() {}, triggerAttentionUpdate() {},
     bcast: (_session, event) => events.push(event),
   };
@@ -246,6 +250,76 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
   assert.equal(session.lastTurnError, 'spawn E2BIG');
   assert.deepEqual(events.map(event => event.type), ['error', 'done']);
   assert.ok(notes[0][2].includes('spawn E2BIG'));
+}
+
+
+// Drive the real turn callback and worker completion branch with account errors.
+// In particular, /goal can fail AFTER finish() has already resolved the worker.
+{
+  const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
+  const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
+  const guard = source.match(/function stopTaskFinisherOnCodexCreditError\(s, error\) \{[\s\S]*?\n\}/)[0];
+  const completionStart = source.indexOf('    if (s.sessionId && !s.canceled && !s.codexCreditBlocked)');
+  assert.ok(completionStart > 0);
+  const completion = source.slice(completionStart, source.indexOf('    s.inflight = null;', completionStart));
+  for (const event of [
+    { type: 'error', msg: "You've hit your usage limit" },
+    { type: 'notice', text: 'Insufficient credits' },
+    { type: 'error', code: 'insufficient_quota', msg: 'Account unavailable' },
+  ]) for (const lateGoal of [false, true]) {
+    let policy = armTaskFinisher();
+    let onEvent;
+    let persisted = 0;
+    let resolved = 0;
+    const child = new EventEmitter();
+    child.exitCode = null; child.signalCode = null;
+    const manual = { qid: 'manual', text: 'Preserve this exact user message' };
+    const session = { sessionId: 'test-existing', agent: 'codex', cwd: '/tmp', curParts: [], queue: [
+      { qid: 'automatic', taskFinisherContinuation: true }, manual,
+    ] };
+    const context = {
+      CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
+      setTimeout, clearTimeout, sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
+      stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
+      codexEngine: { run(options) { onEvent = options.onEvent; return child; } },
+      cleanCodexError: String, codexAssistantParts: () => [], flushCodexAssistant() {},
+      appendCodexMessage() {}, ensureTail() {}, triggerAttentionUpdate() {}, bcast() {},
+      persist() { persisted++; }, queueView: s => s.queue,
+      codexCreditExhausted,
+      stopTaskFinisherForSession: (_id, state, reason) => { policy = stopTaskFinisher(policy, state, reason); },
+      armTaskFinisherForSession: () => { policy = armTaskFinisher(policy); },
+      handleTaskFinisherFailureForSession: () => { policy = recordTaskFinisherFailure(policy); },
+      taskFinisherStopRequested: () => false,
+      requestScheduleTick() {}, runWorker() {},
+      s: session, msg: { taskFinisherArm: true, taskFinisherContinuation: true }, completedText: '',
+    };
+    vm.createContext(context);
+    vm.runInContext(guard + '\n' + handler, context);
+    context.runCodexTurn(session, { text: 'test', qid: 'test' }, () => resolved++);
+    if (lateGoal) {
+      onEvent({ type: 'turn_end' });
+      vm.runInContext(completion, context);
+      assert.equal(policy.armed, true, 'a successful first goal turn can arm');
+    }
+    onEvent(event);
+    child.emit('close');
+    vm.runInContext(completion, context);
+    assert.equal(resolved, 1);
+    assert.equal(policy.armed, false, 'credit errors cannot re-arm or retry');
+    assert.equal(policy.state, 'error');
+    assert.equal(policy.failoverModel, null, 'no model failover on account exhaustion');
+    assert.equal(policy.consecutiveFailureCount, 0, 'stops on the first error');
+    assert.equal(session.queue.length, 1);
+    assert.equal(session.queue[0], manual, 'manual messages are preserved exactly');
+    assert.equal(persisted, 1, 'automatic queue removal is durable');
+    // Provisional startup failures also stop their schedule; ordinary transient
+    // errors and other providers do not activate this Codex account guard.
+    session.sessionId = null; session.provKey = 'new-test';
+    assert.equal(context.stopTaskFinisherOnCodexCreditError(session, event), true);
+    assert.equal(context.stopTaskFinisherOnCodexCreditError(session, '429 Too many requests'), false);
+    session.agent = 'claude';
+    assert.equal(context.stopTaskFinisherOnCodexCreditError(session, event), false);
+  }
 }
 
 console.log('✅ codex-exec-engine.test.mjs passed');

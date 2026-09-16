@@ -32,7 +32,7 @@ import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import {
-  armTaskFinisher, clearTaskFinisherFailureCount, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
+  armTaskFinisher, clearTaskFinisherFailureCount, codexCreditExhausted, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
   noteTaskFinisherActivity, recordTaskFinisherFailure, shouldRunTaskFinisher, stopTaskFinisher,
   taskFinisherStopRequested, validTimeZone,
 } from './session-scheduler.mjs';
@@ -3569,6 +3569,21 @@ function noteTaskFinisherActivityForSession(id) {
 function stopTaskFinisherForSession(id, state = 'stopped', reason = 'Stopped by user') {
   return updateTaskFinisher(id, (policy) => stopTaskFinisher(policy, state, reason));
 }
+function stopTaskFinisherOnCodexCreditError(s, error) {
+  if (s.agent !== 'codex' || !codexCreditExhausted(error)) return false;
+  // Sticky until the next user turn: duplicate error/close events must not
+  // re-arm automation, including errors after a /goal's first turn_end.
+  s.codexCreditBlocked = true;
+  const id = s.sessionId || s.provKey || s.key;
+  stopTaskFinisherForSession(id, 'error', 'Auto-continuation stopped: Codex credits or usage limit exhausted');
+  const kept = s.queue.filter((message) => !message.taskFinisherContinuation);
+  if (kept.length !== s.queue.length) {
+    s.queue = kept;
+    persist(s);
+    bcast(s, { type: 'queue', queue: queueView(s) });
+  }
+  return true;
+}
 function handleTaskFinisherFailureForSession(id, error) {
   const updated = updateTaskFinisher(id, (policy) => recordTaskFinisherFailure(policy));
   if (updated && !updated.armed) {
@@ -5787,7 +5802,7 @@ async function runWorker(s) {
     if (msg.parentId) s.parentId = msg.parentId;
     if (msg.parentTitle) s.parentTitle = msg.parentTitle;
     if (msg.title) s.title = msg.title;
-    s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.lastActivityAt = Date.now(); s.activityLabel = 'Starting'; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
+    s.curText = ''; s.curTools = []; s.curParts = []; s.voiceFinalText = ''; s.canceled = false; s.lastTurnError = ''; s.codexCreditBlocked = false; s.lastActivityAt = Date.now(); s.activityLabel = 'Starting'; s.curUser = msg.displayText != null ? msg.displayText : msg.text; s.curUserImages = msg.images || [];
     s.curAuthor = msg.author || null;   // so a mid-turn (re)subscriber sees who asked
     if (s.sessionId) { addRunning(s.sessionId); unarchiveOnResume(s.sessionId); } // a new message resumes the chat → bring it out of the archive (and out of the reaper's reach)
     bcast(s, { type: 'turn_start', qid: msg.qid, text: msg.displayText != null ? msg.displayText : msg.text, mode: msg.mode, agent: s.agent, images: msg.images || [], author: msg.author || null });
@@ -5813,7 +5828,7 @@ async function runWorker(s) {
     if (typeof msg.onComplete === 'function') {
       try { msg.onComplete({ text: completedText, sessionId: s.sessionId || '', agent: s.agent || msg.agent || 'claude', error: s.lastTurnError || '', canceled: !!s.canceled }); } catch {}
     }
-    if (s.sessionId && !s.canceled) {
+    if (s.sessionId && !s.canceled && !s.codexCreditBlocked) {
       if (taskFinisherStopRequested(completedText)) stopTaskFinisherForSession(s.sessionId, 'stopped', 'Stopped by agent /stop');
       else if (msg.taskFinisherArm) armTaskFinisherForSession(s.sessionId);
       else if (msg.taskFinisherContinuation) {
@@ -6113,16 +6128,18 @@ function runCodexTurn(s, msg, resolve) {
         // another task. Waiting for process close is what caused the exact 45-minute false failure.
         finish({ completed: true, keepAlive: true });
       } else if (ev.type === 'notice' || ev.type === 'error') {
-      if (ev.type === 'error') { lastError = cleanCodexError(ev.msg); s.lastTurnError = lastError; }
+        const creditBlocked = stopTaskFinisherOnCodexCreditError(s, ev);
+        if (ev.type === 'error' || creditBlocked) { lastError = cleanCodexError(ev.msg || ev.text); s.lastTurnError = lastError; }
         bcast(s, ev);
       }
     },
   });
   s.proc.on('close', () => finish());
-  s.proc.on('error', (e) => { lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
+  s.proc.on('error', (e) => { stopTaskFinisherOnCodexCreditError(s, e && e.message || e); lastError = cleanCodexError(e && e.message || e); s.lastTurnError = lastError; bcast(s, { type: 'error', msg: lastError }); finish(); });
   } catch (error) {
     // spawn can throw synchronously (E2BIG, invalid cwd/config). Contain startup
     // failures so one queued turn cannot crash the server and recovery loop.
+    stopTaskFinisherOnCodexCreditError(s, error && error.message || error);
     lastError = cleanCodexError(error && error.message || error);
     s.lastTurnError = lastError;
     bcast(s, { type: 'error', msg: lastError });
