@@ -5244,8 +5244,8 @@ function requestScheduleTick() {
   });
 }
 function taskFinisherBusy(id, agent, session) {
-  const processBusy = agent === 'codex' && codexThreadProcessBusy(id);
-  return session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc || processBusy;
+  return session.running || !!session.inflight || session.queue.length > 0 || !!session.codexGoalProc
+    || (agent === 'codex' && codexThreadProcessBusy(id));
 }
 async function runScheduleTick(now = new Date()) {
   if (scheduleTickRunning) return;
@@ -5280,8 +5280,10 @@ async function runScheduleTick(now = new Date()) {
       const session = rt(id);
       state = loadSchedules();
       let record = scheduleRecord(state, id, agent);
-      let decision = shouldRunTaskFinisher({ policy: record.autoContinue, now, busy: taskFinisherBusy(id, agent, session) });
-      if (!decision.due) continue;
+      // Historical policies remain in this file after they stop. Do not scan the
+      // process table for every inactive chat on every scheduler tick.
+      let decision = shouldRunTaskFinisher({ policy: record.autoContinue, now });
+      if (!decision.due || taskFinisherBusy(id, agent, session)) continue;
       if (taskFinisherWasStopped(id, session)) {
         record.autoContinue = stopTaskFinisher(decision.policy, 'stopped', 'Stopped by the session stop command', now);
         saveSchedules(state);
@@ -5394,7 +5396,10 @@ function codexThreadProcessBusy(id) {
   // resuming the same thread. The process argv is the authoritative concurrency signal.
   // Bypass the short list-view cache here so two independently launched workers cannot both
   // observe a stale negative result and fork an expensive long-context turn.
-  return codexResumeThreadActive(pgrepFull(id), id);
+  // Read a fresh Linux snapshot without spawning pgrep/ps on the event loop.
+  // Keep the portable fallback on hosts without procfs, and never cache this
+  // admission check: a worker may have started since the previous call.
+  return codexResumeThreadActive(procLines(id, procTableSnapshot()), id);
 }
 
 function nativeCodexTurnActive(s) {
