@@ -6001,8 +6001,9 @@ function runCodexTurn(s, msg, resolve) {
     const assistantParts = codexAssistantParts(s.curParts);
     // A missing turn_end can be an unreported startup failure or timeout. Feed it
     // into the worker's bounded retry policy instead of treating silence as success.
-    if (!s.canceled && !completed && !lastError && (timedOut || !assistantParts.length)) {
-      s.lastTurnError = timedOut ? 'Codex turn timed out' : 'Codex exited without a response';
+    if (!s.canceled && !completed && !lastError) {
+      s.lastTurnError = timedOut ? 'Codex turn timed out'
+        : assistantParts.length ? 'Codex exited before completing its response' : 'Codex exited without a response';
     }
     // `/goal` can begin its next task immediately after this turn completes. Keep that process
     // supervised, but release the phone turn now and let the rollout tail render further work.

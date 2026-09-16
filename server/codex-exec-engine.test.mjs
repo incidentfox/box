@@ -322,7 +322,7 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
   }
 }
 
-// An empty process exit must reach the same bounded continuation retry policy as
+// An incomplete process exit must reach the same bounded continuation retry policy as
 // an explicit error. Exercise the real handler and worker completion branch so
 // persisted warning text alone cannot accidentally count as a successful turn.
 {
@@ -336,9 +336,11 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     let onEvent, timeout;
     let resolved = 0;
     const notes = [];
+    const finalized = [];
+    const partialParts = [{ t: 'text', text: 'Partial progress' }, { t: 'tool', name: 'shell', output: 'Synthetic tool output' }];
     const queued = { qid: 'manual-queued', text: 'Keep this queued message' };
     const session = { sessionId: 'test-existing', agent: 'codex', cwd: '/tmp', canceled, lastTurnError: '',
-      curParts: partial ? [{ t: 'text', text: 'Partial progress' }] : [], queue: [queued] };
+      curParts: partial ? partialParts : [], queue: [queued] };
     const context = {
       CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
       setTimeout: callback => { timeout = callback; return 1; }, clearTimeout() {},
@@ -346,7 +348,8 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
       stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
       codexEngine: { run(options) { onEvent = options.onEvent; return child; } },
       stopTaskFinisherOnCodexCreditError: () => false, cleanCodexError: String,
-      codexAssistantParts: parts => parts, flushCodexAssistant() {},
+      codexAssistantParts: parts => parts,
+      flushCodexAssistant: (s, options) => { if (options.finalize) finalized.push(s.curParts); },
       appendCodexMessage: (...args) => notes.push(args), ensureTail() {}, triggerAttentionUpdate() {}, bcast() {},
       killAgentProcess() {}, requestScheduleTick() {}, runWorker() {},
       taskFinisherStopRequested: () => false,
@@ -366,6 +369,7 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     vm.runInContext(completion, context);
     assert.equal(session.queue[0], queued, 'failure accounting preserves queued user work');
     assert.equal(session.queue.length, 1);
+    if (partial) assert.deepEqual(finalized, [partialParts], 'partial text and tool output still reach history finalization unchanged');
     return { policy, session, notes };
   }
   const first = run();
@@ -382,6 +386,9 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     assert.equal(timedOut.session.lastTurnError, 'Codex turn timed out');
     assert.equal(timedOut.policy.armed, false, 'timeouts count even after partial progress');
   }
+  const partialExit = run({ partial: true, policy: first.policy });
+  assert.equal(partialExit.session.lastTurnError, 'Codex exited before completing its response');
+  assert.equal(partialExit.policy.armed, false, 'partial output without completion must not reset the retry bound');
   const completed = run({ outcome: 'completed', policy: first.policy });
   assert.equal(completed.session.lastTurnError, '', 'explicit completion may have no assistant text');
   assert.equal(completed.policy.consecutiveFailureCount, 0);
