@@ -1,4 +1,4 @@
-import { codexCreditExhausted, armTaskFinisher, stopTaskFinisher, recordTaskFinisherFailure } from './session-scheduler.mjs';
+import { codexCreditExhausted, armTaskFinisher, stopTaskFinisher, recordTaskFinisherFailure, clearTaskFinisherFailureCount } from './session-scheduler.mjs';
 // Tests for buildCodexArgs — guards the variadic `-i/--image` ordering bug, where images placed
 // before the positional prompt made codex's variadic `-i` swallow the prompt (and the session id
 // on resume), so an image message silently vanished. Run: node server/codex-exec-engine.test.mjs
@@ -259,6 +259,8 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
   const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
   const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
   const guard = source.match(/function stopTaskFinisherOnCodexCreditError\(s, error\) \{[\s\S]*?\n\}/)[0];
+  const appendHistory = source.slice(source.indexOf('function appendCodexMessage('), source.indexOf('function ensureTeamClaudeSession('));
+  const flushHistory = source.slice(source.indexOf('function flushCodexAssistant('), source.indexOf('function ensureGeminiSession('));
   const completionStart = source.indexOf('    if (s.sessionId && !s.canceled && !s.codexCreditBlocked)');
   assert.ok(completionStart > 0);
   const completion = source.slice(completionStart, source.indexOf('    s.inflight = null;', completionStart));
@@ -320,6 +322,159 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     session.agent = 'claude';
     assert.equal(context.stopTaskFinisherOnCodexCreditError(session, event), false);
   }
+}
+
+// An incomplete process exit must reach the same bounded continuation retry policy as
+// an explicit error. Exercise the real handler and worker completion branch so
+// persisted warning text alone cannot accidentally count as a successful turn.
+{
+  const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
+  const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
+  const appendHistory = source.slice(source.indexOf('function appendCodexMessage('), source.indexOf('function ensureTeamClaudeSession('));
+  const flushHistory = source.slice(source.indexOf('function flushCodexAssistant('), source.indexOf('function ensureGeminiSession('));
+  const completionStart = source.indexOf('    if (s.sessionId && !s.canceled && !s.codexCreditBlocked)');
+  const completion = source.slice(completionStart, source.indexOf('    s.inflight = null;', completionStart));
+  function run({ policy = armTaskFinisher(), outcome = 'empty', canceled = false, manual = false, partial = false } = {}) {
+    const child = new EventEmitter();
+    child.exitCode = null; child.signalCode = null;
+    let onEvent, timeout;
+    let resolved = 0;
+    const notes = [];
+    const finalized = [];
+    const events = [];
+    let registry = JSON.stringify({ sessions: { 'test-existing': { id: 'test-existing', title: 'Test' } } });
+    let history = '[]';
+    const partialParts = [{ t: 'text', text: 'Partial progress' }, { t: 'tool', name: 'shell', output: 'Synthetic tool output' }];
+    const queued = { qid: 'manual-queued', text: 'Keep this queued message' };
+    const session = { sessionId: 'test-existing', agent: 'codex', cwd: '/tmp', canceled, lastTurnError: '',
+      curParts: partial ? partialParts : [], queue: [queued] };
+    const context = {
+      CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
+      setTimeout: callback => { timeout = callback; return 1; }, clearTimeout() {},
+      sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
+      stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
+      codexEngine: { run(options) { onEvent = options.onEvent; return child; } },
+      stopTaskFinisherOnCodexCreditError: () => false, cleanCodexError: String,
+      codexAssistantParts: parts => parts,
+      loadCodex: () => JSON.parse(registry), saveCodex: state => { registry = JSON.stringify(state); },
+      loadCodexMessages: () => JSON.parse(history), saveCodexMessages: (_id, rows) => { history = JSON.stringify(rows); },
+      ensureTail() {}, triggerAttentionUpdate() {}, bcast: (_s, event) => events.push(event),
+      killAgentProcess() {}, requestScheduleTick() {}, runWorker() {},
+      taskFinisherStopRequested: () => false,
+      armTaskFinisherForSession: () => { policy = armTaskFinisher(policy); },
+      handleTaskFinisherFailureForSession: () => { policy = recordTaskFinisherFailure(policy); },
+      updateTaskFinisher: (_id, update) => { policy = update(policy); },
+      clearTaskFinisherFailureCount, noteTaskFinisherActivityForSession() {},
+      s: session, msg: manual ? { taskFinisherArm: true } : { taskFinisherContinuation: true }, completedText: '',
+    };
+    vm.createContext(context);
+    vm.runInContext(appendHistory + flushHistory + handler, context);
+    const persistAppend = context.appendCodexMessage;
+    const persistFlush = context.flushCodexAssistant;
+    context.appendCodexMessage = (...args) => { notes.push(args); return persistAppend(...args); };
+    context.flushCodexAssistant = (s, options) => {
+      if (options.finalize) finalized.push(s.curParts);
+      return persistFlush(s, options);
+    };
+    context.runCodexTurn(session, { text: 'test', qid: 'test' }, () => resolved++);
+    if (partial) context.flushCodexAssistant(session, { finalize: false });
+    if (outcome === 'completed') onEvent({ type: 'turn_end' });
+    else if (outcome === 'timeout') timeout();
+    child.emit('close');
+    assert.equal(resolved, 1, 'late close must not complete the same turn twice');
+    vm.runInContext(completion, context);
+    assert.equal(session.queue[0], queued, 'failure accounting preserves queued user work');
+    assert.equal(session.queue.length, 1);
+    if (partial) assert.deepEqual(finalized, [partialParts], 'partial text and tool output still reach history finalization unchanged');
+    const reloaded = JSON.parse(history);
+    if (partial) {
+      assert.deepEqual(reloaded[0].parts, partialParts, 'reloaded history preserves exact partial text and tool output');
+      assert.equal(reloaded[0].live, undefined, 'the original live row is finalized in place');
+    }
+    assert.equal(reloaded.length, Number(partial) + notes.length, 'warnings persist separately without duplicating partial output');
+    if (notes.length) {
+      assert.equal(reloaded.at(-1).parts[0].text, notes[0][2], 'the warning survives history reload');
+      assert.equal(reloaded.at(-1).boxNotice, 'codex-incomplete');
+    }
+    return { policy, session, notes, events };
+  }
+  const first = run();
+  assert.equal(first.session.lastTurnError, 'Codex exited without a response');
+  assert.equal(first.notes[0][2], '⚠️ Codex exited without a response. Send again to retry.');
+  assert.equal(first.policy.armed, true);
+  assert.equal(first.policy.consecutiveFailureCount, 1);
+  assert.equal(first.policy.failoverModel, 'gpt-5.6-sol');
+  const second = run({ policy: first.policy });
+  assert.equal(second.policy.armed, false, 'repeated empty exits stop automatic continuation');
+  assert.equal(second.policy.state, 'error');
+  for (const partial of [false, true]) {
+    const timedOut = run({ outcome: 'timeout', partial, policy: first.policy });
+    assert.equal(timedOut.session.lastTurnError, 'Codex turn timed out');
+    assert.equal(timedOut.policy.armed, false, 'timeouts count even after partial progress');
+    assert.equal(timedOut.notes.length, 1);
+    assert.equal(timedOut.notes[0][2], `⚠️ ${timedOut.events.find(event => event.type === 'error').msg}`, 'live and persisted warnings agree');
+    if (partial) assert.match(timedOut.notes[0][2], /before completing its response\. Partial output was saved/);
+  }
+  const partialExit = run({ partial: true, policy: first.policy });
+  assert.equal(partialExit.session.lastTurnError, 'Codex exited before completing its response');
+  assert.equal(partialExit.policy.armed, false, 'partial output without completion must not reset the retry bound');
+  assert.equal(partialExit.notes[0][2], '⚠️ Codex exited before completing its response. Partial output was saved. Send again to retry.');
+  assert.equal(partialExit.notes[0][2], `⚠️ ${partialExit.events.find(event => event.type === 'error').msg}`);
+  const completed = run({ outcome: 'completed', policy: first.policy });
+  assert.equal(completed.session.lastTurnError, '', 'explicit completion may have no assistant text');
+  assert.equal(completed.policy.consecutiveFailureCount, 0);
+  assert.equal(completed.policy.failoverModel, null);
+  for (const partial of [false, true]) {
+    const successful = run({ outcome: 'completed', partial });
+    assert.equal(successful.notes.length, 0);
+    assert.equal(successful.events.some(event => event.type === 'error'), false);
+  }
+  for (const outcome of ['empty', 'timeout']) {
+    const canceled = run({ outcome, canceled: true, partial: true, policy: first.policy });
+    assert.equal(canceled.session.lastTurnError, '');
+    assert.equal(canceled.policy, first.policy, 'cancellation must not count as another failure');
+    assert.equal(canceled.notes.length, 0);
+    assert.equal(canceled.events.some(event => event.type === 'error'), false);
+  }
+  const manual = run({ manual: true, policy: second.policy });
+  assert.equal(manual.policy.armed, true, 'manual retry retains existing arming behavior');
+  assert.equal(manual.policy.consecutiveFailureCount, second.policy.consecutiveFailureCount, 'manual turns do not enter automatic failure accounting');
+}
+
+// Native rollout history must retain its authoritative output while exposing only
+// explicitly tagged Box notices on the latest page, never mirrored sidecar rows.
+{
+  const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
+  const historyHandler = source.slice(source.indexOf('function mergeCodexIncompleteNotices('), source.indexOf('// ---- helpers: available skills/commands'));
+  const native = [
+    { role: 'user', parts: [{ t: 'text', text: 'Synthetic request' }], ts: '2026-09-16T12:00:00Z' },
+    { role: 'assistant', parts: [{ t: 'text', text: 'Exact native partial output' }, { t: 'tool', name: 'shell', output: 'Exact native tool output' }], ts: '2026-09-16T12:00:01Z' },
+  ];
+  const notice = { role: 'assistant', parts: [{ t: 'text', text: 'Incomplete response warning' }], ts: Date.parse('2026-09-16T12:00:02Z'), boxNotice: 'codex-incomplete' };
+  const sidecar = [
+    { ...notice, ts: Date.parse('2026-09-15T12:00:00Z') },
+    { role: 'assistant', parts: [{ t: 'text', text: 'Mirrored sidecar partial' }], ts: native[1].ts },
+    notice,
+  ];
+  const context = {
+    loadCodex: () => ({ sessions: { test: { cwd: '/tmp' } } }), CODEX_HOME: '/tmp',
+    findCodexRollout: () => '/tmp/synthetic-rollout', codexRolloutHistory: async () => ({ messages: native, hasMore: true, cursor: 500, liveCursor: 1000 }),
+    loadCodexMessages: () => sidecar, HIST_MSG_LIMIT: 100,
+    enrichCodexHistory: (_id, rows) => rows, normalizeSettings: value => value,
+    contextForSession: () => ({}), readCodexCompactionInfo: () => null,
+  };
+  vm.createContext(context);
+  vm.runInContext(historyHandler, context);
+  const latest = await context.sessionHistory('test');
+  assert.deepEqual(Array.from(latest.messages), [...native, notice], 'latest native history includes a separate tagged notice without older or mirrored sidecar rows');
+  assert.equal(latest.messages[1], native[1], 'native partial text and tool rows stay untouched');
+  assert.equal(latest.cursor, 500);
+  assert.equal(latest.hasMore, true);
+  const older = await context.sessionHistory('test', { before: 500 });
+  assert.deepEqual(Array.from(older.messages), native, 'loading older pages must not repeat latest sidecar notices');
+  context.findCodexRollout = () => null;
+  const sidecarOnly = await context.sessionHistory('test');
+  assert.deepEqual(Array.from(sidecarOnly.messages), sidecar, 'sessions without native rollouts keep their existing sidecar history');
 }
 
 console.log('✅ codex-exec-engine.test.mjs passed');

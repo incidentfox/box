@@ -1574,6 +1574,7 @@ function appendCodexMessage(id, role, text, extra = {}) {
   const message = { role, parts, ts: extra.ts || now };
   if (extra.qid) message.qid = extra.qid;
   if (extra.recovered) message.recovered = true;
+  if (extra.boxNotice === 'codex-incomplete') message.boxNotice = extra.boxNotice;
   saveCodexMessages(id, [...loadCodexMessages(id, prev), message]);
   delete prev.messages;
   const plain = String(text || parts.filter((p) => p.t === 'text').map((p) => p.text).join(' ')).trim();
@@ -2661,6 +2662,15 @@ function claudeSessionHistory(id, file, before = null) {
   const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
   return setHistoryCache(key, { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) });
 }
+function mergeCodexIncompleteNotices(messages, sidecar) {
+  const time = (row) => typeof row.ts === 'number' ? row.ts : Date.parse(row.ts || '');
+  const firstTime = messages.map(time).find(Number.isFinite) ?? 0;
+  const notices = sidecar.filter((row) => row.boxNotice === 'codex-incomplete' && time(row) >= firstTime);
+  if (!notices.length) return messages;
+  // Only Box-owned notices are absent from the native rollout. Never merge its
+  // mirrored assistant/tool rows, which would duplicate or replace native output.
+  return [...messages, ...notices].sort((a, b) => (time(a) || 0) - (time(b) || 0));
+}
 async function sessionHistory(id, { before = null } = {}) {
   const codex = (loadCodex().sessions || {})[id];
   if (codex) {
@@ -2668,7 +2678,8 @@ async function sessionHistory(id, { before = null } = {}) {
     // still name the original file, so prefer the newest matching rollout.
     const rolloutFile = findCodexRollout(CODEX_HOME, id) || codex.transcriptPath;
     const rollout = await codexRolloutHistory(rolloutFile, { before });
-    const messages = rolloutFile ? rollout.messages : loadCodexMessages(id, codex);
+    let messages = rolloutFile ? rollout.messages : loadCodexMessages(id, codex);
+    if (rolloutFile && before == null) messages = mergeCodexIncompleteNotices(messages, loadCodexMessages(id, codex));
     return { messages: enrichCodexHistory(id, messages.slice(-HIST_MSG_LIMIT)), hasMore: rollout.hasMore, cursor: rollout.cursor, liveCursor: rollout.liveCursor, cwd: codex.cwd || DEFAULT_CWD, agent: 'codex', settings: normalizeSettings(codex.settings || {}), parentId: codex.parentId || null, parentTitle: codex.parentTitle || '', context: contextForSession(id, { agent: 'codex', codex }), historyCompaction: before == null ? readCodexCompactionInfo(rolloutFile) : null };
   }
   const teamClaude = (loadTeamClaude().sessions || {})[id];
@@ -5998,6 +6009,13 @@ function runCodexTurn(s, msg, resolve) {
     if (done) return; done = true;
     const ownedProc = s.proc;
     clearTimeout(s.turnTimer); s.proc = null;
+    const assistantParts = codexAssistantParts(s.curParts);
+    // A missing turn_end can be an unreported startup failure or timeout. Feed it
+    // into the worker's bounded retry policy instead of treating silence as success.
+    if (!s.canceled && !completed && !lastError) {
+      s.lastTurnError = timedOut ? 'Codex turn timed out'
+        : assistantParts.length ? 'Codex exited before completing its response' : 'Codex exited without a response';
+    }
     // `/goal` can begin its next task immediately after this turn completes. Keep that process
     // supervised, but release the phone turn now and let the rollout tail render further work.
     if (keepAlive && ownedProc && ownedProc.exitCode == null && ownedProc.signalCode == null) {
@@ -6013,15 +6031,19 @@ function runCodexTurn(s, msg, resolve) {
     // incrementally below; this just clears the `live` flag — or writes it once for a
     // turn so short nothing flushed mid-stream.
     if (s.sessionId) {
-      const assistantParts = codexAssistantParts(s.curParts);
       flushCodexAssistant(s, { finalize: true });
       // A turn that errored out (e.g. model_not_found, rate limit) only ever bcast the error to the
       // live view — reopening the chat later showed silence. Persist a short note so the failure is
       // visible in history too.
       if (lastError && !s.canceled) appendCodexMessage(s.sessionId, 'assistant', `⚠️ Codex error: ${lastError}`);
-      else if (!s.canceled && !assistantParts.length && !completed) appendCodexMessage(s.sessionId, 'assistant', timedOut
-        ? "⚠️ Codex timed out after 45 minutes without producing a response. Send again to retry."
-        : "⚠️ Codex exited without a response. Send again to retry.");
+      else if (!s.canceled && !completed) {
+        const warning = assistantParts.length
+          ? `Codex ${timedOut ? 'timed out' : 'exited'} before completing its response. Partial output was saved. Send again to retry.`
+          : timedOut ? 'Codex timed out after 45 minutes without producing a response. Send again to retry.'
+            : 'Codex exited without a response. Send again to retry.';
+        appendCodexMessage(s.sessionId, 'assistant', `⚠️ ${warning}`, { boxNotice: 'codex-incomplete' });
+        bcast(s, { type: 'error', msg: warning });
+      }
     } else if (s.provKey) {
       // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
       // entry already holds the user's message, so the chat stays in the list and is retryable in
