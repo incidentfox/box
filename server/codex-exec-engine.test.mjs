@@ -392,7 +392,10 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
       assert.equal(reloaded[0].live, undefined, 'the original live row is finalized in place');
     }
     assert.equal(reloaded.length, Number(partial) + notes.length, 'warnings persist separately without duplicating partial output');
-    if (notes.length) assert.equal(reloaded.at(-1).parts[0].text, notes[0][2], 'the warning survives history reload');
+    if (notes.length) {
+      assert.equal(reloaded.at(-1).parts[0].text, notes[0][2], 'the warning survives history reload');
+      assert.equal(reloaded.at(-1).boxNotice, 'codex-incomplete');
+    }
     return { policy, session, notes, events };
   }
   const first = run();
@@ -436,6 +439,42 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
   const manual = run({ manual: true, policy: second.policy });
   assert.equal(manual.policy.armed, true, 'manual retry retains existing arming behavior');
   assert.equal(manual.policy.consecutiveFailureCount, second.policy.consecutiveFailureCount, 'manual turns do not enter automatic failure accounting');
+}
+
+// Native rollout history must retain its authoritative output while exposing only
+// explicitly tagged Box notices on the latest page, never mirrored sidecar rows.
+{
+  const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
+  const historyHandler = source.slice(source.indexOf('function mergeCodexIncompleteNotices('), source.indexOf('// ---- helpers: available skills/commands'));
+  const native = [
+    { role: 'user', parts: [{ t: 'text', text: 'Synthetic request' }], ts: '2026-09-16T12:00:00Z' },
+    { role: 'assistant', parts: [{ t: 'text', text: 'Exact native partial output' }, { t: 'tool', name: 'shell', output: 'Exact native tool output' }], ts: '2026-09-16T12:00:01Z' },
+  ];
+  const notice = { role: 'assistant', parts: [{ t: 'text', text: 'Incomplete response warning' }], ts: Date.parse('2026-09-16T12:00:02Z'), boxNotice: 'codex-incomplete' };
+  const sidecar = [
+    { ...notice, ts: Date.parse('2026-09-15T12:00:00Z') },
+    { role: 'assistant', parts: [{ t: 'text', text: 'Mirrored sidecar partial' }], ts: native[1].ts },
+    notice,
+  ];
+  const context = {
+    loadCodex: () => ({ sessions: { test: { cwd: '/tmp' } } }), CODEX_HOME: '/tmp',
+    findCodexRollout: () => '/tmp/synthetic-rollout', codexRolloutHistory: async () => ({ messages: native, hasMore: true, cursor: 500, liveCursor: 1000 }),
+    loadCodexMessages: () => sidecar, HIST_MSG_LIMIT: 100,
+    enrichCodexHistory: (_id, rows) => rows, normalizeSettings: value => value,
+    contextForSession: () => ({}), readCodexCompactionInfo: () => null,
+  };
+  vm.createContext(context);
+  vm.runInContext(historyHandler, context);
+  const latest = await context.sessionHistory('test');
+  assert.deepEqual(Array.from(latest.messages), [...native, notice], 'latest native history includes a separate tagged notice without older or mirrored sidecar rows');
+  assert.equal(latest.messages[1], native[1], 'native partial text and tool rows stay untouched');
+  assert.equal(latest.cursor, 500);
+  assert.equal(latest.hasMore, true);
+  const older = await context.sessionHistory('test', { before: 500 });
+  assert.deepEqual(Array.from(older.messages), native, 'loading older pages must not repeat latest sidecar notices');
+  context.findCodexRollout = () => null;
+  const sidecarOnly = await context.sessionHistory('test');
+  assert.deepEqual(Array.from(sidecarOnly.messages), sidecar, 'sessions without native rollouts keep their existing sidecar history');
 }
 
 console.log('✅ codex-exec-engine.test.mjs passed');
