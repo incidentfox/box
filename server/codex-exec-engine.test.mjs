@@ -259,6 +259,8 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
   const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
   const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
   const guard = source.match(/function stopTaskFinisherOnCodexCreditError\(s, error\) \{[\s\S]*?\n\}/)[0];
+  const appendHistory = source.slice(source.indexOf('function appendCodexMessage('), source.indexOf('function ensureTeamClaudeSession('));
+  const flushHistory = source.slice(source.indexOf('function flushCodexAssistant('), source.indexOf('function ensureGeminiSession('));
   const completionStart = source.indexOf('    if (s.sessionId && !s.canceled && !s.codexCreditBlocked)');
   assert.ok(completionStart > 0);
   const completion = source.slice(completionStart, source.indexOf('    s.inflight = null;', completionStart));
@@ -328,6 +330,8 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
 {
   const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
   const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
+  const appendHistory = source.slice(source.indexOf('function appendCodexMessage('), source.indexOf('function ensureTeamClaudeSession('));
+  const flushHistory = source.slice(source.indexOf('function flushCodexAssistant('), source.indexOf('function ensureGeminiSession('));
   const completionStart = source.indexOf('    if (s.sessionId && !s.canceled && !s.codexCreditBlocked)');
   const completion = source.slice(completionStart, source.indexOf('    s.inflight = null;', completionStart));
   function run({ policy = armTaskFinisher(), outcome = 'empty', canceled = false, manual = false, partial = false } = {}) {
@@ -337,6 +341,9 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     let resolved = 0;
     const notes = [];
     const finalized = [];
+    const events = [];
+    let registry = JSON.stringify({ sessions: { 'test-existing': { id: 'test-existing', title: 'Test' } } });
+    let history = '[]';
     const partialParts = [{ t: 'text', text: 'Partial progress' }, { t: 'tool', name: 'shell', output: 'Synthetic tool output' }];
     const queued = { qid: 'manual-queued', text: 'Keep this queued message' };
     const session = { sessionId: 'test-existing', agent: 'codex', cwd: '/tmp', canceled, lastTurnError: '',
@@ -349,8 +356,9 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
       codexEngine: { run(options) { onEvent = options.onEvent; return child; } },
       stopTaskFinisherOnCodexCreditError: () => false, cleanCodexError: String,
       codexAssistantParts: parts => parts,
-      flushCodexAssistant: (s, options) => { if (options.finalize) finalized.push(s.curParts); },
-      appendCodexMessage: (...args) => notes.push(args), ensureTail() {}, triggerAttentionUpdate() {}, bcast() {},
+      loadCodex: () => JSON.parse(registry), saveCodex: state => { registry = JSON.stringify(state); },
+      loadCodexMessages: () => JSON.parse(history), saveCodexMessages: (_id, rows) => { history = JSON.stringify(rows); },
+      ensureTail() {}, triggerAttentionUpdate() {}, bcast: (_s, event) => events.push(event),
       killAgentProcess() {}, requestScheduleTick() {}, runWorker() {},
       taskFinisherStopRequested: () => false,
       armTaskFinisherForSession: () => { policy = armTaskFinisher(policy); },
@@ -360,8 +368,16 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
       s: session, msg: manual ? { taskFinisherArm: true } : { taskFinisherContinuation: true }, completedText: '',
     };
     vm.createContext(context);
-    vm.runInContext(handler, context);
+    vm.runInContext(appendHistory + flushHistory + handler, context);
+    const persistAppend = context.appendCodexMessage;
+    const persistFlush = context.flushCodexAssistant;
+    context.appendCodexMessage = (...args) => { notes.push(args); return persistAppend(...args); };
+    context.flushCodexAssistant = (s, options) => {
+      if (options.finalize) finalized.push(s.curParts);
+      return persistFlush(s, options);
+    };
     context.runCodexTurn(session, { text: 'test', qid: 'test' }, () => resolved++);
+    if (partial) context.flushCodexAssistant(session, { finalize: false });
     if (outcome === 'completed') onEvent({ type: 'turn_end' });
     else if (outcome === 'timeout') timeout();
     child.emit('close');
@@ -370,7 +386,14 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     assert.equal(session.queue[0], queued, 'failure accounting preserves queued user work');
     assert.equal(session.queue.length, 1);
     if (partial) assert.deepEqual(finalized, [partialParts], 'partial text and tool output still reach history finalization unchanged');
-    return { policy, session, notes };
+    const reloaded = JSON.parse(history);
+    if (partial) {
+      assert.deepEqual(reloaded[0].parts, partialParts, 'reloaded history preserves exact partial text and tool output');
+      assert.equal(reloaded[0].live, undefined, 'the original live row is finalized in place');
+    }
+    assert.equal(reloaded.length, Number(partial) + notes.length, 'warnings persist separately without duplicating partial output');
+    if (notes.length) assert.equal(reloaded.at(-1).parts[0].text, notes[0][2], 'the warning survives history reload');
+    return { policy, session, notes, events };
   }
   const first = run();
   assert.equal(first.session.lastTurnError, 'Codex exited without a response');
@@ -385,19 +408,30 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     const timedOut = run({ outcome: 'timeout', partial, policy: first.policy });
     assert.equal(timedOut.session.lastTurnError, 'Codex turn timed out');
     assert.equal(timedOut.policy.armed, false, 'timeouts count even after partial progress');
+    assert.equal(timedOut.notes.length, 1);
+    assert.equal(timedOut.notes[0][2], `⚠️ ${timedOut.events.find(event => event.type === 'error').msg}`, 'live and persisted warnings agree');
+    if (partial) assert.match(timedOut.notes[0][2], /before completing its response\. Partial output was saved/);
   }
   const partialExit = run({ partial: true, policy: first.policy });
   assert.equal(partialExit.session.lastTurnError, 'Codex exited before completing its response');
   assert.equal(partialExit.policy.armed, false, 'partial output without completion must not reset the retry bound');
+  assert.equal(partialExit.notes[0][2], '⚠️ Codex exited before completing its response. Partial output was saved. Send again to retry.');
+  assert.equal(partialExit.notes[0][2], `⚠️ ${partialExit.events.find(event => event.type === 'error').msg}`);
   const completed = run({ outcome: 'completed', policy: first.policy });
   assert.equal(completed.session.lastTurnError, '', 'explicit completion may have no assistant text');
   assert.equal(completed.policy.consecutiveFailureCount, 0);
   assert.equal(completed.policy.failoverModel, null);
+  for (const partial of [false, true]) {
+    const successful = run({ outcome: 'completed', partial });
+    assert.equal(successful.notes.length, 0);
+    assert.equal(successful.events.some(event => event.type === 'error'), false);
+  }
   for (const outcome of ['empty', 'timeout']) {
-    const canceled = run({ outcome, canceled: true, policy: first.policy });
+    const canceled = run({ outcome, canceled: true, partial: true, policy: first.policy });
     assert.equal(canceled.session.lastTurnError, '');
     assert.equal(canceled.policy, first.policy, 'cancellation must not count as another failure');
     assert.equal(canceled.notes.length, 0);
+    assert.equal(canceled.events.some(event => event.type === 'error'), false);
   }
   const manual = run({ manual: true, policy: second.policy });
   assert.equal(manual.policy.armed, true, 'manual retry retains existing arming behavior');

@@ -6025,9 +6025,14 @@ function runCodexTurn(s, msg, resolve) {
       // live view — reopening the chat later showed silence. Persist a short note so the failure is
       // visible in history too.
       if (lastError && !s.canceled) appendCodexMessage(s.sessionId, 'assistant', `⚠️ Codex error: ${lastError}`);
-      else if (!s.canceled && !assistantParts.length && !completed) appendCodexMessage(s.sessionId, 'assistant', timedOut
-        ? "⚠️ Codex timed out after 45 minutes without producing a response. Send again to retry."
-        : "⚠️ Codex exited without a response. Send again to retry.");
+      else if (!s.canceled && !completed) {
+        const warning = assistantParts.length
+          ? `Codex ${timedOut ? 'timed out' : 'exited'} before completing its response. Partial output was saved. Send again to retry.`
+          : timedOut ? 'Codex timed out after 45 minutes without producing a response. Send again to retry.'
+            : 'Codex exited without a response. Send again to retry.';
+        appendCodexMessage(s.sessionId, 'assistant', `⚠️ ${warning}`);
+        bcast(s, { type: 'error', msg: warning });
+      }
     } else if (s.provKey) {
       // codex never produced a thread id (startup failure / OOM / bad invocation). The provisional
       // entry already holds the user's message, so the chat stays in the list and is retryable in
