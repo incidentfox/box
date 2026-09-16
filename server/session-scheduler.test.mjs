@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  armTaskFinisher, clearTaskFinisherFailureCount, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
+  armTaskFinisher, clearTaskFinisherFailureCount, codexCreditExhausted, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
   noteTaskFinisherActivity, recordTaskFinisherFailure, shouldRunTaskFinisher, stopTaskFinisher,
   taskFinisherStopRequested,
 } from './session-scheduler.mjs';
@@ -77,5 +77,18 @@ assert.equal(cleared.armed, true, 'remains armed after reset');
 const failureOnStopped = recordTaskFinisherFailure(stopped, now);
 assert.equal(failureOnStopped.armed, false, 'failure on unarmed policy leaves it unarmed');
 assert.equal(failureOnStopped.consecutiveFailureCount, 0, 'count unchanged on unarmed');
+
+
+for (const error of [
+  "You've hit your usage limit. Try again later.",
+  'You have reached your usage limit', 'You exceeded your billing limit',
+  'You exceeded your current quota, please check your plan and billing details',
+  'Out of credits', 'Insufficient credits', 'Credit balance exhausted',
+  { error: { code: 'insufficient_quota', message: 'Check your plan' } },
+  'usage_limit_reached', 'billing_hard_limit_reached',
+]) assert.equal(codexCreditExhausted(error), true, JSON.stringify(error));
+for (const error of ['', null, '429 Too many requests', 'rate_limit_exceeded',
+  'Request timed out', 'model_not_found', 'You are approaching your usage limit',
+]) assert.equal(codexCreditExhausted(error), false, JSON.stringify(error));
 
 console.log('session scheduler ok');

@@ -266,7 +266,7 @@ export class CodexExecEngine {
       }
 
       if (o.type === 'turn.failed' || o.type === 'error') {
-        emit({ type: 'error', msg: o.message || (o.error && o.error.message) || 'Codex turn failed' });
+        emit({ type: 'error', msg: o.message || (o.error && o.error.message) || 'Codex turn failed', ...(o.code || o.error?.code ? { code: o.code || o.error.code } : {}) });
       }
     });
 
