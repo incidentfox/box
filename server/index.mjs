@@ -5998,6 +5998,12 @@ function runCodexTurn(s, msg, resolve) {
     if (done) return; done = true;
     const ownedProc = s.proc;
     clearTimeout(s.turnTimer); s.proc = null;
+    const assistantParts = codexAssistantParts(s.curParts);
+    // A missing turn_end can be an unreported startup failure or timeout. Feed it
+    // into the worker's bounded retry policy instead of treating silence as success.
+    if (!s.canceled && !completed && !lastError && (timedOut || !assistantParts.length)) {
+      s.lastTurnError = timedOut ? 'Codex turn timed out' : 'Codex exited without a response';
+    }
     // `/goal` can begin its next task immediately after this turn completes. Keep that process
     // supervised, but release the phone turn now and let the rollout tail render further work.
     if (keepAlive && ownedProc && ownedProc.exitCode == null && ownedProc.signalCode == null) {
@@ -6013,7 +6019,6 @@ function runCodexTurn(s, msg, resolve) {
     // incrementally below; this just clears the `live` flag — or writes it once for a
     // turn so short nothing flushed mid-stream.
     if (s.sessionId) {
-      const assistantParts = codexAssistantParts(s.curParts);
       flushCodexAssistant(s, { finalize: true });
       // A turn that errored out (e.g. model_not_found, rate limit) only ever bcast the error to the
       // live view — reopening the chat later showed silence. Persist a short note so the failure is

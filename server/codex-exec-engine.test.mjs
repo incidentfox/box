@@ -1,4 +1,4 @@
-import { codexCreditExhausted, armTaskFinisher, stopTaskFinisher, recordTaskFinisherFailure } from './session-scheduler.mjs';
+import { codexCreditExhausted, armTaskFinisher, stopTaskFinisher, recordTaskFinisherFailure, clearTaskFinisherFailureCount } from './session-scheduler.mjs';
 // Tests for buildCodexArgs — guards the variadic `-i/--image` ordering bug, where images placed
 // before the positional prompt made codex's variadic `-i` swallow the prompt (and the session id
 // on resume), so an image message silently vanished. Run: node server/codex-exec-engine.test.mjs
@@ -320,6 +320,81 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     session.agent = 'claude';
     assert.equal(context.stopTaskFinisherOnCodexCreditError(session, event), false);
   }
+}
+
+// An empty process exit must reach the same bounded continuation retry policy as
+// an explicit error. Exercise the real handler and worker completion branch so
+// persisted warning text alone cannot accidentally count as a successful turn.
+{
+  const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
+  const handler = source.slice(source.indexOf('function runCodexTurn('), source.indexOf('// Team Claude is intentionally separate'));
+  const completionStart = source.indexOf('    if (s.sessionId && !s.canceled && !s.codexCreditBlocked)');
+  const completion = source.slice(completionStart, source.indexOf('    s.inflight = null;', completionStart));
+  function run({ policy = armTaskFinisher(), outcome = 'empty', canceled = false, manual = false, partial = false } = {}) {
+    const child = new EventEmitter();
+    child.exitCode = null; child.signalCode = null;
+    let onEvent, timeout;
+    let resolved = 0;
+    const notes = [];
+    const queued = { qid: 'manual-queued', text: 'Keep this queued message' };
+    const session = { sessionId: 'test-existing', agent: 'codex', cwd: '/tmp', canceled, lastTurnError: '',
+      curParts: partial ? [{ t: 'text', text: 'Partial progress' }] : [], queue: [queued] };
+    const context = {
+      CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
+      setTimeout: callback => { timeout = callback; return 1; }, clearTimeout() {},
+      sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
+      stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
+      codexEngine: { run(options) { onEvent = options.onEvent; return child; } },
+      stopTaskFinisherOnCodexCreditError: () => false, cleanCodexError: String,
+      codexAssistantParts: parts => parts, flushCodexAssistant() {},
+      appendCodexMessage: (...args) => notes.push(args), ensureTail() {}, triggerAttentionUpdate() {}, bcast() {},
+      killAgentProcess() {}, requestScheduleTick() {}, runWorker() {},
+      taskFinisherStopRequested: () => false,
+      armTaskFinisherForSession: () => { policy = armTaskFinisher(policy); },
+      handleTaskFinisherFailureForSession: () => { policy = recordTaskFinisherFailure(policy); },
+      updateTaskFinisher: (_id, update) => { policy = update(policy); },
+      clearTaskFinisherFailureCount, noteTaskFinisherActivityForSession() {},
+      s: session, msg: manual ? { taskFinisherArm: true } : { taskFinisherContinuation: true }, completedText: '',
+    };
+    vm.createContext(context);
+    vm.runInContext(handler, context);
+    context.runCodexTurn(session, { text: 'test', qid: 'test' }, () => resolved++);
+    if (outcome === 'completed') onEvent({ type: 'turn_end' });
+    else if (outcome === 'timeout') timeout();
+    child.emit('close');
+    assert.equal(resolved, 1, 'late close must not complete the same turn twice');
+    vm.runInContext(completion, context);
+    assert.equal(session.queue[0], queued, 'failure accounting preserves queued user work');
+    assert.equal(session.queue.length, 1);
+    return { policy, session, notes };
+  }
+  const first = run();
+  assert.equal(first.session.lastTurnError, 'Codex exited without a response');
+  assert.equal(first.notes[0][2], '⚠️ Codex exited without a response. Send again to retry.');
+  assert.equal(first.policy.armed, true);
+  assert.equal(first.policy.consecutiveFailureCount, 1);
+  assert.equal(first.policy.failoverModel, 'gpt-5.6-sol');
+  const second = run({ policy: first.policy });
+  assert.equal(second.policy.armed, false, 'repeated empty exits stop automatic continuation');
+  assert.equal(second.policy.state, 'error');
+  for (const partial of [false, true]) {
+    const timedOut = run({ outcome: 'timeout', partial, policy: first.policy });
+    assert.equal(timedOut.session.lastTurnError, 'Codex turn timed out');
+    assert.equal(timedOut.policy.armed, false, 'timeouts count even after partial progress');
+  }
+  const completed = run({ outcome: 'completed', policy: first.policy });
+  assert.equal(completed.session.lastTurnError, '', 'explicit completion may have no assistant text');
+  assert.equal(completed.policy.consecutiveFailureCount, 0);
+  assert.equal(completed.policy.failoverModel, null);
+  for (const outcome of ['empty', 'timeout']) {
+    const canceled = run({ outcome, canceled: true, policy: first.policy });
+    assert.equal(canceled.session.lastTurnError, '');
+    assert.equal(canceled.policy, first.policy, 'cancellation must not count as another failure');
+    assert.equal(canceled.notes.length, 0);
+  }
+  const manual = run({ manual: true, policy: second.policy });
+  assert.equal(manual.policy.armed, true, 'manual retry retains existing arming behavior');
+  assert.equal(manual.policy.consecutiveFailureCount, second.policy.consecutiveFailureCount, 'manual turns do not enter automatic failure accounting');
 }
 
 console.log('✅ codex-exec-engine.test.mjs passed');
