@@ -48,6 +48,8 @@ export function armTaskFinisher(policy = {}, now = new Date()) {
     state: 'watching',
     reason: 'Watching this task until it is finished',
     continuationCount: 0,
+    consecutiveFailureCount: 0,
+    failoverModel: null,
     taskStartedAt: at,
     lastActivityAt: at,
     lastCheckedAt: 0,
@@ -98,7 +100,12 @@ export function recordTaskFinisherFailure(policy = {}, now = new Date()) {
   if (!normalized.armed) return normalized;
   const newCount = normalized.consecutiveFailureCount + 1;
   if (newCount >= 2) {
-    return stopTaskFinisher(normalized, 'error', 'Auto-continuation stopped after repeated errors', now);
+    return stopTaskFinisher(
+      { ...normalized, consecutiveFailureCount: newCount },
+      'error',
+      'Auto-continuation stopped after repeated errors',
+      now,
+    );
   }
   return {
     ...normalized,

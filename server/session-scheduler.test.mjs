@@ -68,6 +68,12 @@ assert.equal(after1Failure.failoverModel, 'gpt-5.6-sol', 'degrades to gpt-5.6-so
 const after2Failures = recordTaskFinisherFailure(after1Failure, now);
 assert.equal(after2Failures.armed, false, 'stops after second error');
 assert.equal(after2Failures.state, 'error', 'terminal state is error');
+assert.equal(after2Failures.consecutiveFailureCount, 2, 'records the terminal failure count');
+
+const rearmedAfterFailure = armTaskFinisher(after2Failures, now);
+assert.equal(rearmedAfterFailure.armed, true, 'a new task can re-arm after repeated errors');
+assert.equal(rearmedAfterFailure.consecutiveFailureCount, 0, 'a new task gets a fresh failure budget');
+assert.equal(rearmedAfterFailure.failoverModel, null, 'a new task starts on the selected model');
 
 const cleared = clearTaskFinisherFailureCount(after1Failure);
 assert.equal(cleared.consecutiveFailureCount, 0, 'failure count reset');

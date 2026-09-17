@@ -478,7 +478,8 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
   }
   const manual = run({ manual: true, policy: second.policy });
   assert.equal(manual.policy.armed, true, 'manual retry retains existing arming behavior');
-  assert.equal(manual.policy.consecutiveFailureCount, second.policy.consecutiveFailureCount, 'manual turns do not enter automatic failure accounting');
+  assert.equal(manual.policy.consecutiveFailureCount, 0, 'manual retry starts with a fresh failure budget');
+  assert.equal(manual.policy.failoverModel, null, 'manual retry starts on the selected model');
 }
 
 // Native rollout history must retain its authoritative output while exposing only
