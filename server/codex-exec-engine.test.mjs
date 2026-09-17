@@ -338,6 +338,7 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     const child = new EventEmitter();
     child.exitCode = null; child.signalCode = null;
     let onEvent, timeout;
+    let now = 0;
     let resolved = 0;
     const notes = [];
     const finalized = [];
@@ -348,8 +349,10 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     const queued = { qid: 'manual-queued', text: 'Keep this queued message' };
     const session = { sessionId: 'test-existing', agent: 'codex', cwd: '/tmp', canceled, lastTurnError: '',
       curParts: partial ? partialParts : [], queue: [queued] };
+    const terminated = [];
     const context = {
       CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
+      Date: { now: () => now },
       setTimeout: callback => { timeout = callback; return 1; }, clearTimeout() {},
       sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
       stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
@@ -359,7 +362,9 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
       loadCodex: () => JSON.parse(registry), saveCodex: state => { registry = JSON.stringify(state); },
       loadCodexMessages: () => JSON.parse(history), saveCodexMessages: (_id, rows) => { history = JSON.stringify(rows); },
       ensureTail() {}, triggerAttentionUpdate() {}, bcast: (_s, event) => events.push(event),
-      killAgentProcess() {}, requestScheduleTick() {}, runWorker() {},
+      killAgentProcess(_proc, signal) { terminated.push(signal); return true; },
+      terminateProcessWithEscalation(proc, options) { options.signalProcess(proc, 'SIGTERM'); },
+      requestScheduleTick() {}, runWorker() {},
       taskFinisherStopRequested: () => false,
       armTaskFinisherForSession: () => { policy = armTaskFinisher(policy); },
       handleTaskFinisherFailureForSession: () => { policy = recordTaskFinisherFailure(policy); },
@@ -379,7 +384,7 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     context.runCodexTurn(session, { text: 'test', qid: 'test' }, () => resolved++);
     if (partial) context.flushCodexAssistant(session, { finalize: false });
     if (outcome === 'completed') onEvent({ type: 'turn_end' });
-    else if (outcome === 'timeout') timeout();
+    else if (outcome === 'timeout') { now = 1000; timeout(); }
     child.emit('close');
     assert.equal(resolved, 1, 'late close must not complete the same turn twice');
     vm.runInContext(completion, context);
@@ -396,7 +401,7 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
       assert.equal(reloaded.at(-1).parts[0].text, notes[0][2], 'the warning survives history reload');
       assert.equal(reloaded.at(-1).boxNotice, 'codex-incomplete');
     }
-    return { policy, session, notes, events };
+    return { policy, session, notes, events, terminated };
   }
   const first = run();
   assert.equal(first.session.lastTurnError, 'Codex exited without a response');
@@ -411,9 +416,44 @@ for (const sessionId of [undefined, 'test-resumed-session']) {
     const timedOut = run({ outcome: 'timeout', partial, policy: first.policy });
     assert.equal(timedOut.session.lastTurnError, 'Codex turn timed out');
     assert.equal(timedOut.policy.armed, false, 'timeouts count even after partial progress');
+    assert.deepEqual(timedOut.terminated, ['SIGTERM'], 'idle timeout uses process-group termination with escalation');
     assert.equal(timedOut.notes.length, 1);
     assert.equal(timedOut.notes[0][2], `⚠️ ${timedOut.events.find(event => event.type === 'error').msg}`, 'live and persisted warnings agree');
     if (partial) assert.match(timedOut.notes[0][2], /before completing its response\. Partial output was saved/);
+  }
+  {
+    let now = 0;
+    let timeout;
+    let delay;
+    let onEvent;
+    let resolved = 0;
+    const child = new EventEmitter();
+    child.exitCode = null; child.signalCode = null;
+    const context = {
+      CODEX_TURN_SEQ: 0, CODEX_TURN_TIMEOUT_MS: 1000, DEFAULT_SETTINGS: { codex: {} },
+      Date: { now: () => now },
+      setTimeout: (callback, ms) => { timeout = callback; delay = ms; return 1; }, clearTimeout() {},
+      sessionUsesTeamSandbox: () => false, sessionInTeamWorkspaceOf: () => false,
+      stopTail() {}, codexUserParts: () => [], sessionIsGuest: () => false,
+      codexEngine: { run(options) { onEvent = options.onEvent; return child; } },
+      stopTaskFinisherOnCodexCreditError: () => false, cleanCodexError: String,
+      codexAssistantParts: () => [], flushCodexAssistant() {}, appendCodexMessage() {},
+      ensureTail() {}, triggerAttentionUpdate() {}, bcast() {},
+      killAgentProcess() { throw new Error('active turn must not be terminated'); },
+      terminateProcessWithEscalation() { throw new Error('active turn must not be terminated'); },
+    };
+    vm.createContext(context);
+    vm.runInContext(handler, context);
+    const session = { sessionId: 'test-existing', cwd: '/tmp', curParts: [] };
+    context.runCodexTurn(session, { text: 'test', qid: 'test' }, () => resolved++);
+    now = 900;
+    onEvent({ type: 'thinking' });
+    now = 1000;
+    timeout();
+    assert.equal(resolved, 0, 'recent engine activity keeps the turn alive');
+    assert.equal(delay, 900, 'watchdog reschedules for the remaining inactivity window');
+    onEvent({ type: 'turn_end' });
+    assert.equal(resolved, 1);
   }
   const partialExit = run({ partial: true, policy: first.policy });
   assert.equal(partialExit.session.lastTurnError, 'Codex exited before completing its response');

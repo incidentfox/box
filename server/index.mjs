@@ -5860,8 +5860,9 @@ async function runWorker(s) {
 }
 const TURN_TIMEOUT_MS = 12 * 60 * 1000; // safety: never block the worker forever
 // Codex `exec` runs a whole task autonomously in ONE turn (a delegated ticket can be
-// 200+ tool calls / many minutes). 12 min would SIGTERM it mid-work and make a
-// hard-working agent look like it stalled — give Codex turns a much longer safety net.
+// 200+ tool calls / many minutes). Treat this as an inactivity limit rather than a
+// wall-clock limit so a healthy long-running turn is not killed while it is still
+// producing model/tool events.
 const CODEX_TURN_TIMEOUT_MS = 45 * 60 * 1000;
 // A turn = inject the message into the session's RC process, then render from the
 // JSONL tail until the turn ends (assistant stop_reason === end_turn). Bash mode
@@ -6005,6 +6006,7 @@ function runCodexTurn(s, msg, resolve) {
     addRunning(s.provKey);
     if (!explicitTitle) refreshCodexTitle(s, msg.text || userText, initialTitle);
   }
+  let lastEngineActivityAt = Date.now();
   const finish = ({ completed = false, keepAlive = false, timedOut = false } = {}) => {
     if (done) return; done = true;
     const ownedProc = s.proc;
@@ -6056,10 +6058,20 @@ function runCodexTurn(s, msg, resolve) {
     bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
     resolve();
   };
-  s.turnTimer = setTimeout(() => {
-    if (s.proc) killAgentProcess(s.proc, 'SIGTERM');
+  const checkTurnTimeout = () => {
+    if (done) return;
+    const remaining = CODEX_TURN_TIMEOUT_MS - (Date.now() - lastEngineActivityAt);
+    if (remaining > 0) {
+      s.turnTimer = setTimeout(checkTurnTimeout, remaining);
+      return;
+    }
+    // Codex is detached into its own process group. Keep the child reference in the
+    // escalation closure even though finish() releases the session immediately, so a
+    // CLI that ignores SIGTERM cannot survive as an orphan and keep consuming memory.
+    if (s.proc) terminateProcessWithEscalation(s.proc, { signalProcess: killAgentProcess });
     finish({ timedOut: true });
-  }, CODEX_TURN_TIMEOUT_MS);
+  };
+  s.turnTimer = setTimeout(checkTurnTimeout, CODEX_TURN_TIMEOUT_MS);
   try {
   s.proc = codexEngine.run({
     sessionId: s.sessionId,
@@ -6075,6 +6087,7 @@ function runCodexTurn(s, msg, resolve) {
     teamEnv: sandboxed ? team.secretsEnv({ provider: 'codex' }) : {},
     teamUser: sandboxed ? team.systemUserForMember(s.createdBy) : '',
     onEvent: (ev) => {
+      lastEngineActivityAt = Date.now();
       if (ev.type === 'session' && ev.id) {
         const provKey = s.provKey || null;
         s.sessionId = ev.id; s.agent = 'codex';
