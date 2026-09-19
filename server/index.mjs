@@ -1388,7 +1388,7 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-6-astra', reasoningEffort: 'high', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
+  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'xhigh', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   experiential: { model: EXPERIENTIAL_MODEL, reasoningEffort: 'high' },
   deepseek: { model: DEEPSEEK_MODEL, reasoningEffort: DEEPSEEK_DEFAULT_EFFORT },

@@ -52,8 +52,8 @@ test('switching models clamps a stranded effort to the deepest supported', () =>
   assert.equal(ctx.clamp('gpt-5.5', 'high'), 'high');
 });
 
-test('Astra is the default and first Codex picker option', () => {
-  assert.match(app, /codex: \{ model: 'gpt-6-astra', reasoningEffort: 'high'/);
+test('Terra at xhigh is the default Codex setting', () => {
+  assert.match(app, /codex: \{ model: 'gpt-5\.6-terra', reasoningEffort: 'xhigh'/);
   assert.match(app, /mac: \{ model: 'gpt-6-astra', reasoningEffort: 'medium'/);
-  assert.ok(app.indexOf("{ id: 'gpt-6-astra'") < app.indexOf("{ id: 'gpt-5.6-sol'"));
+  assert.ok(app.includes("{ id: 'gpt-5.6-terra'"));
 });
