@@ -58,7 +58,7 @@ function onTeamAccessLost() {
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-6-astra', reasoningEffort: 'high', sandbox: 'off', serviceTier: '', personality: '' },
+  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'xhigh', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   experiential: { model: 'gpt-6-astra', reasoningEffort: 'high' },
   deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },

@@ -10,7 +10,7 @@ import { homedir, tmpdir } from 'node:os';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = 'astra-browser-smoke-token';
 const ARTIFACT = process.env.BOX_ASTRA_SCREENSHOT
-  || join(tmpdir(), 'box-gpt6-astra-local.png');
+  || join(tmpdir(), 'box-gpt5.6-terra-local.png');
 
 const reservePort = () => new Promise((resolvePort, reject) => {
   const socket = createServer();
@@ -76,26 +76,26 @@ try {
   await page.locator('#sheet:not(.hidden)').waitFor();
   await page.locator('.sheetRow').filter({ hasText: 'Codex' }).first().click();
   await page.locator('#chat:not(.hidden)').waitFor();
-  await page.locator('#agentLabel').filter({ hasText: 'GPT-6 Astra · high' }).waitFor();
+  await page.locator('#agentLabel').filter({ hasText: 'GPT-5.6 Terra · xhigh' }).waitFor();
 
   await page.locator('#agentChip').click();
   await page.locator('.sheetRow').filter({ hasText: 'Current agent' }).click();
   await page.locator('#sheetInner h3').filter({ hasText: 'Codex model' }).waitFor();
 
-  const astra = page.locator('.sheetRow.sel').filter({ hasText: 'GPT-6 Astra' });
-  await astra.waitFor();
+  const terra = page.locator('.sheetRow.sel').filter({ hasText: 'GPT-5.6 Terra' });
+  await terra.waitFor();
   if (await page.locator('.sheetRow').filter({ hasText: 'Maximum reasoning depth' }).count() !== 1) {
-    throw new Error('Astra Max effort option was not rendered exactly once');
+    throw new Error('Terra Max effort option was not rendered exactly once');
   }
-  if (await page.locator('.sheetRow').filter({ hasText: 'Ultra' }).count() !== 0) {
-    throw new Error('Astra must not render the unsupported Ultra effort');
+  if (await page.locator('.sheetRow').filter({ hasText: 'Ultra' }).count() !== 1) {
+    throw new Error('Terra Ultra effort option was not rendered exactly once');
   }
 
   mkdirSync(dirname(ARTIFACT), { recursive: true });
   await page.screenshot({ path: ARTIFACT, fullPage: true });
   console.log(JSON.stringify({
     ok: true,
-    model: (await astra.innerText()).split('\n').find((line) => line.includes('GPT-6 Astra')),
+    model: (await terra.innerText()).split('\n').find((line) => line.includes('GPT-5.6 Terra')),
     agentChip: await page.locator('#agentLabel').innerText(),
     contextTitle: await page.locator('#contextMeter').getAttribute('title'),
     screenshot: ARTIFACT,

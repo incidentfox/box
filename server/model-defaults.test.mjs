@@ -5,8 +5,8 @@ import vm from 'node:vm';
 
 const server = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
 
-test('server defaults new Codex and Computer Use chats to Astra', () => {
-  assert.match(server, /codex: \{ model: 'gpt-6-astra', reasoningEffort: 'high'/);
+test('server defaults new Codex chats to Terra at xhigh', () => {
+  assert.match(server, /codex: \{ model: 'gpt-5\.6-terra', reasoningEffort: 'xhigh'/);
   assert.match(server, /mac: \{ model: 'gpt-6-astra', reasoningEffort: 'medium'/);
 });
 
