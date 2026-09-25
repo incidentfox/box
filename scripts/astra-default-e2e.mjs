@@ -10,7 +10,7 @@ import { homedir, tmpdir } from 'node:os';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = 'astra-browser-smoke-token';
 const ARTIFACT = process.env.BOX_ASTRA_SCREENSHOT
-  || join(tmpdir(), 'box-gpt5.6-terra-local.png');
+  || join(tmpdir(), 'box-gpt-6-sol-local.png');
 
 const reservePort = () => new Promise((resolvePort, reject) => {
   const socket = createServer();
@@ -76,28 +76,33 @@ try {
   await page.locator('#sheet:not(.hidden)').waitFor();
   await page.locator('.sheetRow').filter({ hasText: 'Codex' }).first().click();
   await page.locator('#chat:not(.hidden)').waitFor();
-  await page.locator('#agentLabel').filter({ hasText: 'GPT-5.6 Terra · xhigh' }).waitFor();
+  await page.locator('#agentLabel').filter({ hasText: 'GPT-6 Sol · medium' }).waitFor();
 
   await page.locator('#agentChip').click();
   await page.locator('.sheetRow').filter({ hasText: 'Current agent' }).click();
   await page.locator('#sheetInner h3').filter({ hasText: 'Codex model' }).waitFor();
 
-  const terra = page.locator('.sheetRow.sel').filter({ hasText: 'GPT-5.6 Terra' });
-  await terra.waitFor();
+  const sol = page.locator('.sheetRow.sel').filter({ hasText: 'GPT-6 Sol' });
+  await sol.waitFor();
   if (await page.locator('.sheetRow').filter({ hasText: 'Maximum reasoning depth' }).count() !== 1) {
-    throw new Error('Terra Max effort option was not rendered exactly once');
+    throw new Error('GPT-6 Sol Max effort option was not rendered exactly once');
   }
-  if (await page.locator('.sheetRow').filter({ hasText: 'Ultra' }).count() !== 1) {
-    throw new Error('Terra Ultra effort option was not rendered exactly once');
+  if (await page.locator('.sheetRow').filter({ hasText: 'Ultra' }).count() !== 0) {
+    throw new Error('GPT-6 Sol must not render the unsupported Ultra effort');
+  }
+
+  const contextTitle = await page.locator('#contextMeter').getAttribute('title');
+  if (!contextTitle?.includes('1,050,000')) {
+    throw new Error(`Expected GPT-6 Sol 1.05M context window, got ${JSON.stringify(contextTitle)}`);
   }
 
   mkdirSync(dirname(ARTIFACT), { recursive: true });
   await page.screenshot({ path: ARTIFACT, fullPage: true });
   console.log(JSON.stringify({
     ok: true,
-    model: (await terra.innerText()).split('\n').find((line) => line.includes('GPT-5.6 Terra')),
+    model: (await sol.innerText()).split('\n').find((line) => line.includes('GPT-6 Sol')),
     agentChip: await page.locator('#agentLabel').innerText(),
-    contextTitle: await page.locator('#contextMeter').getAttribute('title'),
+    contextTitle,
     screenshot: ARTIFACT,
   }, null, 2));
 } finally {

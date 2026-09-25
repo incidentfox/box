@@ -6,7 +6,8 @@ import { normalizeClaudeModel } from './claude-model.mjs';
 
 export function buildClaudeArgs({ sessionId, prompt, settings = {}, isNew = false } = {}) {
   const cfg = ['--model', normalizeClaudeModel(settings.model)];
-  if (settings.reasoningEffort) cfg.push('--effort', settings.reasoningEffort);
+  const effort = settings.effort ?? settings.reasoningEffort;
+  if (effort) cfg.push('--effort', effort);
   return ['--bare', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions', ...cfg,
     ...(isNew ? ['--session-id', sessionId] : ['--resume', sessionId]), '-p', prompt || ''];
 }

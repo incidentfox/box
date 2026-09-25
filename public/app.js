@@ -58,13 +58,13 @@ function onTeamAccessLost() {
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'xhigh', sandbox: 'off', serviceTier: '', personality: '' },
+  codex: { model: 'gpt-6-sol', reasoningEffort: 'medium', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   experiential: { model: 'gpt-6-astra', reasoningEffort: 'high' },
   deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },
   agy: { model: '' },
   mac: { model: 'gpt-6-astra', reasoningEffort: 'medium' },
-  claude: { model: 'claude-opus-5[1m]', effort: 'xhigh' },
+  claude: { model: 'claude-opus-5-5', effort: 'medium' },
 };
 const AGENT_META = {
   claude: { label: 'Claude', icon: '⌘' },
@@ -79,8 +79,8 @@ const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) =
 const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, experiential: 1050000, deepseek: 65536, agy: 1000000, mac: 258400 };
 function defaultContextWindow(agent) {
   const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
-  if ((agent === 'codex' || agent === 'experiential' || agent === 'mac') && (!model || model === 'gpt-6-astra' || model.startsWith('gpt-5.6'))) return 1050000;
-  if (agent === 'claude') return /\[1m\]$/.test(model) ? 1000000 : 200000;
+  if ((agent === 'codex' || agent === 'experiential' || agent === 'mac') && (!model || model === 'gpt-6-astra' || model === 'gpt-6-sol' || model.startsWith('gpt-5.6'))) return 1050000;
+  if (agent === 'claude') return (model === 'claude-opus-5-5' || /\[1m\]$/.test(model)) ? 1000000 : 200000;
   return DEFAULT_CONTEXT_WINDOW[agent];
 }
 const agentLabel = (agent) => (AGENT_META[agent] && AGENT_META[agent].label) || 'Claude';
@@ -3628,7 +3628,7 @@ function normalizeSettings(settings) {
   const deepseek = (settings && settings.deepseek) || {};
   const deepseekEffort = ['low', 'high', 'max'].includes(deepseek.reasoningEffort) ? deepseek.reasoningEffort : DEFAULT_SETTINGS.deepseek.reasoningEffort;
   const claude = { ...DEFAULT_SETTINGS.claude, ...((settings && settings.claude) || {}) };
-  if (!claude.model || claude.model === 'opus' || claude.model === 'claude-opus-5') claude.model = DEFAULT_SETTINGS.claude.model;
+  if (!claude.model || claude.model === 'opus' || claude.model === 'claude-opus-5' || claude.model === 'claude-opus-5[1m]') claude.model = DEFAULT_SETTINGS.claude.model;
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
@@ -4557,6 +4557,7 @@ function renderSuggest(items) {
 }
 
 const CODEX_MODELS = [
+  { id: 'gpt-6-sol', label: 'GPT-6 Sol', desc: 'Default · complex coding and agentic work' },
   { id: 'gpt-6-astra', label: 'GPT-6 Astra', desc: 'Most capable GPT-6 model' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'Strongest GPT-5.6 model' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'Everyday workhorse' },
@@ -4603,7 +4604,7 @@ const CODEX_EFFORTS = [
 // reject. Codex takes whatever we pass, so the picker has to match the model.
 const codexEffortsForModel = (model) => {
   const m = String(model || '');
-  const deepest = m === 'gpt-6-astra' ? 'max' : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
+  const deepest = (m === 'gpt-6-astra' || m === 'gpt-6-sol') ? 'max' : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
   return CODEX_EFFORTS.slice(0, CODEX_EFFORTS.findIndex((e) => e.id === deepest) + 1);
 };
 // Switching models can strand an effort the new model doesn't take (Sol on Ultra → 5.5).
@@ -4613,7 +4614,7 @@ const clampCodexEffort = (model, effort) => {
   return allowed.some((e) => e.id === effort) ? effort : allowed[allowed.length - 1].id;
 };
 const CLAUDE_MODELS = [
-  { id: 'claude-opus-5[1m]', label: 'Opus 5 · 1M', desc: 'Default — explicit 1M context' },
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', desc: 'Default · long-running coding and knowledge work' },
   { id: 'opus', label: 'Opus 4.8', desc: 'Previous Opus' },
   { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
   { id: 'fable', label: 'Fable 5.1', desc: 'Fast, fewer check-ins (heavier usage)' },
