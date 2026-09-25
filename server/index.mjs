@@ -1388,13 +1388,13 @@ const loadDelegations = () => { try { return JSON.parse(readFileSync(DELEG_FILE,
 const saveDelegations = (d) => { try { writeFileSync(DELEG_FILE, JSON.stringify(d, null, 2)); } catch {} };
 const latestDelegation = (arr) => (Array.isArray(arr) && arr.length) ? arr[arr.length - 1] : null;
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-5.6-terra', reasoningEffort: 'xhigh', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
+  codex: { model: 'gpt-6-sol', reasoningEffort: 'medium', sandbox: appCodexSandbox(), serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   experiential: { model: EXPERIENTIAL_MODEL, reasoningEffort: 'high' },
   deepseek: { model: DEEPSEEK_MODEL, reasoningEffort: DEEPSEEK_DEFAULT_EFFORT },
   agy: { model: '' },
   mac: { model: 'gpt-6-astra', reasoningEffort: 'medium' },
-  claude: { model: DEFAULT_CLAUDE_MODEL, effort: 'xhigh' },
+  claude: { model: DEFAULT_CLAUDE_MODEL, effort: 'medium' },
 };
 const refreshRuntimeDefaults = () => {
   DEFAULT_CWD = appDefaultCwd();
@@ -1439,7 +1439,7 @@ const DEFAULT_CONTEXT_WINDOWS = {
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
   if (agent === 'codex' || agent === 'mac' || agent === 'experiential') {
-    if (!m || m === 'gpt-6-astra' || m.startsWith('gpt-5.6')) return 1050000;
+    if (!m || m === 'gpt-6-astra' || m === 'gpt-6-sol' || m.startsWith('gpt-5.6')) return 1050000;
     return DEFAULT_CONTEXT_WINDOWS.codex;
   }
   if (agent === 'gemini') return DEFAULT_CONTEXT_WINDOWS.gemini;

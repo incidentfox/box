@@ -1,11 +1,13 @@
-export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5[1m]';
+export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
 
 export function normalizeClaudeModel(model) {
   const value = String(model || '').trim();
-  return !value || value === 'opus' || value === 'claude-opus-5' ? DEFAULT_CLAUDE_MODEL : value;
+  return !value || value === 'opus' || value === 'claude-opus-5' || value === 'claude-opus-5[1m]'
+    ? DEFAULT_CLAUDE_MODEL
+    : value;
 }
 
 export function claudeModelContextWindow(model) {
   const value = String(model || '').trim() || DEFAULT_CLAUDE_MODEL;
-  return /\[1m\]$/i.test(value) ? 1000000 : 200000;
+  return value === DEFAULT_CLAUDE_MODEL || /\[1m\]$/i.test(value) ? 1000000 : 200000;
 }
