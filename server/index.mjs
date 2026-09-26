@@ -3827,6 +3827,14 @@ function fallbackTitleFromPrompt(prompt) {
     .replace(/[#>*_`~]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  // Scheduling preambles say when work runs, not what the chat is about.
+  const automatedRun = /^you are running an automated\s+(?:daily|weekly|monthly|scheduled)\b/i.test(s);
+  if (automatedRun) {
+    s = s
+      .replace(/^you are running an automated\s+(?:daily|weekly|monthly|scheduled)\b(?:\s+(?:task|run|job))?[\s:,.–—-]*/i, '')
+      .replace(/^(?:task|objective|job|title|name)\s*:\s*/i, '')
+      .trim();
+  }
   s = s
     .replace(/^(please\s+)?(can|could|would)\s+you\s+/i, '')
     .replace(/^i\s+(think|guess|want|wanna|would like)\s+/i, '')
@@ -3837,7 +3845,18 @@ function fallbackTitleFromPrompt(prompt) {
     .filter((w) => w && !TITLE_STOP.has(w.toLowerCase()));
   const picked = (words.length ? words : s.split(/\s+/)).slice(0, 5);
   const out = picked.map((w) => w ? w[0].toUpperCase() + w.slice(1) : '').join(' ');
-  return sanitizeTitle(out || 'Codex chat');
+  return sanitizeTitle(out) || (automatedRun ? 'Scheduled Task' : 'Codex task');
+}
+function titleForAgentEnqueue(suppliedTitle, prompt) {
+  const title = sanitizeTitle(suppliedTitle);
+  return { title: title || fallbackTitleFromPrompt(prompt), generated: !title };
+}
+function codexOpeningTitle(msg, prompt, isNew) {
+  // An API-generated fallback is useful immediately, but is not a user-selected
+  // name: keep the Codex title refiner eligible to replace it asynchronously.
+  const explicitTitle = isNew && !msg.titleGenerated ? sanitizeTitle(msg.title) : '';
+  const initialTitle = explicitTitle || (isNew ? sanitizeTitle(msg.title) || fallbackTitleFromPrompt(prompt) : '');
+  return { explicitTitle, initialTitle };
 }
 async function aiTitleFromPrompt(prompt) {
   if (!OPENAI_KEY || !String(prompt || '').trim()) return '';
@@ -5486,7 +5505,8 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
   const rawKey = String(body.key || `new-${randomBytes(4).toString('hex')}`).trim();
   const key = rawKey.replace(/[^\w.-]/g, '').slice(0, 80) || `new-${randomBytes(4).toString('hex')}`;
   const cwd = validateDirectory(expandUserPath(body.cwd || '')) ? expandUserPath(body.cwd) : DEFAULT_CWD;
-  const title = sanitizeTitle(body.title || '') || text.replace(/\s+/g, ' ').slice(0, 72);
+  const titleInfo = titleForAgentEnqueue(body.title || '', text);
+  const title = titleInfo.title;
   if (body.dryRun || body.dry_run) return res.json({ ok: true, dry_run: true, key, agent, cwd, title });
   if (agent === 'mac' && !macAvailable()) return res.status(409).json({ error: 'mac bridge unavailable' });
   const qid = enqueue(key, {
@@ -5497,6 +5517,7 @@ app.post('/api/agent/enqueue', requireAuth, (req, res) => {
     agent,
     cwd,
     title,
+    titleGenerated: titleInfo.generated,
     parentId: body.parentId || null,
     parentTitle: body.parentTitle || '',
     force: !!body.force,
@@ -5687,6 +5708,10 @@ function reconcileArchivedSessionRuntimes() {
 function combineQueued(batch) {
   if (batch.length === 1) return batch[0];
   const allBash = batch.every((m) => m.mode === 'bash');
+  // Keep title metadata with the exact queued message whose title wins below.
+  // Generated titles must not become explicit merely because their run was
+  // batched with a later queued message.
+  const titledMessage = batch.find((m) => m.title) || batch[0];
   return {
     qid: batch[0].qid,
     text: batch.map((m) => m.text).filter(Boolean).join(allBash ? '\n' : '\n\n'),
@@ -5699,7 +5724,8 @@ function combineQueued(batch) {
     author: batch[0].author || null,   // the batch is single-author by construction
     parentId: batch.find((m) => m.parentId)?.parentId || batch[0].parentId || null,
     parentTitle: batch.find((m) => m.parentTitle)?.parentTitle || batch[0].parentTitle || '',
-    title: batch.find((m) => m.title)?.title || batch[0].title || '',
+    title: titledMessage.title || '',
+    titleGenerated: !!titledMessage.titleGenerated,
     taskFinisherArm: batch.some((m) => m.taskFinisherArm),
     taskFinisherContinuation: batch.some((m) => m.taskFinisherContinuation),
   };
@@ -5990,8 +6016,7 @@ function runCodexTurn(s, msg, resolve) {
   const userText = msg.displayText != null ? msg.displayText : (msg.text || '');
   const userParts = codexUserParts(userText, msg.images || []);
   const isNewCodexSession = !s.sessionId;
-  const explicitTitle = isNewCodexSession ? sanitizeTitle(msg.title) : '';
-  const initialTitle = explicitTitle || (isNewCodexSession ? fallbackTitleFromPrompt(msg.text || userText) : '');
+  const { explicitTitle, initialTitle } = codexOpeningTitle(msg, msg.text || userText, isNewCodexSession);
   if (isNewCodexSession && initialTitle) s.title = initialTitle;
   // PROVISIONAL REGISTRATION — make a brand-new Codex chat durable + visible the instant the user
   // hits send, before (or even if never) codex emits `thread.started`. Keyed by the box's internal
