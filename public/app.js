@@ -2551,11 +2551,18 @@ function connectWS() {
   // A shared chat opened from the Team screen lives on the HOST's box, so its socket must
   // go there, not to this origin. cur.ep is only set for those; solo chats stay local.
   const ep = chatEp();
-  ws = new WebSocket(epWsUrl(ep, '/ws', { token: ep.token }));
-  ws.onmessage = (e) => { resetWsWatchdog(); onServer(JSON.parse(e.data)); };
-  ws.onopen = () => { resetWsWatchdog(); subscribeCurrentWS(); };
-  ws.onerror = () => { try { ws.close(); } catch {} };
-  ws.onclose = () => { if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } pendingTeamChat = null; if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
+  const socket = new WebSocket(epWsUrl(ep, '/ws', { token: ep.token }));
+  ws = socket;
+  socket.onmessage = (e) => { if (ws !== socket) return; resetWsWatchdog(); onServer(JSON.parse(e.data)); };
+  socket.onopen = () => { if (ws !== socket) return; resetWsWatchdog(); subscribeCurrentWS(); };
+  socket.onerror = () => { try { socket.close(); } catch {} };
+  socket.onclose = () => { if (ws !== socket) return; ws = null; if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; } pendingTeamChat = null; if (!$('chat').classList.contains('hidden')) setTimeout(connectWS, 800); };
+}
+function disconnectChatWS() {
+  const socket = ws;
+  ws = null; // Invalidate callbacks before closing; queued frames can still fire.
+  if (wsWatchdog) { clearInterval(wsWatchdog); wsWatchdog = null; }
+  if (socket) { try { socket.close(); } catch {} }
 }
 function setNewChatIntro(on) {
   const chat = $('chat');
@@ -2586,6 +2593,7 @@ function annotateHistoryMessages(messages, start = 0) {
 async function openChat(s) {
   if (historyAbortController) historyAbortController.abort();
   const renderSeq = ++chatRenderSeq;
+  disconnectChatWS(); // Never let the previous chat's stream update this chat while history loads.
   const key = s.id || ('new-' + Math.random().toString(16).slice(2, 10));
   const workspace = s.workspace === 'team' || s.team || s.shared ? 'team' : 'personal';
   rememberWorkspace(workspace);
@@ -3377,6 +3385,7 @@ function beginTurn(text, images, author) { clearWaitingCard(); liveUser = addUse
 
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
+  if (o.key && o.key !== cur.key) return;
   if (o.type === 'sync') return onSync(o);
   if (o.activityAt || o.activityLabel) setLiveActivity(o.activityLabel, o.activityAt);
   // cur.hadHistory MUST flip true once the real id is known: a brand-new chat opens with
@@ -3644,9 +3653,10 @@ function sendSettings() {
   refreshAgentChip();
   const payload = { type: 'settings', key: cur.key, settings: cur.settings, cwd: cur.cwd };
   connectWS();
-  const go = () => { try { ws.send(JSON.stringify(payload)); } catch {} };
-  if (ws.readyState === 1) go();
-  else ws.addEventListener('open', () => { ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); go(); }, { once: true });
+  const socket = ws;
+  const go = () => { if (ws === socket && cur.key === payload.key) try { socket.send(JSON.stringify(payload)); } catch {} };
+  if (socket.readyState === 1) go();
+  else socket.addEventListener('open', go, { once: true });
 }
 
 /* send = enqueue (server owns the queue; it persists + auto-sends even if you leave) */
@@ -3668,9 +3678,19 @@ function enqueueText(text, opts = {}) {
   if (opts.parentTitle || cur.parentTitle) payload.parentTitle = opts.parentTitle || cur.parentTitle;
   if (opts.title) payload.title = opts.title;
   connectWS();
-  const go = () => { try { ws.send(JSON.stringify(payload)); } catch {} sendTyping(false); };
-  if (ws.readyState === 1) go();
-  else ws.addEventListener('open', () => { ws.send(JSON.stringify({ type: 'subscribe', key: cur.key })); go(); }, { once: true });
+  const socket = ws;
+  let sent = false;
+  const preserve = () => { if (!sent && !loadDraft(payload.key)) saveDraft(payload.key, text); };
+  const go = () => {
+    if (ws !== socket || cur.key !== payload.key) {
+      preserve(); // preserve an unsent turn after navigation
+      return;
+    }
+    try { socket.send(JSON.stringify(payload)); sent = true; } catch { preserve(); }
+    sendTyping(false);
+  };
+  if (socket.readyState === 1) go();
+  else { socket.addEventListener('open', go, { once: true }); socket.addEventListener('close', preserve, { once: true }); }
   refreshButton(); scrollBottom();
 }
 function clearComposerInput() {
@@ -3721,6 +3741,7 @@ async function handleNativeSlash(text) {
   return false;
 }
 async function submit() {
+  const submitKey = cur.key;
   const text = $('input').value.trim();
   if (!text && !images.length) return;
   hideSuggest();
@@ -3754,6 +3775,7 @@ async function submit() {
     if ($('input').value.trim() === text) clearComposerInput();
     return;
   }
+  if (cur.key !== submitKey) return; // a native command may have navigated while awaiting
   if (!cur.firstUser) cur.firstUser = text;
   const imgPaths = images.map((i) => i.path);
   $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); images = []; renderAttach();

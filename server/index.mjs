@@ -4866,7 +4866,7 @@ function bcast(s, event) {
     s.activityLabel = activityLabel;
     o = { ...event, activityAt: s.lastActivityAt, activityLabel };
   }
-  for (const ws of s.subs) { try { ws.send(JSON.stringify(o)); } catch {} }
+  for (const ws of s.subs) { try { ws.send(JSON.stringify({ ...o, key: ws.chatKey })); } catch {} }
 }
 
 // ---- team presence ---------------------------------------------------------
@@ -6912,6 +6912,7 @@ wss.on('connection', (ws) => {
   const unsub = () => {
     if (subKey == null) return;
     const s = RT.get(resolveKey(subKey));
+    ws.chatKey = null;
     if (!s) return;
     s.subs.delete(ws);
     if (s.typing && ws.principal) s.typing.delete(ws.principal.id);
@@ -6935,14 +6936,18 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
     if (m && m.key != null && !mayTouch(m.key)) return deny();
+    if (m.type !== 'subscribe' && m.key != null && (subKey == null || resolveKey(m.key) !== resolveKey(subKey))) {
+      try { ws.send(JSON.stringify({ type: 'error', msg: 'Chat changed before this action was sent. Reopen the chat and try again.' })); } catch {}
+      return;
+    }
     if (m.type === 'subscribe') {
-      unsub(); subKey = m.key; const s = rt(subKey); s.subs.add(ws);
+      unsub(); subKey = m.key; ws.chatKey = subKey; const s = rt(subKey); s.subs.add(ws);
       broadcastPresence(s);
       if (s.sessionId && !sessionUsesTeamSandbox(s)) { ensureTail(s, undefined, m.liveCursor); refreshCodexActivity(s); triggerAttentionUpdate(s); } // stream live turns + refresh status snapshot (the global waiting-watch poller handles pending prompts)
       if (s.sessionId && !s.context && !sessionUsesTeamSandbox(s)) s.context = contextForSession(s.sessionId, { agent: s.agent || null });
       const teamSession = s.sessionId && sessionInTeamWorkspaceOf(s);
       const guestStore = isGuest;
-      ws.send(JSON.stringify({ type: 'sync', sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null,
+      ws.send(JSON.stringify({ type: 'sync', key: subKey, sessionId: s.sessionId, agent: s.agent || 'claude', cwd: s.cwd || null,
         archived: s.sessionId ? (teamSession || guestStore ? loadTeamArchived() : loadArchived()).has(s.sessionId) : false,
         favorite: s.sessionId ? (teamSession || guestStore ? teamFavoritesFor(ws.principal) : loadFavorites()).has(s.sessionId) : false, parentId: s.parentId || null, parentTitle: s.parentTitle || '', title: s.title || '', settings: normalizeSettings(s.settings || {}), context: s.context || null, running: s.running, activityAt: s.lastActivityAt || null, activityLabel: s.activityLabel || '', curUser: s.curUser || '', curUserImages: s.curUserImages || [], curText: s.curText, curTools: s.curTools, curParts: s.curParts, queue: queueView(s),
         me: team.authorOf(ws.principal), curAuthor: s.curAuthor || null,
