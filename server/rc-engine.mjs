@@ -550,7 +550,11 @@ export class RCEngine extends EventEmitter {
   async sendRecord(s, text) {
     this.touch(s);
     await s.booted_p;
-    const blocked = claudeStartupBlockReason(s.outBuf);
+    // outBuf also contains old chat and prior screens. Inspect only a fresh TUI
+    // repaint so a previous sign-in error (or a user's discussion of one) cannot
+    // block a later, healthy turn.
+    const currentScreen = await this.captureScreen(s.sessionId, { fresh: true });
+    const blocked = claudeStartupBlockReason(currentScreen);
     if (blocked) {
       const error = new Error(`Claude is waiting for ${blocked}. Your message was kept in the Box queue. Complete Claude ${blocked} on the box, then restart Box to retry.`);
       error.code = 'CLAUDE_STARTUP_BLOCKED';
@@ -577,10 +581,11 @@ export class RCEngine extends EventEmitter {
 
   // Force a fresh full repaint of the TUI (so outBuf holds the current screen even if we attached
   // after the prompt appeared) and return the rolling buffer. Requires a live local pty.
-  async captureScreen(sessionId) {
+  async captureScreen(sessionId, { fresh = false } = {}) {
     const s = this.sessions.get(sessionId);
     if (!s || !s.pty) return null;
     await s.booted_p;
+    if (fresh) s.outBuf = '';
     // nudge the size to provoke a redraw, then restore — net no size change, just a repaint.
     try { s.pty.resize(99, 40); await new Promise((r) => setTimeout(r, 70)); s.pty.resize(100, 40); } catch {}
     await new Promise((r) => setTimeout(r, 260));
