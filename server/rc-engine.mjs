@@ -25,6 +25,16 @@ const require = createRequire(import.meta.url);
 const pty = require('node-pty');
 const { execSync, execFileSync } = require('child_process');
 
+// Claude can paint an interactive setup or sign-in screen before its chat input exists.
+// PTY output contains ANSI escapes and cursor-positioned text, so compact it before
+// checking. Never paste a user's message into one of these screens.
+export function claudeStartupBlockReason(output) {
+  const screen = String(output || '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (/oautherror|invalidcodepleasemakesure|pastecode|logintoclaude|signintoclaude/.test(screen)) return 'sign-in';
+  if (/letsgetstarted|choosethetextstyle|hascompletedonboarding/.test(screen)) return 'setup';
+  return null;
+}
+
 // ── Cross-platform process helpers ───────────────────────────────────────────
 // Box runs on both Linux servers and macOS. A few of the process inspections below
 // rely on tools whose flags/paths differ across platforms; these wrappers pick the
@@ -540,6 +550,16 @@ export class RCEngine extends EventEmitter {
   async sendRecord(s, text) {
     this.touch(s);
     await s.booted_p;
+    // outBuf also contains old chat and prior screens. Inspect only a fresh TUI
+    // repaint so a previous sign-in error (or a user's discussion of one) cannot
+    // block a later, healthy turn.
+    const currentScreen = await this.captureScreen(s.sessionId, { fresh: true });
+    const blocked = claudeStartupBlockReason(currentScreen);
+    if (blocked) {
+      const error = new Error(`Claude is waiting for ${blocked}. Your message was kept in the Box queue. Complete Claude ${blocked} on the box, then restart Box to retry.`);
+      error.code = 'CLAUDE_STARTUP_BLOCKED';
+      throw error;
+    }
     s.pty.write(bracketedPaste(text));
     await new Promise((r) => setTimeout(r, 120)); // let the paste settle before submit
     s.pty.write('\r');
@@ -561,10 +581,11 @@ export class RCEngine extends EventEmitter {
 
   // Force a fresh full repaint of the TUI (so outBuf holds the current screen even if we attached
   // after the prompt appeared) and return the rolling buffer. Requires a live local pty.
-  async captureScreen(sessionId) {
+  async captureScreen(sessionId, { fresh = false } = {}) {
     const s = this.sessions.get(sessionId);
     if (!s || !s.pty) return null;
     await s.booted_p;
+    if (fresh) s.outBuf = '';
     // nudge the size to provoke a redraw, then restore — net no size change, just a repaint.
     try { s.pty.resize(99, 40); await new Promise((r) => setTimeout(r, 70)); s.pty.resize(100, 40); } catch {}
     await new Promise((r) => setTimeout(r, 260));
