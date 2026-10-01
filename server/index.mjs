@@ -4841,7 +4841,7 @@ function rt(extKey) {
       teamSandbox: hasOwn('teamSandbox') ? !!p.teamSandbox : !!(stored && stored.teamSandbox),
       workspace: normalizeSessionWorkspace(p.workspace) || normalizeSessionWorkspace(stored && stored.workspace)
         || sessionWorkspaceOf({ ...(stored || {}), ...p, id: key }),
-      queue: recoverPersistedQueue(p), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), typing: new Map(), curAuthor: null, proc: null, codexGoalProc: null, canceled: false });
+      queue: recoverPersistedQueue(p).map((message) => message && (({ startupBlocked, ...rest }) => rest)(message)), queueUndo: new Map(), inflight: null, running: false, curText: '', curTools: [], curParts: [], lastActivityAt: 0, activityLabel: '', subs: new Set(), typing: new Map(), curAuthor: null, proc: null, codexGoalProc: null, canceled: false });
   }
   return RT.get(key);
 }
@@ -5805,6 +5805,9 @@ async function runWorker(s) {
   }
   s.running = true;
   while (s.queue.length) {
+    // A setup/sign-in failure keeps the original turn durable and stops this worker.
+    // A Box restart clears the marker and makes one fresh attempt after setup is fixed.
+    if (s.queue[0]?.startupBlocked) break;
     const releases = [];
     let slotsReleased = false;
     const releaseTurnSlots = () => {
@@ -5870,6 +5873,15 @@ async function runWorker(s) {
           releaseTurnSlots();
         }
       }
+    }
+    if (s.startupBlocked) {
+      s.startupBlocked = false;
+      s.queue.unshift(...batch.map((message) => ({ ...message, startupBlocked: true })));
+      s.startupError = s.lastTurnError;
+      s.inflight = null;
+      persist(s);
+      bcast(s, { type: 'queue', queue: queueView(s) });
+      break;
     }
     const allText = s.curParts.filter((part) => part && part.t === 'text').map((part) => part.text).join('').trim() || String(s.curText || '').trim();
     const completedText = msg.voiceOnly && s.voiceFinalText.trim() ? s.voiceFinalText.trim() : allText;
@@ -6002,6 +6014,7 @@ function runTurn(s, msg) {
         }
       } catch (e) {
         s.lastTurnError = String(e && e.message || e).slice(-400);
+        if (e && e.code === 'CLAUDE_STARTUP_BLOCKED') s.startupBlocked = true;
         bcast(s, { type: 'error', msg: s.lastTurnError });
         finish();
       }
@@ -6966,6 +6979,7 @@ wss.on('connection', (ws) => {
         workspace: sessionWorkspaceOf(s),
         teamChat: s.sessionId && sessionInTeamWorkspaceOf(s) ? team.listSessionChat(s.sessionId) : [],
         viewers: principalsOf(s), typing: typingNow(s) }));
+      if (s.startupError) { try { ws.send(JSON.stringify({ type: 'error', msg: s.startupError })); } catch {} }
       if (s.waitingActive && s.waitingPayload) { try { ws.send(JSON.stringify(s.waitingPayload)); } catch {} } // replay a pending prompt to a (re)subscriber
     } else if (m.type === 'enqueue') {
       const s0 = rt(m.key);

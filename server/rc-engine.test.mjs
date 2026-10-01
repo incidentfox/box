@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseEntry } from './rc-engine.mjs';
+import { claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
+
+test('interactive setup and OAuth screens are caught before sending a prompt', () => {
+  assert.equal(claudeStartupBlockReason('\x1b[2JLet\x1b[1m\'s get started\x1b[0m Choose the text style'), 'setup');
+  assert.equal(claudeStartupBlockReason('\x1b[2JOAuth error: Invalid code. Press Enter to retry.'), 'sign-in');
+  assert.equal(claudeStartupBlockReason('Claude Code 2.1.178 > Ask Claude anything'), null);
+});
 
 const kinds = (o) => parseEntry(o).map((e) => e.kind);
 

@@ -25,6 +25,16 @@ const require = createRequire(import.meta.url);
 const pty = require('node-pty');
 const { execSync, execFileSync } = require('child_process');
 
+// Claude can paint an interactive setup or sign-in screen before its chat input exists.
+// PTY output contains ANSI escapes and cursor-positioned text, so compact it before
+// checking. Never paste a user's message into one of these screens.
+export function claudeStartupBlockReason(output) {
+  const screen = String(output || '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (/oautherror|invalidcodepleasemakesure|pastecode|logintoclaude|signintoclaude/.test(screen)) return 'sign-in';
+  if (/letsgetstarted|choosethetextstyle|hascompletedonboarding/.test(screen)) return 'setup';
+  return null;
+}
+
 // ── Cross-platform process helpers ───────────────────────────────────────────
 // Box runs on both Linux servers and macOS. A few of the process inspections below
 // rely on tools whose flags/paths differ across platforms; these wrappers pick the
@@ -540,6 +550,12 @@ export class RCEngine extends EventEmitter {
   async sendRecord(s, text) {
     this.touch(s);
     await s.booted_p;
+    const blocked = claudeStartupBlockReason(s.outBuf);
+    if (blocked) {
+      const error = new Error(`Claude is waiting for ${blocked}. Your message was kept in the Box queue. Complete Claude ${blocked} on the box, then restart Box to retry.`);
+      error.code = 'CLAUDE_STARTUP_BLOCKED';
+      throw error;
+    }
     s.pty.write(bracketedPaste(text));
     await new Promise((r) => setTimeout(r, 120)); // let the paste settle before submit
     s.pty.write('\r');
