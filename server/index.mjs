@@ -2587,7 +2587,7 @@ function compactHistoryMessages(messages) {
     }),
   }));
 }
-function parseJsonlMessages(raw) {
+function parseJsonlMessages(raw, onMessage = null, initialOffset = 0) {
   const messages = [];
   const pendingTools = new Map();
   const toolResultText = (content) => {
@@ -2595,7 +2595,10 @@ function parseJsonlMessages(raw) {
     if (Array.isArray(content)) return content.map((x) => (x && x.type === 'text' ? x.text : '')).join('');
     return content == null ? '' : String(content);
   };
+  let lineOffset = initialOffset;
   for (const line of raw.split('\n')) {
+    const sourceOffset = lineOffset;
+    if (onMessage) lineOffset += Buffer.byteLength(line, 'utf8') + 1;
     if (!line.trim()) continue;
     let o; try { o = JSON.parse(line); } catch { continue; }
     if ((o.type === 'user' || o.type === 'assistant') && o.message) {
@@ -2629,7 +2632,9 @@ function parseJsonlMessages(raw) {
           const split = team.splitAuthorTag(firstText.text);
           if (split.author) { author = split.author; firstText.text = split.text; }
         }
-        messages.push({ role, parts, ts: o.timestamp || null, ...(author ? { author } : {}) });
+        const message = { role, parts, ts: o.timestamp || null, ...(author ? { author } : {}) };
+        messages.push(message);
+        if (onMessage) onMessage(message, sourceOffset);
       }
     }
   }
@@ -2647,10 +2652,10 @@ function readJsonlChunk(file, endOffset) {
   const fd = openSync(file, 'r');
   readSync(fd, buf, 0, readLen, start);
   closeSync(fd);
-  const raw = buf.toString('utf8');
   // drop the first (possibly partial) line when we started mid-file
-  const nl = raw.indexOf('\n');
-  return { raw: start > 0 && nl >= 0 ? raw.slice(nl + 1) : raw, startOffset: start };
+  const nl = buf.indexOf(10);
+  const skipped = start > 0 ? (nl >= 0 ? nl + 1 : readLen) : 0;
+  return { raw: buf.subarray(skipped).toString('utf8'), startOffset: start + skipped };
 }
 function claudeSessionHistory(id, file, before = null) {
   const st = statSync(file);
@@ -2659,8 +2664,14 @@ function claudeSessionHistory(id, file, before = null) {
   const cached = getHistoryCache(key);
   if (cached) return cached;
   const { raw, startOffset } = readJsonlChunk(file, end);
-  const messages = parseJsonlMessages(raw).slice(-HIST_MSG_LIMIT);
-  return setHistoryCache(key, { messages, hasMore: startOffset > 0, cursor: startOffset, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) });
+  const offsets = [];
+  const parsed = parseJsonlMessages(raw, (_message, offset) => offsets.push(offset), startOffset);
+  const first = Math.max(0, parsed.length - HIST_MSG_LIMIT);
+  const messages = parsed.slice(first);
+  // The next page ends at the first returned message. A chunk can contain more
+  // than 400 messages, so using its start would silently skip the rest.
+  const cursor = messages.length ? offsets[first] : startOffset;
+  return setHistoryCache(key, { messages, hasMore: cursor > 0, cursor, cwd: decodeCwd(dirname(file)), agent: 'claude', settings: normalizeSettings({}), context: contextForSession(id, { agent: 'claude', file }) });
 }
 function mergeCodexIncompleteNotices(messages, sidecar) {
   const time = (row) => typeof row.ts === 'number' ? row.ts : Date.parse(row.ts || '');
