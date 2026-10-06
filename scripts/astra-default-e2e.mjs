@@ -84,6 +84,7 @@ try {
 
   const sol = page.locator('.sheetRow.sel').filter({ hasText: 'GPT-6.1 Sol' });
   await sol.waitFor();
+  const modelLabel = (await sol.innerText()).split('\n').find((line) => line.includes('GPT-6.1 Sol'));
   if (await page.locator('.sheetRow').filter({ hasText: 'Maximum reasoning depth' }).count() !== 1) {
     throw new Error('GPT-6.1 Sol Max effort option was not rendered exactly once');
   }
@@ -96,11 +97,19 @@ try {
     throw new Error(`Expected GPT-6.1 Sol 1.05M context window, got ${JSON.stringify(contextTitle)}`);
   }
 
+  // A fresh thread must use the configured default even after this chat chose an older model.
+  await page.locator('.sheetRow').filter({ hasText: 'GPT-6 Sol' }).first().click();
+  await page.locator('#agentLabel').filter({ hasText: 'GPT-6 Sol · medium' }).waitFor();
+  await page.keyboard.press('Escape');
+  await page.locator('#input').fill('/new');
+  await page.locator('#sendBtn').click();
+  await page.locator('#agentLabel').filter({ hasText: 'GPT-6.1 Sol · medium' }).waitFor();
+
   mkdirSync(dirname(ARTIFACT), { recursive: true });
   await page.screenshot({ path: ARTIFACT, fullPage: true });
   console.log(JSON.stringify({
     ok: true,
-    model: (await sol.innerText()).split('\n').find((line) => line.includes('GPT-6.1 Sol')),
+    model: modelLabel,
     agentChip: await page.locator('#agentLabel').innerText(),
     contextTitle,
     screenshot: ARTIFACT,
