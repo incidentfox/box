@@ -58,7 +58,7 @@ function onTeamAccessLost() {
 // Keep in lock-step with the server's DEFAULT_SETTINGS (server/index.mjs) so the model
 // chip shows what a chat ACTUALLY runs with, not a stale guess.
 const DEFAULT_SETTINGS = {
-  codex: { model: 'gpt-6-sol', reasoningEffort: 'medium', sandbox: 'off', serviceTier: '', personality: '' },
+  codex: { model: 'gpt-6.1-sol', reasoningEffort: 'medium', sandbox: 'off', serviceTier: '', personality: '' },
   gemini: { model: 'gemini-3.5-flash' },
   experiential: { model: 'gpt-6-astra', reasoningEffort: 'high' },
   deepseek: { model: 'deepseek-v4-flash', reasoningEffort: 'high' },
@@ -79,7 +79,7 @@ const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) =
 const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, experiential: 1050000, deepseek: 65536, agy: 1000000, mac: 258400 };
 function defaultContextWindow(agent) {
   const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
-  if ((agent === 'codex' || agent === 'experiential' || agent === 'mac') && (!model || model === 'gpt-6-astra' || model === 'gpt-6-sol' || model.startsWith('gpt-5.6'))) return 1050000;
+  if ((agent === 'codex' || agent === 'experiential' || agent === 'mac') && (!model || model === 'gpt-6-astra' || model === 'gpt-6.1-sol' || model === 'gpt-6-sol' || model.startsWith('gpt-5.6'))) return 1050000;
   if (agent === 'claude') return (model === 'claude-opus-5-5' || /\[1m\]$/.test(model)) ? 1000000 : 200000;
   return DEFAULT_CONTEXT_WINDOW[agent];
 }
@@ -4579,7 +4579,8 @@ function renderSuggest(items) {
 }
 
 const CODEX_MODELS = [
-  { id: 'gpt-6-sol', label: 'GPT-6 Sol', desc: 'Default · complex coding and agentic work' },
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', desc: 'Default · complex coding and agentic work' },
+  { id: 'gpt-6-sol', label: 'GPT-6 Sol', desc: 'Previous Sol model' },
   { id: 'gpt-6-astra', label: 'GPT-6 Astra', desc: 'Most capable GPT-6 model' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'Strongest GPT-5.6 model' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'Everyday workhorse' },
@@ -4626,7 +4627,7 @@ const CODEX_EFFORTS = [
 // reject. Codex takes whatever we pass, so the picker has to match the model.
 const codexEffortsForModel = (model) => {
   const m = String(model || '');
-  const deepest = (m === 'gpt-6-astra' || m === 'gpt-6-sol') ? 'max' : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
+  const deepest = (m === 'gpt-6-astra' || m === 'gpt-6.1-sol' || m === 'gpt-6-sol') ? 'max' : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
   return CODEX_EFFORTS.slice(0, CODEX_EFFORTS.findIndex((e) => e.id === deepest) + 1);
 };
 // Switching models can strand an effort the new model doesn't take (Sol on Ultra → 5.5).
