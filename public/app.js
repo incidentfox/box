@@ -2543,7 +2543,12 @@ function subscribeCurrentWS() {
     payload.liveCursor = cur.liveCursor;
     cur.liveCursorSent = true;
   }
-  try { ws.send(JSON.stringify(payload)); } catch {}
+  try {
+    ws.send(JSON.stringify(payload));
+    // A provisional chat has no saved server settings. Send its local defaults (or
+    // an explicit fork/model choice) before the first turn can be enqueued.
+    if (!cur.id) ws.send(JSON.stringify({ type: 'settings', key: cur.key, settings: normalizeSettings(cur.settings), cwd: cur.cwd }));
+  } catch {}
 }
 function connectWS() {
   if (ws && ws.readyState <= 1) { if (ws.readyState === 1) subscribeCurrentWS(); return; }
@@ -3485,7 +3490,9 @@ function onSync(o) {
   if (o.title && isPlaceholderChatTitle(cur.title)) { cur.title = o.title; setChatTitle(o.title); }
   if (typeof o.archived === 'boolean') { cur.archived = o.archived; updateArchiveButton(); }
   if (typeof o.favorite === 'boolean') { cur.favorite = o.favorite; updateFavoriteButton(); }
-  if (o.settings) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
+  // A provisional chat uses the settings just sent by this client. The initial
+  // subscribe snapshot can still contain an older server default during rollout.
+  if (o.settings && o.sessionId) { cur.settings = normalizeSettings(o.settings); refreshAgentChip(); }
   if (o.context) { cur.context = o.context; renderContextMeter(); }
   // Remove stale live bubble from DOM before recreating it below (prevents duplicate
   // assistant bubbles when the WS reconnects mid-stream and onSync fires again).

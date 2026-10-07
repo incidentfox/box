@@ -104,6 +104,11 @@ try {
   await page.locator('#input').fill('/new');
   await page.locator('#sendBtn').click();
   await page.locator('#agentLabel').filter({ hasText: 'GPT-6.1 Sol · medium' }).waitFor();
+  // Wait for the subscribe sync and settings broadcast before asserting the label.
+  await page.waitForTimeout(500);
+  if (await page.locator('#agentLabel').innerText() !== 'GPT-6.1 Sol · medium') {
+    throw new Error('Fresh chat default changed after the server sync');
+  }
 
   mkdirSync(dirname(ARTIFACT), { recursive: true });
   await page.screenshot({ path: ARTIFACT, fullPage: true });
