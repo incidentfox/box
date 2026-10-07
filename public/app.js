@@ -2600,7 +2600,7 @@ async function openChat(s) {
   // A BRAND-NEW chat starts from DEFAULT_SETTINGS, not from whatever the chat you were
   // just in happened to use — otherwise one manual model/effort pick leaks into every
   // chat you open afterwards and the configured default never actually applies. Callers
-  // that mean to carry settings forward (fork, branch, child, /new) pass s.settings.
+  // that mean to carry settings forward (fork, branch, child) pass s.settings.
   // An existing chat (s.id) keeps cur.settings only as a placeholder until its own
   // settings arrive with the history load below.
   cur = { id: s.id || null, key, cwd: s.cwd || defaultCwd, title: s.title || 'New chat', mode: 'normal', agent: s.agent || cur.agent || 'claude', category: s.category || '', archived: !!s.archived, favorite: !!s.favorite, parentId: s.parentId || null, parentTitle: s.parentTitle || '', settings: normalizeSettings(s.settings || (s.id ? cur.settings : null)), context: s.context || null, firstUser: null, hadHistory: !!s.id, workspace,
@@ -3730,7 +3730,7 @@ async function handleNativeSlash(text) {
   if (name === 'archive') { if (cur.id) openArchiveConfirm({ id: cur.id, title: cur.title, archived: cur.archived }, { leaveChat: true }); else toast('Nothing to archive yet'); return true; }
   if (name === 'delete') { confirmDeleteCodexThread(); return true; }
   if (name === 'resume' || name === 'exit') { openSessions('all'); return true; }
-  if (name === 'new' || name === 'clear') { openChat({ id: null, title: 'New Codex chat', cwd: cur.cwd || defaultCwd, agent: 'codex', settings: cur.settings, workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' }); return true; }
+  if (name === 'new' || name === 'clear') { openChat({ id: null, title: 'New Codex chat', cwd: cur.cwd || defaultCwd, agent: 'codex', workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' }); return true; }
   if (name === 'fork') { confirmFork(); return true; }
   if (name === 'side') { if (args) await runBtw(args); else putComposer('/side '); return true; }
   if (name === 'mention' || name === 'ide') { putComposer(args ? `@${args} ` : '@'); setTimeout(onType, 30); return true; }
@@ -4565,7 +4565,7 @@ function runSlashCommand(cmd, tok) {
   if (cmd.action === 'side') return putComposer('/side ');
   if (cmd.action === 'fork') return confirmFork();
   if (cmd.action === 'btw') { $('input').value = '/btw '; autoGrow(); refreshButton(); focusComposerSoon(); return; }
-  if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, settings: cur.settings, workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' });
+  if (cmd.action === 'new') return openChat({ id: null, title: `New ${agentLabel(cur.agent)} chat`, cwd: cur.cwd || defaultCwd, agent: cur.agent, workspace: cur.workspace, ep: cur.ep, shared: cur.workspace === 'team', team: cur.workspace === 'team' });
   if (cmd.action === 'review' && (cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(renderPromptTemplate('review-current', 'Review the current working tree. Prioritize bugs, behavioral regressions, security risks, and missing tests. Lead with findings ordered by severity and include file/line references where possible.'), { displayText: '/review' });
   if (cmd.action === 'review') return reviewCurrent();
   if (cmd.kind === 'skill' && (cur.agent === 'codex' || cur.agent === 'gemini' || cur.agent === 'agy')) return enqueueText(`Use the ${cmd.name} skill.`);
