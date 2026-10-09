@@ -70,3 +70,14 @@ test('an empty assistant row still ends the turn', () => {
     ['turn_end'],
   );
 });
+
+test('dialog controls send exact terminal keys and reject unknown controls', async () => {
+  const engine = new RCEngine(); const writes = [];
+  engine.sessions.set('dialog', { booted_p: Promise.resolve(), pty: { write: key => writes.push(key) } });
+  for (const key of ['up', 'down', 'left', 'right', 'enter', 'escape']) {
+    assert.equal(await engine.answerWaiting('dialog', { key }), true);
+  }
+  assert.deepEqual(writes, ['\x1b[A', '\x1b[B', '\x1b[D', '\x1b[C', '\r', '\x1b']);
+  assert.equal(await engine.answerWaiting('dialog', { key: 'toString' }), false);
+  assert.equal(writes.length, 6);
+});

@@ -5222,7 +5222,7 @@ async function checkWaiting(s) {
     // Attach a local pty so we can read the TUI (collision-safe: reattaches a box-local bridge,
     // refuses to spawn a competing one for a session owned elsewhere). Then scrape the screen.
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
-    if (rec && !rec.blocked) { attached = true; const buf = await rcEngine.captureScreen(s.sessionId); if (buf) prompt = promptFromBuffer(buf); }
+    if (rec && !rec.blocked) { attached = true; const buf = await rcEngine.captureScreen(s.sessionId, { fresh: true }); if (buf) prompt = promptFromBuffer(buf); }
   } catch {}
   s.waitingActive = true;
   s.waitingTries = (s.waitingTries || 0) + 1;
@@ -5238,6 +5238,11 @@ async function answerWaiting(extKey, sel) {
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
     const ok = await rcEngine.answerWaiting(s.sessionId, sel);
+    // Navigation changes the current panel; keep controls available and refresh its text.
+    if (ok && ['up', 'down', 'left', 'right'].includes(sel?.key)) {
+      s.waitingSettled = false; s.waitingTries = 0;
+      return; // the next status poll captures the repainted panel
+    }
     // Optimistically clear the card; the JSONL tail will render the answered tool_use/result and
     // Claude's continuation as they land. (Don't touch RUNNING — this session may not be box-driven.)
     if (ok) { s.waitingActive = false; s.waitingPayload = null; s.waitingSettled = false; s.waitingTries = 0; bcast(s, { type: 'waiting_clear', sessionId: s.sessionId }); }

@@ -603,6 +603,12 @@ export class RCEngine extends EventEmitter {
     const s = this.sessions.get(sessionId);
     if (!s || !s.pty || !sel) return false;
     await s.booted_p;
+    const keys = { up: '\x1b[A', down: '\x1b[B', left: '\x1b[D', right: '\x1b[C', enter: '\r', escape: '\x1b' };
+    if (sel.key != null) {
+      if (!Object.hasOwn(keys, sel.key)) return false;
+      s.pty.write(keys[sel.key]);
+      return true;
+    }
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const down = async (k) => { for (let i = 1; i < k; i++) { s.pty.write('\x1b[B'); await sleep(110); } };
     if (sel.text != null && Number.isInteger(sel.freeTextIndex) && sel.freeTextIndex >= 1) {
