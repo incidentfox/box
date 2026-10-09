@@ -3883,7 +3883,12 @@ function chooseWaiting(index, btn) {
   if (!waitingState || !waitingState.answerable) return;
   document.querySelectorAll('.waitOpt').forEach((b) => { b.disabled = true; b.classList.remove('chosen'); });
   if (btn) btn.classList.add('chosen');
-  waitingState = null;   // optimistic; server confirms with waiting_clear
+  const navigating = typeof index === 'object' && ['up', 'down', 'left', 'right'].includes(index?.key);
+  if (navigating) {
+    document.querySelectorAll('.waitControls .waitOpt').forEach((b) => { b.disabled = false; b.classList.remove('chosen'); });
+  } else {
+    waitingState = null;   // optimistic; server confirms with waiting_clear
+  }
   try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: typeof index === 'object' ? index : { index } })); } catch {}
 }
 function stopCurrent() {

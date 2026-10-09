@@ -91,6 +91,10 @@ try {
   await page.getByRole('button', {name: 'Change →', exact:true}).click();
   const sent = await page.evaluate(() => window.dialogSent);
   if (sent.at(-1)?.sel?.key !== 'right') throw new Error('Wrong navigation payload');
+  await page.getByRole('button', {name: '↓ Down', exact:true}).click();
+  await page.getByRole('button', {name: 'Enter / Continue', exact:true}).click();
+  const sequence = await page.evaluate(() => window.dialogSent.map((message) => message.sel.key));
+  if (sequence.join(',') !== 'right,down,enter') throw new Error('Dialog must support consecutive navigation and Continue');
   await page.evaluate((prompt) => renderWaiting({prompt, answerable:true}), prompt);
   await page.getByRole('button', {name: 'Esc / Cancel', exact:true}).click();
   if (await page.evaluate(() => window.dialogSent.at(-1)?.sel?.key) !== 'escape') throw new Error('Wrong cancel payload');
