@@ -3829,7 +3829,25 @@ function renderWaiting(o) {
   waitingState = { answerable: !!o.answerable, freeTextIndex: null, hasOptions: false };
   const card = document.createElement('div'); card.className = 'waitingCard';
   const p = o.prompt;
-  if (p && Array.isArray(p.options) && p.options.length) {
+  if (p && p.kind === 'dialog' && Array.isArray(p.actions)) {
+    waitingState.hasOptions = true;
+    const q = document.createElement('div'); q.className = 'waitQuestion'; q.textContent = p.title;
+    const body = document.createElement('pre'); body.className = 'waitDialog'; body.textContent = p.body;
+    card.append(q, body);
+    const controls = document.createElement('div'); controls.className = 'waitControls';
+    const labels = { up: '↑ Up', down: '↓ Down', left: '← Change', right: 'Change →', enter: 'Enter / Continue', escape: 'Esc / Cancel' };
+    for (const key of p.actions) {
+      if (!Object.hasOwn(labels, key)) continue;
+      const btn = document.createElement('button'); btn.className = 'waitOpt'; btn.textContent = labels[key];
+      btn.disabled = !o.answerable;
+      btn.onclick = () => chooseWaiting({ key }, btn);
+      controls.appendChild(btn);
+    }
+    card.appendChild(controls);
+    const hint = document.createElement('div'); hint.className = 'waitHint';
+    hint.textContent = o.answerable ? 'Use the arrows to select or change a setting, then Continue. Cancel closes this panel.' : 'This session is running on another device — answer it there.';
+    card.appendChild(hint);
+  } else if (p && Array.isArray(p.options) && p.options.length) {
     waitingState.hasOptions = true;
     if (p.header) { const h = document.createElement('div'); h.className = 'waitHeader'; h.textContent = p.header; card.appendChild(h); }
     const q = document.createElement('div'); q.className = 'waitQuestion';
@@ -3866,7 +3884,7 @@ function chooseWaiting(index, btn) {
   document.querySelectorAll('.waitOpt').forEach((b) => { b.disabled = true; b.classList.remove('chosen'); });
   if (btn) btn.classList.add('chosen');
   waitingState = null;   // optimistic; server confirms with waiting_clear
-  try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: { index } })); } catch {}
+  try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: typeof index === 'object' ? index : { index } })); } catch {}
 }
 function stopCurrent() {
   try { ws.send(JSON.stringify({ type: 'cancel', key: cur.key })); } catch {}

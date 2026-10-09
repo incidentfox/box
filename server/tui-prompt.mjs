@@ -89,6 +89,18 @@ const isContinuation = (l) => l && !OPT_RE.test(l) && !RULE_RE.test(l) && !ASK_F
 
 // Parse the visible screen lines for a pending selection prompt. Returns null if none found.
 export function parsePrompt(lines) {
+  // Settings panels use cursor keys rather than numbered answers. Prefer the active
+  // panel over numbered lists in the conversation above it.
+  const footer = lines.findLastIndex((line) => /Enter to continue/i.test(line) && /Esc to cancel/i.test(line));
+  if (footer >= 0 && /←|→|↑|↓/.test(lines[footer])) {
+    let start = footer - 1;
+    while (start >= 0 && !(RULE_RE.test(lines[start]) && /[─━╌]/.test(lines[start]))) start--;
+    const panel = lines.slice(start + 1, footer).filter((line) => line.trim());
+    if (panel.length) return {
+      kind: 'dialog', title: panel[0].trim(), body: panel.slice(1).join('\n'),
+      actions: ['up', 'down', 'left', 'right', 'enter', 'escape'],
+    };
+  }
   // Collect numbered options (a run near the bottom of the screen), with their line index so we
   // can attach descriptions that the TUI renders on the following indented line(s).
   let raw = [];

@@ -5222,7 +5222,7 @@ async function checkWaiting(s) {
     // Attach a local pty so we can read the TUI (collision-safe: reattaches a box-local bridge,
     // refuses to spawn a competing one for a session owned elsewhere). Then scrape the screen.
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
-    if (rec && !rec.blocked) { attached = true; const buf = await rcEngine.captureScreen(s.sessionId); if (buf) prompt = promptFromBuffer(buf); }
+    if (rec && !rec.blocked) { attached = true; const buf = await rcEngine.captureScreen(s.sessionId, { fresh: true }); if (buf) prompt = promptFromBuffer(buf); }
   } catch {}
   s.waitingActive = true;
   s.waitingTries = (s.waitingTries || 0) + 1;
