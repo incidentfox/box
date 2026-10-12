@@ -427,6 +427,11 @@ body.bulkMode .sCardFront { cursor: pointer; }
 .msg .body code { font-family: ui-monospace, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 5px; font-size: .85em; }
 .msg .body pre { background: var(--pre-bg); border: 1px solid var(--pre-line); border-radius: 10px; padding: 11px 13px; overflow-x: auto; margin: 0 0 10px; }
 .msg .body pre code { background: none; padding: 0; font-size: 13px; line-height: 1.5; }
+.codeWrap { position: relative; }
+.codeCopy { position: absolute; top: 6px; right: 6px; z-index: 1; display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 4px 9px; border: 1px solid var(--pre-line, var(--line)); border-radius: 8px; background: var(--card); color: inherit; font-family: inherit; font-size: 12px; line-height: 1; opacity: 0.85; cursor: pointer; }
+.codeCopy svg { width: 13px; height: 13px; }
+.codeCopy:active { opacity: 1; transform: scale(0.97); }
+.codeWrap > pre, .msg .body .codeWrap > pre { padding-top: 42px; }
 .msg .body a { color: var(--accent); }
 .msg .body hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
 /* markdown tables */
