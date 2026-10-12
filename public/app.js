@@ -308,15 +308,18 @@ function cleanCopyText(text) {
     .trim();
 }
 // One tap copies a fenced code block; delegated so re-rendered and streaming messages keep working.
-document.addEventListener('click', (e) => {
+function handleCodeCopyClick(e) {
   const btn = e.target.closest && e.target.closest('.codeCopy');
-  if (!btn) return;
+  if (!btn) return false;
   e.preventDefault(); e.stopPropagation();
   const code = btn.parentElement.querySelector('pre code');
-  if (code) writeClipboardText(code.textContent, 'Copied');
-});
-async function writeClipboardText(text, label = 'Copied') {
-  const clean = cleanCopyText(text);
+  // Indentation and blank lines are part of the code, so copy the block verbatim.
+  if (code) writeClipboardText(code.textContent, 'Copied', { exact: true });
+  return true;
+}
+document.addEventListener('click', handleCodeCopyClick);
+async function writeClipboardText(text, label = 'Copied', { exact = false } = {}) {
+  const clean = exact ? String(text || '') : cleanCopyText(text);
   if (!clean) { toast('Nothing to copy'); return false; }
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(clean);
