@@ -307,6 +307,14 @@ function cleanCopyText(text) {
     .replace(/\u00a0/g, ' ')
     .trim();
 }
+// One tap copies a fenced code block; delegated so re-rendered and streaming messages keep working.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest && e.target.closest('.codeCopy');
+  if (!btn) return;
+  e.preventDefault(); e.stopPropagation();
+  const code = btn.parentElement.querySelector('pre code');
+  if (code) writeClipboardText(code.textContent, 'Copied');
+});
 async function writeClipboardText(text, label = 'Copied') {
   const clean = cleanCopyText(text);
   if (!clean) { toast('Nothing to copy'); return false; }
@@ -800,7 +808,7 @@ function md(src) {
   while (i < lines.length) {
     const ln = lines[i];
     // fenced code block
-    if (/^```/.test(ln)) { closeList(); const lang = ln.slice(3).trim(); const buf = []; i++; while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]); i++; html += `<pre><code${lang ? ` class="language-${esc(lang)}"` : ''}>${esc(buf.join('\n'))}</code></pre>`; continue; }
+    if (/^```/.test(ln)) { closeList(); const lang = ln.slice(3).trim(); const buf = []; i++; while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]); i++; html += `<div class="codeWrap"><button type="button" class="codeCopy" aria-label="Copy code">${ICONS.copy}<span>Copy</span></button><pre><code${lang ? ` class="language-${esc(lang)}"` : ''}>${esc(buf.join('\n'))}</code></pre></div>`; continue; }
     // horizontal rule
     if (/^[ ]{0,3}([-*_][ ]{0,2}){3,}$/.test(ln.trim()) && ln.trim().length >= 3) { closeList(); resetOrderedList(); html += '<hr>'; i++; continue; }
     // headings
