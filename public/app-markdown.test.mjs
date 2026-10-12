@@ -14,6 +14,7 @@ function render(input) {
     LOCAL_PATH_RE: /^\//, ABS_PATH_RE: /$^/g, REL_FILE_RE: /$^/g,
     verifiedPath: () => null, rawFileUrl: () => '', localPathLinkHtml: () => null,
     pathPreviewHtml: (value) => value, filePreviewChip: () => '', lonePathChip: () => null,
+    ICONS: { copy: '<svg></svg>' },
   };
   vm.runInNewContext(`${app.slice(start, end)}\nresult = md(input);`, context);
   return context.result;
@@ -51,5 +52,9 @@ assert.doesNotMatch(reset, /<ol start=/);
 const absolutePathLink = renderResolvedDestination('[Download](</home/factory/.codex/generated_images/result.png>)');
 assert.equal(absolutePathLink, '<p>Download</p>');
 assert.doesNotMatch(absolutePathLink, /href|&lt;|&gt;/);
+
+const fenced = render('Run this:\n\n```bash\n! echo "<ok>"\n```\n\nDone.');
+assert.match(fenced, /<div class="codeWrap"><button type="button" class="codeCopy" aria-label="Copy code"><svg><\/svg><span>Copy<\/span><\/button><pre><code class="language-bash">! echo &quot;&lt;ok&gt;&quot;<\/code><\/pre><\/div>/);
+assert.equal(fenced.match(/class="codeCopy"/g).length, 1);
 
 console.log('app markdown ok');
