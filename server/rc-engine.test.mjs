@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { RCEngine, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
+import { RCEngine, claudeOwnsSession, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
 
 test('interactive setup and OAuth screens are caught before sending a prompt', () => {
   assert.equal(claudeStartupBlockReason('\x1b[2JLet\x1b[1m\'s get started\x1b[0m Choose the text style'), 'setup');
@@ -80,4 +80,29 @@ test('dialog controls send exact terminal keys and reject unknown controls', asy
   assert.deepEqual(writes, ['\x1b[A', '\x1b[B', '\x1b[D', '\x1b[C', '\r', '\x1b']);
   assert.equal(await engine.answerWaiting('dialog', { key: 'toString' }), false);
   assert.equal(writes.length, 6);
+});
+
+
+test('watchdog ownership requires exact Claude launch flags, not remote-control or prompt mentions', () => {
+  const id = 'c43e168e-c863-459e-8d05-6ecf37475d90';
+  assert.ok(claudeOwnsSession(`claude --dangerously-skip-permissions --session-id ${id} task`, id));
+  assert.ok(claudeOwnsSession(`/usr/bin/claude --resume=${id}`, id));
+  assert.ok(claudeOwnsSession(`claude --remote-control name --resume ${id}`, id));
+  for (const command of [`dtach -n /tmp/cc-test.dtach claude --session-id ${id}`, `bash -c claude --resume ${id}`, `claude --session-id another-id explain ${id}`, `claude --resume ${id}extra`]) {
+    assert.equal(claudeOwnsSession(command, id), false, command);
+  }
+});
+
+test('ownership classification never binds a socket by shared cwd', () => {
+  const engine = new RCEngine();
+  engine.localBridgeFor = (_id, opts) => { assert.equal(opts.argvOnly, true); return null; };
+  engine.jsonlRecentlyTouched = () => true;
+  assert.equal(engine.classifyOwner('target').kind, 'external');
+});
+
+test('a terminal that exits before boot preserves the unsent prompt', async () => {
+  const engine = new RCEngine();
+  engine.touch = () => {};
+  const record = { exited: true, booted_p: Promise.resolve(), pty: { write: () => assert.fail('must not paste into dead terminal') } };
+  await assert.rejects(engine.sendRecord(record, 'exact user prompt'), { code: 'CLAUDE_STARTUP_BLOCKED' });
 });
