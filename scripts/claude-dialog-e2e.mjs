@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { settingsFromDialog } from '../server/dialog-settings.mjs';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -114,6 +115,48 @@ try {
   await page.evaluate((prompt) => renderWaiting({prompt, answerable:true}), prompt);
   await page.getByRole('button', {name: 'Enter / Select', exact:true}).click();
   await page.getByRole('button', {name: '↑ Up', exact:true}).click();
+  const form = {...prompt, settings:settingsFromDialog(prompt)};
+  await page.setViewportSize({width:390,height:844});
+  await page.evaluate(prompt => {window.dialogSent = []; renderWaiting({prompt,answerable:true});},form);
+  const shell = page.getByRole('switch',{name:'Also scan shell history',exact:true});
+  if(await shell.getAttribute('aria-checked') !== 'true') throw new Error('Wrong initial switch value');
+  await shell.click();
+  if(await page.locator('.waitOpt:disabled').count() !== 5) throw new Error('Pending form must lock duplicate submissions');
+  if(await shell.getAttribute('aria-checked') !== 'true') throw new Error('Switch changed before terminal confirmation');
+  const action = await page.evaluate(() => window.dialogSent.at(-1).sel.dialog);
+  if(action.action !== 'change' || action.row !== 'shellHistory' || action.revision !== form.settings.revision) throw new Error('Wrong setting intent');
+  const changed = {...prompt,body:prompt.body.replace('true','false')};
+  changed.settings = settingsFromDialog(changed);
+  await page.evaluate(prompt => renderWaiting({prompt,answerable:true}),changed);
+  if(await shell.getAttribute('aria-checked') !== 'false' || await shell.isDisabled()) throw new Error('Confirmed value must refresh and unlock');
+  await page.getByRole('button',{name:'How you use Claude here: Mixed. Tap to change',exact:true}).click();
+  if(await page.evaluate(() => window.dialogSent.at(-1).sel.dialog.row) !== 'usage') throw new Error('Wrong usage target');
+  await page.evaluate(prompt => renderWaiting({prompt,answerable:true}),form);
+  await page.getByRole('button',{name:'Continue',exact:true}).click();
+  if(await page.evaluate(() => window.dialogSent.at(-1).sel.dialog.action) !== 'continue') throw new Error('Wrong Continue intent');
+  if(!await page.locator('.waitingCard').count()) throw new Error('Continue must wait for terminal confirmation');
+  await page.evaluate(() => clearWaitingCard());
+  await page.evaluate(prompt => renderWaiting({prompt,answerable:true}),form);
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  if(await page.evaluate(() => window.dialogSent.at(-1).sel.dialog.action) !== 'cancel') throw new Error('Wrong Cancel intent');
+  await page.evaluate(prompt => renderWaiting({prompt,answerable:false}),form);
+  if(await page.locator('.waitOpt:disabled').count() !== 5) throw new Error('External settings must be read only');
+  await page.evaluate(prompt => {ws = {readyState:3,send:()=>{throw new Error('closed');}};renderWaiting({prompt,answerable:true});},form);
+  await shell.click();
+  if(await shell.isDisabled()) throw new Error('Disconnected form must recover');
+  await page.getByRole('status').filter({hasText:'Connection lost'}).waitFor();
+  await page.evaluate(prompt => {ws = {send:data=>window.dialogSent.push(JSON.parse(data))};renderWaiting({prompt,answerable:true});},form);
+  for(const width of [320,390,1280]) {
+    await page.setViewportSize({width,height:900});
+    const overflow = await page.locator('.waitingCard').evaluate(card => card.scrollWidth > card.clientWidth + 2);
+    if(overflow) throw new Error('Settings overflow viewport at ' + width);
+  }
+  await page.setViewportSize({width:390,height:844});
+  await page.screenshot({path:'/tmp/box-tappable-settings-mobile.png',fullPage:true});
+  await page.setViewportSize({width:1280,height:900});
+  await shell.focus(); await page.keyboard.press('Space');
+  if(await page.evaluate(() => window.dialogSent.at(-1).sel.dialog.row) !== 'shellHistory') throw new Error('Keyboard switch failed');
+  console.log('Tappable settings: confirmed toggle, usage cycle, Continue, Cancel, pending lock, stale recovery, read-only ownership, disconnect recovery, keyboard and 320/390/1280px layouts verified.');
   console.log('Phone and desktop dialog navigation after Enter, repaint, confirmed closure, cancellation and external ownership verified.');
 } finally {
   await browser?.close().catch(() => {});
