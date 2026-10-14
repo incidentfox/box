@@ -23,6 +23,7 @@ import { buildChildEnv } from './child-env.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
+import { applySettingsAction } from './dialog-settings.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { ClaudeExecEngine } from './claude-exec-engine.mjs';
 import { claudeModelContextWindow, DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from './claude-model.mjs';
@@ -5207,6 +5208,11 @@ function ensureFirstPromptLanded(s, rec, prompt, attempt = 0) {
 // chats whose sessionId resolves only after the first turn begins.
 setInterval(() => { for (const s of RT.values()) { if (s.subs.size && s.sessionId) checkWaiting(s).catch(() => {}); } }, 1200);
 async function checkWaiting(s) {
+  if (s.waitingAction || s.waitingPoll) return;
+  s.waitingPoll = pollWaiting(s);
+  try { await s.waitingPoll; } finally { s.waitingPoll = null; }
+}
+async function pollWaiting(s) {
   if (sessionUsesTeamSandbox(s) || !s.sessionId || !s.subs.size) return; // sandbox has no host RC bridge
   const st = rcEngine.sessionState(s.sessionId);
   const waiting = !!(st && st.status === 'waiting');
@@ -5233,10 +5239,23 @@ async function checkWaiting(s) {
 }
 async function answerWaiting(extKey, sel) {
   const s = rt(extKey);
-  if (sessionUsesTeamSandbox(s) || !s.sessionId) return;
+  if (sessionUsesTeamSandbox(s) || !s.sessionId || s.waitingAction) return;
+  const formAction = !!sel?.dialog;
+  if (formAction) s.waitingAction = true;
   try {
+    if (s.waitingPoll) await s.waitingPoll;
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
+    if (formAction) {
+      await applySettingsAction({
+        readPrompt: async () => {
+          if (rcEngine.sessionState(s.sessionId)?.status !== 'waiting') return null;
+          return promptFromBuffer(await rcEngine.captureScreen(s.sessionId, {fresh:true}));
+        },
+        sendKey: key => rcEngine.answerWaiting(s.sessionId, {key}),
+      }, sel.dialog);
+      return;
+    }
     const ok = await rcEngine.answerWaiting(s.sessionId, sel);
     // A terminal key is not proof that the dialog closed: Enter can change a
     // setting, and Escape can return to a parent panel. Re-scrape all dialog keys
@@ -5249,6 +5268,12 @@ async function answerWaiting(extKey, sel) {
     // Claude's continuation as they land. (Don't touch RUNNING — this session may not be box-driven.)
     if (ok) { s.waitingActive = false; s.waitingPayload = null; s.waitingSettled = false; s.waitingTries = 0; bcast(s, { type: 'waiting_clear', sessionId: s.sessionId }); }
   } catch (e) { bcast(s, { type: 'error', msg: String((e && e.message) || e).slice(-300) }); }
+  finally {
+    if (formAction) {
+      s.waitingAction = false; s.waitingSettled = false; s.waitingTries = 0;
+      await checkWaiting(s); // confirm values/closure and unlock the form, including on errors
+    }
+  }
 }
 
 function killAgentProcess(proc, signal = 'SIGTERM') {

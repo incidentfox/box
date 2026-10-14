@@ -1,3 +1,5 @@
+import { settingsFromDialog } from './dialog-settings.mjs';
+
 // tui-prompt.mjs — reconstruct the claude TUI screen from raw PTY bytes and parse a
 // PENDING interactive prompt (AskUserQuestion / ExitPlanMode / permission) out of it.
 //
@@ -96,10 +98,15 @@ export function parsePrompt(lines) {
     let start = footer - 1;
     while (start >= 0 && !(RULE_RE.test(lines[start]) && /[─━╌]/.test(lines[start]))) start--;
     const panel = lines.slice(start + 1, footer).filter((line) => line.trim());
-    if (panel.length) return {
-      kind: 'dialog', title: panel[0].trim(), body: panel.slice(1).join('\n'),
-      actions: ['up', 'down', 'left', 'right', 'enter', 'escape'],
-    };
+    if (panel.length) {
+      const prompt = {
+        kind: 'dialog', title: panel[0].trim(), body: panel.slice(1).join('\n'),
+        actions: ['up', 'down', 'left', 'right', 'enter', 'escape'],
+      };
+      const settings = settingsFromDialog(prompt);
+      if (settings) prompt.settings = settings;
+      return prompt;
+    }
   }
   // Collect numbered options (a run near the bottom of the screen), with their line index so we
   // can attach descriptions that the TUI renders on the following indented line(s).

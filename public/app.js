@@ -3777,7 +3777,9 @@ async function submit() {
     const ft = waitingState.freeTextIndex; const hadMenu = waitingState.hasOptions; waitingState = null;   // optimistic
     $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); sendTyping(false); addUser(text, [], cur.shared ? cur.me : null);
     const sel = (hadMenu && ft >= 1) ? { text, freeTextIndex: ft } : { text };
-    try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel })); } catch {}
+    try {
+    if (index?.dialog && typeof ws?.readyState === 'number' && ws.readyState !== WebSocket.OPEN) throw new Error('Disconnected');
+    ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel })); } catch {}
     document.querySelectorAll('.waitingCard').forEach((el) => el.remove());
     refreshButton(); scrollBottom();
     return;
@@ -3840,7 +3842,43 @@ function renderWaiting(o) {
   waitingState = { answerable: !!o.answerable, freeTextIndex: null, hasOptions: false };
   const card = document.createElement('div'); card.className = 'waitingCard';
   const p = o.prompt;
-  if (p && p.kind === 'dialog' && Array.isArray(p.actions)) {
+  if (p?.kind === 'dialog' && p.settings?.id === 'auto-mode-environment') {
+    waitingState.hasOptions = true;
+    const settings = p.settings;
+    const q = document.createElement('div'); q.className = 'waitQuestion'; q.textContent = p.title;
+    card.appendChild(q);
+    if (settings.description) {
+      const desc = document.createElement('div'); desc.className = 'waitSettingsDesc'; desc.textContent = settings.description; card.appendChild(desc);
+    }
+    const fields = document.createElement('div'); fields.className = 'waitSettings';
+    const intent = (action, row) => ({dialog:{id:settings.id, revision:settings.revision, action, ...(row ? {row} : {})}});
+    for (const row of settings.rows) {
+      const btn = document.createElement('button'); btn.className = 'waitOpt waitSetting'; btn.disabled = !o.answerable;
+      const label = document.createElement('span'); label.className = 'waitOptLabel'; label.textContent = row.label;
+      const value = document.createElement('span'); value.className = 'waitSettingValue';
+      if (row.type === 'boolean') {
+        btn.setAttribute('role', 'switch'); btn.setAttribute('aria-checked', String(row.value === 'true')); btn.setAttribute('aria-label', row.label);
+        value.textContent = row.value === 'true' ? 'On' : 'Off';
+        const track = document.createElement('span'); track.className = 'waitSwitch'; track.setAttribute('aria-hidden', 'true');
+        value.appendChild(track);
+      } else {
+        value.textContent = row.value + ' ↻'; btn.setAttribute('aria-label', row.label + ': ' + row.value + '. Tap to change');
+      }
+      btn.append(label, value); btn.onclick = () => chooseWaiting(intent('change', row.id), btn); fields.appendChild(btn);
+    }
+    card.appendChild(fields);
+    const controls = document.createElement('div'); controls.className = 'waitControls';
+    for (const [action, label] of [['cancel','Cancel'], ['continue','Continue']]) {
+      const btn = document.createElement('button'); btn.className = 'waitOpt waitSettingsAction' + (action === 'continue' ? ' waitContinue' : '');
+      btn.textContent = label; btn.disabled = !o.answerable; btn.onclick = () => chooseWaiting(intent(action), btn); controls.appendChild(btn);
+    }
+    card.appendChild(controls);
+    const hint = document.createElement('div'); hint.className = 'waitHint waitSettingsStatus'; hint.setAttribute('role','status'); hint.setAttribute('aria-live','polite');
+    hint.textContent = o.answerable ? 'Tap a setting to change it, then Continue.' : 'This session is running on another device — answer it there.'; card.appendChild(hint);
+    const terminal = document.createElement('details'); terminal.className = 'waitTerminal';
+    const summary = document.createElement('summary'); summary.textContent = 'Terminal view';
+    const body = document.createElement('pre'); body.className = 'waitDialog'; body.textContent = p.body; terminal.append(summary, body); card.appendChild(terminal);
+  } else if (p && p.kind === 'dialog' && Array.isArray(p.actions)) {
     waitingState.hasOptions = true;
     const q = document.createElement('div'); q.className = 'waitQuestion'; q.textContent = p.title;
     const body = document.createElement('pre'); body.className = 'waitDialog'; body.textContent = p.body;
@@ -3891,18 +3929,30 @@ function renderWaiting(o) {
   refreshButton();
 }
 function chooseWaiting(index, btn) {
-  if (!waitingState || !waitingState.answerable) return;
+  if (!waitingState || !waitingState.answerable || waitingState.pending) return;
   document.querySelectorAll('.waitOpt').forEach((b) => { b.disabled = true; b.classList.remove('chosen'); });
   if (btn) btn.classList.add('chosen');
   // Enter can change a setting or open another panel. Even Escape may return to a
   // parent menu. Keep keyboard controls usable until Claude confirms it has closed.
   const dialogKey = typeof index === 'object' && ['up', 'down', 'left', 'right', 'enter', 'escape'].includes(index?.key);
-  if (dialogKey) {
+  if (index?.dialog) {
+    waitingState.pending = true;
+    const status = document.querySelector('.waitSettingsStatus');
+    if (status) status.textContent = index.dialog.action === 'continue' ? 'Continuing…' : index.dialog.action === 'cancel' ? 'Closing…' : 'Updating setting…';
+  } else if (dialogKey) {
     document.querySelectorAll('.waitControls .waitOpt').forEach((b) => { b.disabled = false; b.classList.remove('chosen'); });
   } else {
     waitingState = null;   // optimistic; server confirms with waiting_clear
   }
-  try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: typeof index === 'object' ? index : { index } })); } catch {}
+  try {
+    if (index?.dialog && typeof ws?.readyState === 'number' && ws.readyState !== WebSocket.OPEN) throw new Error('Disconnected');
+    ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: typeof index === 'object' ? index : { index } })); } catch {
+    if (index?.dialog && waitingState) {
+      waitingState.pending = false;
+      document.querySelectorAll('.waitingCard .waitOpt').forEach(b => { b.disabled = false; b.classList.remove('chosen'); });
+      const status = document.querySelector('.waitSettingsStatus'); if (status) status.textContent = 'Connection lost. Reconnect and try again.';
+    }
+  }
 }
 function stopCurrent() {
   try { ws.send(JSON.stringify({ type: 'cancel', key: cur.key })); } catch {}

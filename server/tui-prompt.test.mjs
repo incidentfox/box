@@ -15,6 +15,8 @@ test('cursor settings panel exposes actual values and navigation, excluding earl
   const p = promptFromBuffer('\x1b[2J\x1b[H' + panel.join('\r\n'));
   assert.equal(p.kind, 'dialog');
   assert.equal(p.title, 'Teach auto mode about your environment?');
+  assert.equal(p.settings.selected, 1);
+  assert.equal(p.settings.rows[1].value, 'true');
   assert.match(p.body, /❯ Also scan shell history\s+true/);
   assert.match(p.body, /other repos\s+false/);
   assert.ok(!p.body.includes('earlier response'));
