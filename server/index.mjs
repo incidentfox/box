@@ -5238,8 +5238,10 @@ async function answerWaiting(extKey, sel) {
     const rec = rcEngine.open(s.sessionId, rcName(s), { cwd: s.cwd, settings: (s.settings || {}).claude, guest: sessionIsGuest(s) });
     if (rec && rec.blocked) { bcast(s, { type: 'error', msg: 'This session is running elsewhere — answer it on desktop.' }); return; }
     const ok = await rcEngine.answerWaiting(s.sessionId, sel);
-    // Navigation changes the current panel; keep controls available and refresh its text.
-    if (ok && ['up', 'down', 'left', 'right'].includes(sel?.key)) {
+    // A terminal key is not proof that the dialog closed: Enter can change a
+    // setting, and Escape can return to a parent panel. Re-scrape all dialog keys
+    // and let Claude's actual status confirm when to remove the controls.
+    if (ok && ['up', 'down', 'left', 'right', 'enter', 'escape'].includes(sel?.key)) {
       s.waitingSettled = false; s.waitingTries = 0;
       return; // the next status poll captures the repainted panel
     }

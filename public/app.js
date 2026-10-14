@@ -3846,7 +3846,7 @@ function renderWaiting(o) {
     const body = document.createElement('pre'); body.className = 'waitDialog'; body.textContent = p.body;
     card.append(q, body);
     const controls = document.createElement('div'); controls.className = 'waitControls';
-    const labels = { up: '↑ Up', down: '↓ Down', left: '← Change', right: 'Change →', enter: 'Enter / Continue', escape: 'Esc / Cancel' };
+    const labels = { up: '↑ Up', down: '↓ Down', left: '← Change', right: 'Change →', enter: 'Enter / Select', escape: 'Esc / Cancel' };
     for (const key of p.actions) {
       if (!Object.hasOwn(labels, key)) continue;
       const btn = document.createElement('button'); btn.className = 'waitOpt'; btn.textContent = labels[key];
@@ -3856,7 +3856,7 @@ function renderWaiting(o) {
     }
     card.appendChild(controls);
     const hint = document.createElement('div'); hint.className = 'waitHint';
-    hint.textContent = o.answerable ? 'Use the arrows to select or change a setting, then Continue. Cancel closes this panel.' : 'This session is running on another device — answer it there.';
+    hint.textContent = o.answerable ? 'Use Up/Down to move and Left/Right to change a setting. To finish, highlight Continue, then tap Enter. Cancel dismisses this setup panel.' : 'This session is running on another device — answer it there.';
     card.appendChild(hint);
   } else if (p && Array.isArray(p.options) && p.options.length) {
     waitingState.hasOptions = true;
@@ -3894,8 +3894,10 @@ function chooseWaiting(index, btn) {
   if (!waitingState || !waitingState.answerable) return;
   document.querySelectorAll('.waitOpt').forEach((b) => { b.disabled = true; b.classList.remove('chosen'); });
   if (btn) btn.classList.add('chosen');
-  const navigating = typeof index === 'object' && ['up', 'down', 'left', 'right'].includes(index?.key);
-  if (navigating) {
+  // Enter can change a setting or open another panel. Even Escape may return to a
+  // parent menu. Keep keyboard controls usable until Claude confirms it has closed.
+  const dialogKey = typeof index === 'object' && ['up', 'down', 'left', 'right', 'enter', 'escape'].includes(index?.key);
+  if (dialogKey) {
     document.querySelectorAll('.waitControls .waitOpt').forEach((b) => { b.disabled = false; b.classList.remove('chosen'); });
   } else {
     waitingState = null;   // optimistic; server confirms with waiting_clear

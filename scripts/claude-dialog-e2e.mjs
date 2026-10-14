@@ -92,15 +92,29 @@ try {
   const sent = await page.evaluate(() => window.dialogSent);
   if (sent.at(-1)?.sel?.key !== 'right') throw new Error('Wrong navigation payload');
   await page.getByRole('button', {name: '↓ Down', exact:true}).click();
-  await page.getByRole('button', {name: 'Enter / Continue', exact:true}).click();
+  await page.getByRole('button', {name: 'Enter / Select', exact:true}).click();
   const sequence = await page.evaluate(() => window.dialogSent.map((message) => message.sel.key));
-  if (sequence.join(',') !== 'right,down,enter') throw new Error('Dialog must support consecutive navigation and Continue');
+  if (sequence.join(',') !== 'right,down,enter') throw new Error('Dialog must support consecutive navigation and Enter');
+  // Enter on a setting can leave the panel open. No server repaint should be
+  // needed to recover the controls, including a second Enter or navigation.
+  await page.getByRole('button', {name: 'Enter / Select', exact:true}).click();
+  await page.getByRole('button', {name: '↓ Down', exact:true}).click();
+  if (await page.evaluate(() => window.dialogSent.map(m => m.sel.key).join(',')) !== 'right,down,enter,enter,down') throw new Error('Enter stranded the dialog controls');
+  await page.evaluate((prompt) => renderWaiting({prompt: {...prompt, body: prompt.body.replace('❯ Also scan shell history     true', '  Also scan shell history     false').replace('  Continue', '❯ Continue')}, answerable:true}), prompt);
+  await page.locator('.waitDialog').filter({hasText:'❯ Continue'}).waitFor();
+  await page.getByRole('button', {name: 'Enter / Select', exact:true}).click();
+  await page.evaluate(() => clearWaitingCard());
+  if (await page.locator('.waitingCard').count()) throw new Error('Confirmed completion must remove the panel');
   await page.evaluate((prompt) => renderWaiting({prompt, answerable:true}), prompt);
   await page.getByRole('button', {name: 'Esc / Cancel', exact:true}).click();
   if (await page.evaluate(() => window.dialogSent.at(-1)?.sel?.key) !== 'escape') throw new Error('Wrong cancel payload');
   await page.evaluate((prompt) => renderWaiting({prompt, answerable:false}), prompt);
   if (await page.locator('.waitControls button:disabled').count() !== 6) throw new Error('External dialog must be read only');
-  console.log('Phone dialog content, layout, navigation, cancellation and external ownership verified.');
+  await page.setViewportSize({width:1280, height:900});
+  await page.evaluate((prompt) => renderWaiting({prompt, answerable:true}), prompt);
+  await page.getByRole('button', {name: 'Enter / Select', exact:true}).click();
+  await page.getByRole('button', {name: '↑ Up', exact:true}).click();
+  console.log('Phone and desktop dialog navigation after Enter, repaint, confirmed closure, cancellation and external ownership verified.');
 } finally {
   await browser?.close().catch(() => {});
   child.kill('SIGTERM');
