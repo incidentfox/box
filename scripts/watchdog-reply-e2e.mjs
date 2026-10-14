@@ -41,6 +41,12 @@ try {
  await page.locator('#sessions:not(.hidden)').waitFor();
  await page.evaluate(s=>openChat(s),{id,cwd:home,title:'Synthetic watchdog session',agent:'claude'});
  await page.locator('#chat:not(.hidden)').waitFor();
+ // The fixture answers immediately; disable task-finisher reminders so it cannot
+ // generate unrelated synthetic turns between the completion and exit assertions.
+ await page.evaluate(async id => {
+  const response = await api(`/api/sessions/${id}/autocontinue`, {method:'PUT',body:JSON.stringify({enabled:false})});
+  if (!response.ok) throw Error('Could not disable synthetic task finisher');
+ }, id);
  await page.locator('#input').fill('Now?'); await page.locator('#sendBtn').click();
  try { await page.getByText('Fixture reply: Now?',{exact:true}).waitFor({timeout:30000}); } catch (e) { console.error(await page.locator('body').innerText()); console.error(readFileSync(transcript,'utf8')); throw e; }
  await page.waitForFunction(()=>!running);
