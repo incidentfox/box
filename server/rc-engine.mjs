@@ -35,6 +35,15 @@ export function claudeStartupBlockReason(output) {
   return null;
 }
 
+// Match a Claude session's launch flags, never a UUID mentioned in its prompt.
+// Detached watchdog agents are interactive Claude processes too; remote-control
+// is optional when attaching to their existing dtach terminal.
+export function claudeOwnsSession(command, sessionId) {
+  if (!/^[a-zA-Z0-9-]+$/.test(sessionId || '')) return false;
+  if (!/^(?:\S*\/)?claude(?:\s|$)/.test(command)) return false;
+  return new RegExp(`(?:^|\\s)--(?:resume|session-id)(?:=|\\s+)${sessionId}(?=\\s|$)`).test(command);
+}
+
 // ── Cross-platform process helpers ───────────────────────────────────────────
 // Box runs on both Linux servers and macOS. A few of the process inspections below
 // rely on tools whose flags/paths differ across platforms; these wrappers pick the
@@ -263,31 +272,14 @@ export class RCEngine extends EventEmitter {
     return false;
   }
 
-  // Find a live BOX-LOCAL dtach bridge already driving `sessionId` — i.e. a
-  // `claude … --remote-control … --resume <sessionId>` process running on THIS box,
-  // wrapped in a dtach master we can reattach to. Covers both the cc-rc-supervisor's
-  // long-lived sessions (/tmp/cc-rc-*.dtach) and any ad-hoc interactive `claude`
-  // started on the box with remote-control + resume. Returns { sock, pid } or null.
-  //
-  // This is the key to a collision-SAFE take-over: if the owner is already one of our
-  // own bridges, we don't spawn a SECOND `--remote-control` process (which is what
-  // archive-loops, per docs/rc-collision-fix.md) — we reattach to the EXISTING one,
-  // so there is always exactly one owner of the claude.ai surface.
-  // requireRecent: the cwd-fallback (no-`--resume` sessions) normally only counts a
-  // bridge whose JSONL was written in the last RECENT_MS — a recency proxy for
-  // archive-loop ownership decisions.
-  // argvOnly: skip the cwd-fallback entirely and trust ONLY the proc-specific arg-scan
-  // (the full sessionId UUID in argv). The cwd-fallback canNOT distinguish sessions
-  // that SHARE a cwd: every session under ~/development has its JSONL in the same
-  // project dir, so the "<id>.jsonl exists in this proc's project dir" test is true for
-  // EVERY such proc and returns the first one — the WRONG bridge. That mismatch is
-  // harmless for ownership classification (any box-local owner means "reattach, don't
-  // spawn") but catastrophic for injection/binding, where it cross-wires a session to
-  // another's bridge. So injectIfLive() passes argvOnly:true.
+  // Find the exact session's live local Claude process and verified dtach socket.
+  // Both remote-control bridges and ordinary watchdog terminals can accept input.
+  // argvOnly prevents binding to a different session that merely shares a cwd.
+  // The legacy cwd fallback is retained only for callers explicitly requesting it.
   localBridgeFor(sessionId, { requireRecent = true, argvOnly = false } = {}) {
     if (!sessionId) return null;
 
-    // Helper: given a claude --remote-control PID, find its dtach parent's socket.
+    // Helper: given a Claude PID, find its dtach parent's socket.
     const dtachSockFor = (pid) => {
       try {
         const ppid = execSync(`ps -o ppid= -p ${pid}`, { encoding: 'utf8', timeout: 2000 }).trim();
@@ -302,19 +294,14 @@ export class RCEngine extends EventEmitter {
       } catch { return null; }
     };
 
-    // Primary search: find the sessionId anywhere in process args (covers both
-    // `--resume <id>`, used by the cc-rc-supervisor, AND `--session-id <id>`, used by
-    // the interactive `cnew` wrapper for a fresh RC session). The filters below still
-    // require a real `claude --remote-control` process, so a bare id match can't false-hit.
+    // Primary search requires an exact --resume/--session-id flag on Claude itself.
     try {
       const out = pgrepFull(sessionId);
       for (const line of out.split('\n')) {
         const m = line.match(/^(\d+)\s+(.*)$/);
         if (!m) continue;
         const [, pid, cmd] = m;
-        if (!/--remote-control/.test(cmd)) continue;
-        if (/^dtach\b/.test(cmd) || /\bbash -c\b/.test(cmd)) continue;
-        if (!/\bclaude\b/.test(cmd)) continue;
+        if (!claudeOwnsSession(cmd, sessionId)) continue;
         const sock = dtachSockFor(pid);
         if (sock) return { sock, pid: Number(pid) };
       }
@@ -362,7 +349,7 @@ export class RCEngine extends EventEmitter {
   classifyOwner(sessionId) {
     if (!sessionId) return { kind: 'none' };
     if (this.sessions.has(sessionId)) return { kind: 'self' };
-    const bridge = this.localBridgeFor(sessionId);
+    const bridge = this.localBridgeFor(sessionId, { argvOnly: true });
     if (bridge) return { kind: 'box-bridge', sock: bridge.sock };
     if (this.jsonlRecentlyTouched(sessionId)) return { kind: 'external' };
     return { kind: 'none' };
@@ -492,9 +479,15 @@ export class RCEngine extends EventEmitter {
     // dtach client exits when we detach or when the session ends; either way
     // clean up our local record (dtach sock may still exist if claude is alive).
     term.onExit(() => {
+      s.exited = true;
+      clearTimeout(s._quietT);
+      clearTimeout(s._capT);
+      clearTimeout(s.idleTimer);
+      // Unblock sendRecord even if the terminal died before its first repaint.
+      s._bootRes(s);
       if (s._detectI) clearInterval(s._detectI);
       if (s.sessionId) this.sessions.delete(s.sessionId);
-      this.emit('exit', s.sessionId);
+      this.emit('exit', s.sessionId, s);
     });
 
     if (sessionId) this.sessions.set(sessionId, s);
@@ -550,6 +543,13 @@ export class RCEngine extends EventEmitter {
   async sendRecord(s, text) {
     this.touch(s);
     await s.booted_p;
+    const assertLive = () => {
+      if (!s.exited) return;
+      const error = new Error('Claude exited before accepting your message. Your message was kept in the Box queue.');
+      error.code = 'CLAUDE_STARTUP_BLOCKED';
+      throw error;
+    };
+    assertLive();
     // outBuf also contains old chat and prior screens. Inspect only a fresh TUI
     // repaint so a previous sign-in error (or a user's discussion of one) cannot
     // block a later, healthy turn.
@@ -560,8 +560,10 @@ export class RCEngine extends EventEmitter {
       error.code = 'CLAUDE_STARTUP_BLOCKED';
       throw error;
     }
+    assertLive();
     s.pty.write(bracketedPaste(text));
     await new Promise((r) => setTimeout(r, 120)); // let the paste settle before submit
+    assertLive();
     s.pty.write('\r');
   }
 

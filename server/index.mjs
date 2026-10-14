@@ -5992,9 +5992,11 @@ function runTurn(s, msg) {
     if (sessionInTeamWorkspaceOf(s) && s.sessionId) prompt += teamChatContextForAgent(s.sessionId);
 
     let done = false;
+    let onBridgeExit;
     const finish = () => {
       if (done) return; done = true;
       clearTimeout(s.turnTimer); s.onTurnEnd = null;
+      if (onBridgeExit) rcEngine.off('exit', onBridgeExit);
       bcast(s, { type: 'done', qid: msg.qid, sessionId: s.sessionId, canceled: s.canceled });
       resolve();
     };
@@ -6024,6 +6026,14 @@ function runTurn(s, msg) {
         s.turnTimer = setTimeout(finish, TURN_TIMEOUT_MS);
 
         await rcEngine.sendRecord(rec, prompt);
+        onBridgeExit = (_id, record) => {
+          if (record !== rec || done) return;
+          s.lastTurnError = 'Claude disconnected before the reply completed. Check the session before retrying; the message may already have been accepted.';
+          bcast(s, { type: 'error', msg: s.lastTurnError });
+          finish();
+        };
+        if (!done) rcEngine.on('exit', onBridgeExit);
+        if (rec.exited) onBridgeExit(rec.sessionId, rec);
 
         if (!s.sessionId) {
           await rec.session_p;                 // real id appears once the JSONL is created
