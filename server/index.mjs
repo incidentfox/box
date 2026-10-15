@@ -193,6 +193,7 @@ const localEnv = process.env.BOX_IGNORE_LOCAL_ENV === '1' ? {} : loadEnvFile(joi
 const extraEnv = loadEnvFile(process.env.EXTRA_ENV_FILE || localEnv.EXTRA_ENV_FILE || '');
 // Resolve a config value from (in order) the process env, .env, then the extra env file.
 const cfg = (k, d = '') => process.env[k] || localEnv[k] || extraEnv[k] || d;
+rcEngine.permissionMode = cfg('CLAUDE_PERMISSION_MODE');
 
 const PORT = Number(cfg('PORT', 7321));
 // Normal Box sessions start immediately with no process-wide concurrency cap. Automatic

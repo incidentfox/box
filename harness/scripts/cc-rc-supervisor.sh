@@ -22,11 +22,8 @@ STATE_DIR="${BOX_STATE_DIR:-$HOME/.cc-mobile}"
 LOG="$STATE_DIR/cc-rc-supervisor.log"
 DBGDIR="$STATE_DIR/rc-debug"
 CLAUDE="$(command -v claude || echo /usr/bin/claude)"
-# Same CLAUDE_PERMISSION_MODE as the Box server (cron doesn't load .env, so fall back to it).
-# Must be one of the CLI's choices; anything else stays on `auto`.
-BOX_ENV="${BOX_ENV_FILE:-$(cd "$(dirname "$(readlink -f "$0")")/../.." 2>/dev/null && pwd)/.env}"
-PERM_MODE="${CLAUDE_PERMISSION_MODE:-$(sed -n 's/^CLAUDE_PERMISSION_MODE=//p' "$BOX_ENV" 2>/dev/null | tail -1)}"
-case "$PERM_MODE" in manual|acceptEdits|plan|auto|dontAsk|bypassPermissions) ;; *) PERM_MODE=auto;; esac
+# Same CLAUDE_PERMISSION_MODE lookup as the Box server (cron doesn't load .env).
+PERM_MODE="$(bash "$(dirname "$0")/claude-permission-mode.sh" 2>/dev/null || echo auto)"
 STALE_SECS="${CC_RC_STALE_SECS:-90}"   # how long RC must be down before recycling
 DBG_MAX_BYTES=$((25*1024*1024))        # truncate a debug log past this size
 mkdir -p "$(dirname "$LOG")" "$DBGDIR" 2>/dev/null || true
