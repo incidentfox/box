@@ -204,7 +204,7 @@ const childEnv = (opts = {}) => buildChildEnv(process.env, opts);
 // Permission mode for RC chats. `auto` (the classifier) is the default; the owner can opt
 // into `bypassPermissions` (= --dangerously-skip-permissions) with CLAUDE_PERMISSION_MODE.
 // Guest sessions are always held to `auto` — bypass must never extend to a guest.
-const CLAUDE_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
+const CLAUDE_PERMISSION_MODES = new Set(['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
 export function claudePermissionMode(env = process.env, { guest = false } = {}) {
   const want = String(env.CLAUDE_PERMISSION_MODE || '').trim();
   if (guest || !CLAUDE_PERMISSION_MODES.has(want)) return 'auto';

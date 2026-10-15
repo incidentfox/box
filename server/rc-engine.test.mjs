@@ -110,6 +110,8 @@ test('a terminal that exits before boot preserves the unsent prompt', async () =
 test('claudePermissionMode: auto by default, owner opt-in, guests pinned to auto', () => {
   assert.equal(claudePermissionMode({}), 'auto');
   assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'bypassPermissions' }), 'bypassPermissions');
+  assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'manual' }), 'manual');
+  assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'default' }), 'auto'); // not a CLI choice
   assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'bogus' }), 'auto');
   assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'bypassPermissions' }, { guest: true }), 'auto');
 });
