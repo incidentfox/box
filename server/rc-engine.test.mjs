@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { RCEngine, claudeOwnsSession, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
+import { RCEngine, claudeOwnsSession, claudePermissionMode, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
 
 test('interactive setup and OAuth screens are caught before sending a prompt', () => {
   assert.equal(claudeStartupBlockReason('\x1b[2JLet\x1b[1m\'s get started\x1b[0m Choose the text style'), 'setup');
@@ -105,4 +105,11 @@ test('a terminal that exits before boot preserves the unsent prompt', async () =
   engine.touch = () => {};
   const record = { exited: true, booted_p: Promise.resolve(), pty: { write: () => assert.fail('must not paste into dead terminal') } };
   await assert.rejects(engine.sendRecord(record, 'exact user prompt'), { code: 'CLAUDE_STARTUP_BLOCKED' });
+});
+
+test('claudePermissionMode: auto by default, owner opt-in, guests pinned to auto', () => {
+  assert.equal(claudePermissionMode({}), 'auto');
+  assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'bypassPermissions' }), 'bypassPermissions');
+  assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'bogus' }), 'auto');
+  assert.equal(claudePermissionMode({ CLAUDE_PERMISSION_MODE: 'bypassPermissions' }, { guest: true }), 'auto');
 });
