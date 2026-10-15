@@ -22,6 +22,11 @@ STATE_DIR="${BOX_STATE_DIR:-$HOME/.cc-mobile}"
 LOG="$STATE_DIR/cc-rc-supervisor.log"
 DBGDIR="$STATE_DIR/rc-debug"
 CLAUDE="$(command -v claude || echo /usr/bin/claude)"
+# Same CLAUDE_PERMISSION_MODE as the Box server (cron doesn't load .env, so fall back to it).
+# Must be one of the CLI's choices; anything else stays on `auto`.
+BOX_ENV="${BOX_ENV_FILE:-$(cd "$(dirname "$(readlink -f "$0")")/../.." 2>/dev/null && pwd)/.env}"
+PERM_MODE="${CLAUDE_PERMISSION_MODE:-$(sed -n 's/^CLAUDE_PERMISSION_MODE=//p' "$BOX_ENV" 2>/dev/null | tail -1)}"
+case "$PERM_MODE" in manual|acceptEdits|plan|auto|dontAsk|bypassPermissions) ;; *) PERM_MODE=auto;; esac
 STALE_SECS="${CC_RC_STALE_SECS:-90}"   # how long RC must be down before recycling
 DBG_MAX_BYTES=$((25*1024*1024))        # truncate a debug log past this size
 mkdir -p "$(dirname "$LOG")" "$DBGDIR" 2>/dev/null || true
@@ -95,7 +100,7 @@ launch_session(){
     unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_OAUTH_TOKEN ANTHROPIC_API_KEY
     exec setsid dtach -n "$sock" -r winch -z \
       "$CLAUDE" --resume "$id" --remote-control "$name" \
-      --debug-file "$dbg" --permission-mode auto
+      --debug-file "$dbg" --permission-mode "$PERM_MODE"
   ) >/dev/null 2>&1
 }
 
