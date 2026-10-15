@@ -201,6 +201,17 @@ function findJsonl(sessionId) {
 // own login token away from the agent. All of that now lives in one shared filter.
 const childEnv = (opts = {}) => buildChildEnv(process.env, opts);
 
+// Permission mode for RC chats. `auto` (the classifier) is the default; the owner can opt
+// into `bypassPermissions` (= --dangerously-skip-permissions) with CLAUDE_PERMISSION_MODE
+// (index.mjs resolves it via cfg(), so .env / EXTRA_ENV_FILE work like every other key).
+// Guest sessions are always held to `auto` — bypass must never extend to a guest.
+const CLAUDE_PERMISSION_MODES = new Set(['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
+export function claudePermissionMode(configured, { guest = false } = {}) {
+  const want = String(configured || '').trim();
+  if (guest || !CLAUDE_PERMISSION_MODES.has(want)) return 'auto';
+  return want;
+}
+
 // Claude Code shows a one-time "Do you trust this folder?" dialog the first time it
 // runs in a directory. It's a pre-TUI screen our boot detector can't distinguish from a
 // ready input box, so the first pasted prompt gets swallowed and the chat looks dead.
@@ -244,6 +255,7 @@ export class RCEngine extends EventEmitter {
   constructor() {
     super();
     this.sessions = new Map(); // sessionId -> session record
+    this.permissionMode = process.env.CLAUDE_PERMISSION_MODE; // index.mjs overrides from cfg()
   }
 
   get(sessionId) { return this.sessions.get(sessionId); }
@@ -408,7 +420,7 @@ export class RCEngine extends EventEmitter {
     const cwd = opts.cwd || CWD;
     // Wrap the RC process in dtach so it survives server restarts and SSH disconnects.
     // dtach -A creates the socket+process if absent, or reattaches if it exists (idempotent).
-    const claudeArgs = ['--remote-control', name, '--permission-mode', 'auto'];
+    const claudeArgs = ['--remote-control', name, '--permission-mode', claudePermissionMode(this.permissionMode, { guest: !!opts.guest })];
     claudeArgs.push('--model', normalizeClaudeModel(opts.settings && opts.settings.model));
     if (opts.settings && opts.settings.effort) claudeArgs.push('--effort', opts.settings.effort);
     if (sessionId) claudeArgs.push('--resume', sessionId);

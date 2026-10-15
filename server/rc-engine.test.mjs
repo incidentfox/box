@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { RCEngine, claudeOwnsSession, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { RCEngine, claudeOwnsSession, claudePermissionMode, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
 
 test('interactive setup and OAuth screens are caught before sending a prompt', () => {
   assert.equal(claudeStartupBlockReason('\x1b[2JLet\x1b[1m\'s get started\x1b[0m Choose the text style'), 'setup');
@@ -105,4 +109,31 @@ test('a terminal that exits before boot preserves the unsent prompt', async () =
   engine.touch = () => {};
   const record = { exited: true, booted_p: Promise.resolve(), pty: { write: () => assert.fail('must not paste into dead terminal') } };
   await assert.rejects(engine.sendRecord(record, 'exact user prompt'), { code: 'CLAUDE_STARTUP_BLOCKED' });
+});
+
+test('claudePermissionMode: auto by default, owner opt-in, guests pinned to auto', () => {
+  assert.equal(claudePermissionMode(undefined), 'auto');
+  assert.equal(claudePermissionMode('bypassPermissions'), 'bypassPermissions');
+  assert.equal(claudePermissionMode('manual'), 'manual');
+  assert.equal(claudePermissionMode('default'), 'auto'); // not a CLI choice
+  assert.equal(claudePermissionMode('bogus'), 'auto');
+  assert.equal(claudePermissionMode('bypassPermissions', { guest: true }), 'auto');
+});
+
+test('claude-permission-mode.sh: env > .env > EXTRA_ENV_FILE, quotes stripped, invalid → auto', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'box-perm-'));
+  const script = new URL('../harness/scripts/claude-permission-mode.sh', import.meta.url).pathname;
+  const run = (env) => execFileSync('bash', [script, dir], { env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' }).trim();
+  try {
+    assert.equal(run({}), 'auto');                                        // no .env at all
+    fs.writeFileSync(path.join(dir, '.env'), 'CLAUDE_PERMISSION_MODE="bypassPermissions"\n');
+    assert.equal(run({}), 'bypassPermissions');                           // quoted .env value
+    assert.equal(run({ CLAUDE_PERMISSION_MODE: 'plan' }), 'plan');        // process env wins
+    const extra = path.join(dir, 'extra.env');
+    fs.writeFileSync(extra, "CLAUDE_PERMISSION_MODE='acceptEdits'\n");
+    fs.writeFileSync(path.join(dir, '.env'), `EXTRA_ENV_FILE=${extra}\n`);
+    assert.equal(run({}), 'acceptEdits');                                 // via .env's EXTRA_ENV_FILE
+    fs.writeFileSync(path.join(dir, '.env'), 'CLAUDE_PERMISSION_MODE=default\n');
+    assert.equal(run({}), 'auto');                                        // invalid → auto
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
