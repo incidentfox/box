@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import multer from 'multer';
-import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd } from './rc-engine.mjs';
+import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd, isCompactSummaryEntry } from './rc-engine.mjs';
 import { buildChildEnv } from './child-env.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
@@ -724,7 +724,7 @@ function sessionTitle(file) {
       if (!line.trim()) continue;
       let o; try { o = JSON.parse(line); } catch { continue; }
       if (o.type === 'summary' && o.summary) return o.summary.slice(0, 80);
-      if (o.type === 'user' && o.message) {
+      if (o.type === 'user' && o.message && !isCompactSummaryEntry(o)) {
         const c = o.message.content;
         let t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : '';
         t = t.trim();
@@ -824,7 +824,7 @@ function sessionPreviewRead(file) {
     for (let i = lines.length - 1; i >= 0; i--) {
       if (!lines[i].trim()) continue;
       let o; try { o = JSON.parse(lines[i]); } catch { continue; }
-      if ((o.type === 'assistant' || o.type === 'user') && o.message) {
+      if ((o.type === 'assistant' || o.type === 'user') && o.message && !isCompactSummaryEntry(o)) {
         const c = o.message.content;
         let t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : '';
         t = (t || '').trim();
@@ -855,6 +855,11 @@ function tailInfoRead(file) {
     for (let i = lines.length - 1; i >= 0; i--) {
       if (!lines[i].trim()) continue;
       let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+      // Claude compacts idle sessions before their prompt cache expires. The rows it
+      // writes (boundary, summary, re-injected context) are not chat activity: when no
+      // real message follows them, keep reading back to the last real exchange so an
+      // idle compaction neither floats the chat to the top nor becomes its preview.
+      if (!gotMsg && (isCompactSummaryEntry(o) || (o.type === 'system' && o.subtype === 'compact_boundary'))) { lastTs = 0; continue; }
       if (!lastTs && o.timestamp) { const t = Date.parse(o.timestamp); if (t) lastTs = t; }
       if (!gotMsg && (o.type === 'assistant' || o.type === 'user') && o.message) {
         const c = o.message.content;
@@ -2230,7 +2235,7 @@ function openingPrompt(file) {
         const line = acc.slice(0, nl); acc = acc.slice(nl + 1);
         if (!line.trim()) continue;
         let o; try { o = JSON.parse(line); } catch { continue; }
-        if (o.type === 'user' && o.message) {
+        if (o.type === 'user' && o.message && !isCompactSummaryEntry(o)) {
           const c = o.message.content;
           let t = typeof c === 'string' ? c : Array.isArray(c) ? c.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : '';
           t = t.trim();
@@ -2634,7 +2639,7 @@ function parseJsonlMessages(raw, onMessage = null, initialOffset = 0) {
           const split = team.splitAuthorTag(firstText.text);
           if (split.author) { author = split.author; firstText.text = split.text; }
         }
-        const message = { role, parts, ts: o.timestamp || null, ...(author ? { author } : {}) };
+        const message = { role, parts, ts: o.timestamp || null, ...(author ? { author } : {}), ...(role === 'user' && isCompactSummaryEntry(o) ? { compacted: true } : {}) };
         messages.push(message);
         if (onMessage) onMessage(message, sourceOffset);
       }
@@ -3272,7 +3277,7 @@ app.get('/api/sessions/:id/user-messages', requireAuth, async (req, res) => {
     for await (const line of rl) {
       if (!line.trim()) continue;
       let o; try { o = JSON.parse(line); } catch { continue; }
-      if (o.type !== 'user' || !o.message) continue;
+      if (o.type !== 'user' || !o.message || isCompactSummaryEntry(o)) continue;
       const c = o.message.content;
       const isToolResultOnly = Array.isArray(c) && c.every((b) => b.type === 'tool_result');
       if (isToolResultOnly) continue;
@@ -4533,7 +4538,7 @@ function sessionIssueCounts(file) {
       txt = txt.trim();
       if (!txt) continue;
       // drop injected/system/hook/event user text that merely *names* tickets
-      if (o.type === 'user' && (INC_INJECT_RE.test(txt) || /New since your last turn|Needs your input/.test(txt))) continue;
+      if (o.type === 'user' && (INC_INJECT_RE.test(txt) || /New since your last turn|Needs your input/.test(txt) || isCompactSummaryEntry(o))) continue;
       tallyIssues(txt, counts);
     }
   } catch {}
@@ -4981,6 +4986,12 @@ function onTailEvent(s, ev) {
   // written at the same time, so consuming both streams would replay the same user/text/tool
   // events and visibly duplicate the turn. The rollout tail owns only external/native turns.
   if (s.agent === 'codex' && s.proc) return;
+  if (ev.kind === 'compacted') {
+    // A compaction summary is context for the model, not a request: render a divider and
+    // leave the turn state alone (an idle compaction is never followed by a reply).
+    bcast(s, { type: 'compacted', text: ev.text || '' });
+    return;
+  }
   if (ev.kind === 'user') {
     // our own injected message echoes back as a user entry; skip one per inject.
     if (s.expectUserEcho > 0) { s.expectUserEcho--; return; }

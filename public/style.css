@@ -67,6 +67,11 @@ input, textarea, .selectable,
 .switchDivider::before, .switchDivider::after { content: ''; flex: 1; height: 1px; background: linear-gradient(to right, transparent, var(--line), transparent); }
 .err { color: #c0392b; font-size: 14px; min-height: 18px; }
 .notice { color: #8a8f98; font-size: 12.5px; font-style: italic; margin: 2px 0; }
+.compactDivider { align-self: stretch; margin: 10px 0; color: var(--muted, #8a8f98); font-size: 12.5px; }
+.compactDivider > summary { cursor: pointer; list-style: none; text-align: center; padding: 4px 0; display: flex; align-items: center; gap: 10px; }
+.compactDivider > summary::-webkit-details-marker { display: none; }
+.compactDivider > summary::before, .compactDivider > summary::after { content: ''; flex: 1; border-top: 1px solid currentColor; opacity: .35; }
+.compactText { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow: auto; margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: rgba(127,127,127,.08); font-size: 12.5px; line-height: 1.45; }
 .blocked { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 12px; padding: 11px 13px; margin: 6px 0; }
 .blocked .blockedMsg { font-size: 13.5px; line-height: 1.4; color: var(--muted); }
 .blocked .takeover { margin-top: 9px; padding: 8px 16px; font-size: 14px; font-weight: 600; background: var(--accent); color: #fff; border-radius: 11px; }

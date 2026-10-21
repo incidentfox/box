@@ -2810,8 +2810,24 @@ function applyAuthor(wrap, author) {
   wrap.dataset.authorId = author.id || '';
   wrap.appendChild(badge);
 }
+// Claude's compaction summary is stored as a user-role row, but it is context handed back
+// to the model, not something the user said — show a collapsed divider instead of a bubble.
+function compactDivider(text, ts) {
+  const d = document.createElement('details'); d.className = 'compactDivider';
+  if (ts) d.dataset.ts = ts;
+  const sum = document.createElement('summary');
+  sum.textContent = ts ? `Context compacted · ${fmtTs(ts)}` : 'Context compacted';
+  d.appendChild(sum);
+  if (text) { const body = document.createElement('div'); body.className = 'compactText'; body.textContent = text; d.appendChild(body); }
+  return d;
+}
 function buildHistElement(m) {
   m = (m && typeof m === 'object') ? m : { role: 'assistant', parts: [{ t: 'text', text: String(m || '') }] };
+  if (m.compacted) {
+    const d = compactDivider((m.parts || []).filter((p) => p && p.t === 'text').map((p) => p.text || '').join('\n'), m.ts);
+    if (m._idx != null) d.dataset.idx = String(m._idx);
+    return d;
+  }
   const role = m.role === 'user' ? 'user' : 'assistant';
   const wrap = document.createElement('div'); wrap.className = 'msg ' + role;
   if (m._idx != null) wrap.dataset.idx = String(m._idx);
@@ -3417,6 +3433,8 @@ function onServer(o) {
   // a user message typed from ANOTHER device (desktop / official app) — sync it in.
   // Drop it if it just duplicates a bubble we rendered moments ago (a leaked self-echo from
   // force-queue + Stop), so the message doesn't render twice.
+  // A compaction (including Claude's idle one) is not a new turn: never start a spinner for it.
+  if (o.type === 'compacted') { const viewport = captureChatViewport(); (live ? live.body : $('messages')).appendChild(compactDivider(o.text || '', new Date().toISOString())); restoreChatViewport(viewport); return; }
   if (o.type === 'remote_user') { if (isRecentDupUser(o.text || '')) return; if (live) finishTurn({ sessionId: cur.id }); beginTurn(o.text || '', [], o.author); return; }
   if (o.type === 'queue') { renderQueue(o.queue); refreshSessionModesSoon(); return; }
   if (o.type === 'queue_canceled') { queueCancelUndo.set(o.qid, Number(o.expiresAt) || Date.now() + 8000); showQueueCancelUndo(); return; }

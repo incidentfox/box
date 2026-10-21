@@ -3,6 +3,7 @@ import { mkdtempSync, openSync, closeSync, readFileSync, readSync, rmSync, statS
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import vm from 'node:vm';
+import { isCompactSummaryEntry } from './rc-engine.mjs';
 
 const source = readFileSync(new URL('./index.mjs', import.meta.url), 'utf8');
 const historyCode = source.slice(source.indexOf('const HIST_MSG_LIMIT ='), source.indexOf('function mergeCodexIncompleteNotices('));
@@ -11,6 +12,7 @@ const context = {
   decodeCwd: () => '/synthetic',
   team: { splitAuthorTag: () => ({ author: null }) },
   summarizeToolInput: () => '', normalizeSettings: () => ({}), contextForSession: () => ({}),
+  isCompactSummaryEntry,
 };
 vm.createContext(context);
 vm.runInContext(historyCode, context);
@@ -40,6 +42,15 @@ try {
     assert.deepEqual(seen, Array.from({ length: count }, (_, i) => i), `${count} messages are reachable in order`);
     assert.equal(pages, Math.ceil(count / 400));
   }
+  // A compaction summary keeps its slot (forks/exports still carry it) but is flagged so
+  // the UI renders a divider instead of a user turn.
+  const compacted = join(dir, 'compacted.jsonl');
+  writeFileSync(compacted, [
+    { type: 'user', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: 'real request' } },
+    { type: 'user', isCompactSummary: true, timestamp: '2026-01-01T01:00:00Z', message: { role: 'user', content: 'This session is being continued from a previous conversation. Summary: ...' } },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const flagged = context.claudeSessionHistory('compacted', compacted).messages;
+  assert.deepEqual(Array.from(flagged, (m) => !!m.compacted), [false, true]);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

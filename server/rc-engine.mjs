@@ -683,13 +683,38 @@ export class RCEngine extends EventEmitter {
 }
 
 // ---- JSONL tailing -------------------------------------------------------
+const COMPACT_SUMMARY_PREFIX = 'This session is being continued from a previous conversation';
+
+function userRowText(o) {
+  const c = o && o.message && o.message.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('\n');
+  return '';
+}
+
+// True for the summary row Claude appends after compacting a conversation.
+export function isCompactSummaryEntry(o) {
+  if (!o || o.type !== 'user') return false;
+  if (o.isCompactSummary === true) return true;
+  return userRowText(o).trimStart().startsWith(COMPACT_SUMMARY_PREFIX);
+}
+
+export function compactSummaryText(o) {
+  return userRowText(o);
+}
+
 // Parse a JSONL file into render events. Stateless w.r.t. processes so it can
 // follow a session edited from ANY device (Box / desktop / official app).
 
 export function parseEntry(o) {
   // Returns an array of normalized events for one JSONL line, or [].
   const out = [];
-  if (o.type === 'user') {
+  if (o.type === 'user' && isCompactSummaryEntry(o)) {
+    // Claude writes its compaction summary as a user-role row (including the idle
+    // compaction it runs before the prompt cache expires). It is not a new request and
+    // no reply follows, so it must never start a turn in the UI.
+    out.push({ kind: 'compacted', text: compactSummaryText(o), uuid: o.uuid, ts: o.timestamp });
+  } else if (o.type === 'user') {
     const c = o.message && o.message.content;
     if (typeof c === 'string') out.push({ kind: 'user', text: c, uuid: o.uuid, ts: o.timestamp });
     else if (Array.isArray(c)) {
