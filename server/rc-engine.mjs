@@ -20,6 +20,7 @@ import { EventEmitter } from 'events';
 import { randomUUID } from 'node:crypto';
 import { buildChildEnv } from './child-env.mjs';
 import { normalizeClaudeModel } from './claude-model.mjs';
+import { startDetachedSession } from './session-scope.mjs';
 
 const require = createRequire(import.meta.url);
 const pty = require('node-pty');
@@ -426,6 +427,10 @@ export class RCEngine extends EventEmitter {
     if (sessionId) claudeArgs.push('--resume', sessionId);
     else claudeArgs.push('--session-id', newId);   // deterministic id for a fresh chat
     trustCwd(cwd); // pre-accept the folder-trust dialog so the first prompt isn't eaten
+    // Start the session in its own systemd scope so a Box server restart (whose unit
+    // kills its whole cgroup) cannot take it down; `dtach -A` below then attaches.
+    // Without systemd, `dtach -A` creates the master itself as before.
+    if (!reattach) startDetachedSession({ sock, command: ['claude', ...claudeArgs], cwd, env: childEnv({ guest: !!opts.guest }) });
     const term = pty.spawn('dtach', ['-A', sock, '-r', 'winch', '-z', 'claude', ...claudeArgs], {
       // A guest-started session's process is restricted for its whole life — the env is
       // fixed at spawn, so this is decided once here rather than per turn.

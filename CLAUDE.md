@@ -37,6 +37,11 @@ review-only request:
    then terminate only that verified PID so the keeper respawns it. Preserve the keeper and unrelated
    session bridges; inspect the server unit's kill scope and preserve queue/recovery state as described
    in that procedure. Verify the replacement process and affected local/public workflow before completion.
+   **Before ANY server restart**, run `node server/session-scope.mjs list` from the canonical checkout.
+   It must report `0 session(s) inside the server cgroup`. Otherwise, run `node server/session-scope.mjs
+   rescue` first. The server unit uses `KillMode=control-group`, so a restart kills every Claude session
+   still inside it, mid-task and without warning (this cost a 3-hour customer build on 2026-10-21).
+   Sessions started by the server get their own `box-session-*.scope`, and the server re-checks every minute.
 
 **Emergency override** (rare, admin only): lift protection in Settings → Branches, or
 `gh api -X DELETE repos/incidentfox/box/branches/main/protection`, push, then re-apply it.

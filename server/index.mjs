@@ -19,6 +19,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import multer from 'multer';
 import { RCEngine, tail as tailJsonl, readAll as readJsonl, projectsBases, pgrepFull, pidCwd, isCompactSummaryEntry } from './rc-engine.mjs';
+import { rescueSessions, systemdUserAvailable } from './session-scope.mjs';
 import { buildChildEnv } from './child-env.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
@@ -7175,6 +7176,14 @@ setInterval(() => {
 // show as live immediately (not as orphaned idle cards). Run once at boot + refresh
 // every 30s as sessions start/stop. Cheap: one pgrep + a readlink per live bridge.
 try { const n = reconcileLiveBridges(); console.log(`reconciled ${n} live RC bridge(s)`); } catch (e) { console.log('reconcile failed:', e.message); }
+// Backstop for sessions still inside this server's cgroup (started before session scopes
+// existed, or where the scope start failed): move them out so the next restart spares them.
+function rescueServerCgroupSessions() {
+  try {
+    for (const r of rescueSessions()) console.log(`session scope: ${r.moved ? 'moved' : 'could not move'} ${r.sock}${r.error ? ` (${r.error})` : ''}`);
+  } catch (e) { console.log('session scope rescue failed:', e.message); }
+}
+if (systemdUserAvailable()) { rescueServerCgroupSessions(); setInterval(rescueServerCgroupSessions, 60 * 1000).unref(); }
 try { reconcileArchivedSessionRuntimes(); } catch (e) { console.log('runtime reconcile failed:', e.message); }
 setInterval(() => {
   try { reconcileLiveBridges(); } catch {}
