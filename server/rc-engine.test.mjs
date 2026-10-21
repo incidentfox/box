@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { RCEngine, claudeOwnsSession, claudePermissionMode, claudeStartupBlockReason, parseEntry } from './rc-engine.mjs';
+import { RCEngine, claudeOwnsSession, claudePermissionMode, claudeStartupBlockReason, parseEntry, isCompactSummaryEntry } from './rc-engine.mjs';
 
 test('interactive setup and OAuth screens are caught before sending a prompt', () => {
   assert.equal(claudeStartupBlockReason('\x1b[2JLet\x1b[1m\'s get started\x1b[0m Choose the text style'), 'setup');
@@ -136,4 +136,18 @@ test('claude-permission-mode.sh: env > .env > EXTRA_ENV_FILE, quotes stripped, i
     fs.writeFileSync(path.join(dir, '.env'), 'CLAUDE_PERMISSION_MODE=default\n');
     assert.equal(run({}), 'auto');                                        // invalid → auto
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a compaction summary row is a compacted marker, never a user turn', () => {
+  const text = 'This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. ...';
+  const flagged = { type: 'user', isCompactSummary: true, isVisibleInTranscriptOnly: true, uuid: 'u1', timestamp: 't', message: { role: 'user', content: text } };
+  assert.deepEqual(parseEntry(flagged), [{ kind: 'compacted', text, uuid: 'u1', ts: 't' }]);
+  // Older transcripts may lack the flag; the fixed preamble still identifies the row.
+  const unflagged = { type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } };
+  assert.deepEqual(kinds(unflagged), ['compacted']);
+  assert.equal(isCompactSummaryEntry(unflagged), true);
+  // A real user message that merely mentions compaction stays a user turn.
+  const real = { type: 'user', message: { role: 'user', content: 'why did the session get compacted?' } };
+  assert.deepEqual(kinds(real), ['user']);
+  assert.equal(isCompactSummaryEntry({ type: 'assistant', isCompactSummary: true, message: { content: [] } }), false);
 });
