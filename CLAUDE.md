@@ -38,10 +38,14 @@ review-only request:
    session bridges; inspect the server unit's kill scope and preserve queue/recovery state as described
    in that procedure. Verify the replacement process and affected local/public workflow before completion.
    **Before ANY server restart**, run `node server/session-scope.mjs list` from the canonical checkout.
-   It must report `0 session(s) inside the server cgroup`. Otherwise, run `node server/session-scope.mjs
+   It must report `0 session(s) ...`. Otherwise, run `node server/session-scope.mjs
    rescue` first. The server unit uses `KillMode=control-group`, so a restart kills every Claude session
    still inside it, mid-task and without warning (this cost a 3-hour customer build on 2026-10-21).
    Sessions started by the server get their own `box-session-*.scope`, and the server re-checks every minute.
+   Session scopes MUST carry `OOMPolicy=continue`: with the scope default (`stop`), one OOM-killed child
+   (an agent's `next build`/Playwright/Remotion hitting the 8G `MemoryMax`) made systemd stop the whole
+   scope, killing Claude and all its subagents (14 sessions 2026-10-21..30). OOMPolicy can't be changed
+   live, so the minute loop migrates legacy `stop` scopes into fresh `*-oomsafe` scopes.
 
 **Emergency override** (rare, admin only): lift protection in Settings → Branches, or
 `gh api -X DELETE repos/incidentfox/box/branches/main/protection`, push, then re-apply it.
