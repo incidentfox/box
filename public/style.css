@@ -1501,17 +1501,43 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .waitTerminal summary { cursor: pointer; padding: 5px 0; }
 .waitTerminal .waitDialog { margin-top: 8px; color: var(--ink); }
 
-/* in-thread voice mode (thread-voice.js) */
-.tvBar { display: flex; align-items: center; gap: 11px; background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 8px 8px 8px 10px; margin-bottom: 8px; box-shadow: 0 4px 18px var(--shadow, rgba(0,0,0,.06)); }
+/* in-thread voice mode (thread-voice.js): minimized bar above the composer… */
+.tvBar { display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 6px 8px 6px 6px; margin-bottom: 8px; box-shadow: 0 4px 18px var(--shadow, rgba(0,0,0,.06)); }
 .tvBar.hidden { display: none; }
-.tvOrb { --lvl: 0; position: relative; width: 34px; height: 34px; flex: none; border-radius: 50%; background: radial-gradient(circle at 35% 35%, color-mix(in srgb, var(--accent) 70%, #fff), var(--accent)); transform: scale(calc(0.86 + var(--lvl) * 0.5)); transition: transform .08s linear, filter .2s; }
+.tvExpand { flex: 1; min-width: 0; display: flex; align-items: center; gap: 11px; background: transparent; border: 0; padding: 2px 4px; color: inherit; text-align: left; font: inherit; cursor: pointer; border-radius: 16px; }
+.tvExpand:active { background: var(--subtle); }
+.tvExpandIc { flex: none; color: var(--muted); display: flex; }
+.tvExpandIc svg { width: 18px; height: 18px; }
+.tvOrb { --lvl: 0; position: relative; display: block; width: 34px; height: 34px; flex: none; border-radius: 50%; background: radial-gradient(circle at 35% 35%, color-mix(in srgb, var(--accent) 70%, #fff), var(--accent)); transform: scale(calc(0.86 + var(--lvl) * 0.5)); transition: transform .08s linear, filter .2s; }
 .tvOrb span { position: absolute; inset: -5px; border-radius: 50%; border: 2px solid var(--accent); opacity: 0; }
 .tvOrb.working span { animation: tvRing 1.4s ease-out infinite; }
 .tvOrb.hearing { filter: hue-rotate(-25deg) saturate(1.2); }
 @keyframes tvRing { 0% { transform: scale(.9); opacity: .55; } 100% { transform: scale(1.35); opacity: 0; } }
-.tvMain { flex: 1; min-width: 0; }
-.tvStatus { font-size: 13px; font-weight: 600; color: var(--ink); }
-.tvCaption { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 1.3em; }
+.tvMain { flex: 1; min-width: 0; display: block; }
+.tvStatus { display: block; font-size: 13px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvCaption { display: block; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 1.3em; }
 .tvBar .iconbtn.active { color: #e0392b; }
 .tvEndBtn { flex: none; padding: 8px 14px; border-radius: 16px; font-size: 14px; font-weight: 600; background: #e0392b; color: #fff; }
+/* …and the full-screen view (ChatGPT-style), reusing the Voice screen's orb, bubbles, chips, dock. */
+.tvFull { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); padding-top: var(--safe-t); }
+.tvFull.hidden { display: none; }
+body.tvFullOpen { overflow: hidden; }
+.tvFullBar { display: flex; align-items: center; gap: 6px; padding: 8px 12px 6px 6px; min-height: 52px; }
+.tvFullBar .iconbtn svg { width: 24px; height: 24px; }
+.tvFullHead { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; text-align: center; }
+.tvTitle { max-width: 100%; font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvFullStatus { max-width: 100%; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvClock { flex: none; min-width: 40px; text-align: right; margin-left: 0; }
+.tvStage { flex: none; display: flex; align-items: center; justify-content: center; height: min(34vh, 260px); min-height: 150px; }
+.tvBigWrap { position: relative; display: flex; align-items: center; justify-content: center; }
+.tvBigWrap .voOrb { width: min(42vw, 168px); height: min(42vw, 168px); }
+.tvBigWrap::after { content: ''; position: absolute; inset: -14px; border-radius: 50%; border: 2px solid var(--accent); opacity: 0; pointer-events: none; }
+.tvBigWrap.working::after { animation: tvRing 1.8s ease-out infinite; }
+.tvFeed { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 8px 16px 16px; width: 100%; max-width: 680px; margin: 0 auto; box-sizing: border-box; -webkit-overflow-scrolling: touch; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px); mask-image: linear-gradient(to bottom, transparent 0, #000 28px); }
+.tvFeed > :first-child { margin-top: auto; }
+.tvFeed .voToolChip { max-width: 100%; box-sizing: border-box; }
+.tvFeed .voToolName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvDock { gap: 28px; }
+@media (max-width: 360px) { .tvDock { gap: 20px; } .tvDock .voCtl { width: 56px; height: 56px; } .tvExpandIc { display: none; } }
+@media (max-height: 560px) { .tvStage { height: 130px; min-height: 0; } .tvBigWrap .voOrb { width: 96px; height: 96px; } }
 #threadVoiceBtn.active { color: var(--accent); }

@@ -35,7 +35,7 @@ import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { createJimmyContext } from './jimmy-context.mjs';
 import { BRAIN_ENTITY_TYPES, brainQueueEntry, describePacificRange, needsJimmyId, normalizeGoogleAccount, parseGmailList, resolveEventTimes, screenBrainFact, senderName } from './voice-extra-tools.mjs';
-import { buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
+import { ASK_THREAD_AGENT_TOOL, buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
 
@@ -3088,9 +3088,9 @@ ${voiceAutonomyPolicy()}
   });
 
   // GPT-Live (gpt-live-1): the browser posts its WebRTC SDP offer; we build the session
-  // (instructions, history, delegation) and exchange it with OpenAI. scope:'thread' voices
-  // one chat thread (client delegation → that thread's own agent); scope:'global' is the
-  // Voice screen (Responses delegation → the box voice tools, run via /api/voice/tool).
+  // (instructions, history, Responses delegation with the box tools) and exchange it with
+  // OpenAI. scope:'global' is the Voice screen; scope:'thread' voices one chat thread and
+  // adds the client-handled ask_thread_agent tool (→ that thread's own agent).
   app.post('/api/voice/live/session', requireAuth, async (req, res) => {
     if (!enabled()) return res.status(500).json({ error: 'OPENAI_API_KEY not configured on the box' });
     const body = req.body || {};
@@ -3102,26 +3102,28 @@ ${voiceAutonomyPolicy()}
     try {
       let session;
       let meta = {};
+      const [snapshot, context] = await Promise.all([liveSnapshot(), voiceContext()]);
       if (scope === 'thread') {
         const sessionId = String(body.sessionId || '').replace(/[^\w.-]/g, '').slice(0, 120);
         const agent = String(body.agent || 'claude').toLowerCase();
+        const title = short(body.title || '', 120), cwd = short(body.cwd || '', 160);
         let turns = [];
         if (sessionId) { try { turns = loadSessionTurns(sessionId, agent).turns || []; } catch {} }
         const { input, omitted } = liveInputFromTurns(turns, { redact: (t) => redactSecrets(t).text });
-        const context = await voiceContext();
         session = buildLiveSession({
-          scope, config: LIVE, input,
-          instructions: liveThreadInstructions({ ownerName, title: short(body.title || '', 120), agent, cwd: short(body.cwd || '', 160), omitted, hasHistory: input.length > 0, context }),
+          config: LIVE, input,
+          instructions: liveThreadInstructions({ ownerName, title, agent, cwd, omitted, hasHistory: input.length > 0, context }),
+          backendInstructions: liveBackendInstructions(staticPersona(), snapshot, context, { thread: { ownerName, title, agent, cwd } }),
+          tools: liveBackendTools(toolSchemas, { extra: [ASK_THREAD_AGENT_TOOL] }),
         });
         meta = { scope, sessionId, agent, historyMessages: input.length, omitted, contextChars: context.length };
       } else {
-        const [snapshot, context] = await Promise.all([liveSnapshot(), voiceContext()]);
         let input = [];
         if (reconnectVsid) {
           input = liveInputFromTurns(readTurns(vsid), { maxMessages: 30, maxTokens: 4000 }).input;
         }
         session = buildLiveSession({
-          scope, config: LIVE, input,
+          config: LIVE, input,
           instructions: liveGlobalInstructions({ ownerName, snapshot: short(snapshot, 4000), context }),
           backendInstructions: liveBackendInstructions(staticPersona(), snapshot, context),
           tools: liveBackendTools(toolSchemas),
@@ -3147,7 +3149,7 @@ ${voiceAutonomyPolicy()}
       res.status(201).json({
         session: { id: j.session && j.session.id }, transport: { type: 'webrtc', sdp: j.transport.sdp },
         vsid, scope, model: LIVE.model, voice: LIVE.voice,
-        backendModel: scope === 'global' ? LIVE.backendModel : null, cursor: seq - 1, ...meta,
+        backendModel: LIVE.backendModel, cursor: seq - 1, ...meta,
       });
     } catch (e) {
       console.error('[box] live voice session failed:', short(String(e && e.message || e), 300));

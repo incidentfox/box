@@ -265,6 +265,8 @@ function renderRoute(s) {
   } finally { navSuppress = false; }
 }
 window.addEventListener('popstate', (e) => {
+  // Full-screen thread voice: Back minimizes it to the bar instead of leaving the chat.
+  if (window.ThreadVoice && ThreadVoice.onPopState && ThreadVoice.onPopState()) return;
   // A bottom sheet is open: the Back gesture / browser Back should dismiss the sheet
   // (it pushed its own history entry in showSheet) and leave the screen underneath
   // untouched — not navigate away and strand the drawer on top of the next screen.
@@ -486,6 +488,8 @@ const ICONS = {
   pencil: SVG('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
   paperclip: SVG('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'),
   mic: SVG('<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/>'),
+  'chevron-down': SVG('<path d="M6 9l6 6 6-6"/>', { w: 2.3 }),
+  'chevron-up': SVG('<path d="M6 15l6-6 6 6"/>', { w: 2.3 }),
   waveform: SVG('<path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/>', { w: 2.1 }),
   send: SVG('<path d="M12 19V5M5 12l7-7 7 7"/>', { w: 2.4 }),
   stop: SVG('<rect x="6" y="6" width="12" height="12" rx="3"/>', { fill: 'currentColor' }),
