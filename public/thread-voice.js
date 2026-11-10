@@ -150,7 +150,10 @@
     tv.lastSent = { text, endMs, gen: tv.gen, at: Date.now(), item };
     tv.awaiting.push(item);
     enqueueText(`${body}\n\n${VOICE_HINT}`, { displayText: `🎙 ${text}` });
-    tv.engine.thinking(id, `Sent to the thread's agent: "${text.slice(0, 300)}". It is working; no result yet.`);
+    // Queued behind a turn that is still running (e.g. one Jimmy typed): say so out loud, or
+    // the call goes silent until that earlier turn finishes and looks broken.
+    if (agentBusy()) tv.engine.commentary(id, `Sent to the thread, but the agent is still finishing an earlier turn, so this request is queued behind it. Tell Jimmy that in one short sentence.`);
+    else tv.engine.thinking(id, `Sent to the thread's agent: "${text.slice(0, 300)}". It is working; no result yet.`);
     paintStatus();
   }
 
@@ -235,6 +238,13 @@
   /* ---------- lifecycle ---------- */
   // A delegation id is only valid inside the GPT-Live session that created it. After a
   // reconnect, results for older requests go in as session-wide (null) context.
+  // app.js's `running` (a turn is running in this chat) — a shared global across classic scripts.
+  // Our own voice turn counts only once it has started; before that the agent is busy with something else.
+  function agentBusy() {
+    let r = false;
+    try { r = typeof running !== 'undefined' && !!running; } catch {}
+    return r && !(tv.turn && tv.turn.items.length);
+  }
   function delegationFor(item) { return item && tv && item.gen === tv.gen ? item.id : null; }
 
   function makeEngine(call) {
@@ -288,7 +298,7 @@
       const pending = call.awaiting.filter((a) => !a.done).length;
       call.engine.commentary(null, call.reconnects
         ? `The voice connection was restored. Do not greet again; say "I'm back" and keep listening.${pending ? ' The agent is still working on the last request.' : ''}`
-        : 'Greet Jimmy in a few words — say you are on this chat and ready — then pause and listen.');
+        : `Greet Jimmy in a few words — say you are on this chat and ready${agentBusy() ? ', and that the agent is still finishing an earlier turn, so new requests will queue behind it' : ''} — then pause and listen.`);
       paintStatus();
     } catch (e) {
       if (tv === call) { toast(String((e && e.message) || e).slice(0, 140)); cleanup(); }
