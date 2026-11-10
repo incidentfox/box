@@ -33,6 +33,7 @@ import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
+import { buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
 
@@ -866,7 +867,8 @@ export function registerVoiceAssistant(app, ctx) {
   const FALLBACK_MODEL = cfg('VOICE_ASSISTANT_FALLBACK_MODEL', MODEL === 'gpt-realtime-2.1' ? 'gpt-realtime-2' : '');
   const VOICE = cfg('VOICE_ASSISTANT_VOICE', 'marin');
   const RESPONSE_STYLE = cfg('VOICE_ASSISTANT_RESPONSE_STYLE', 'brief');
-  const MODE = voiceAssistantMode(cfg('VOICE_ASSISTANT_MODE', 'adapter'));
+  const MODE = voiceAssistantMode(cfg('VOICE_ASSISTANT_MODE', 'live'));
+  const LIVE = liveVoiceConfig(cfg);
   // Adapter mode keeps speech providers separate from the reasoning/tool engine:
   // audio is transcribed by the existing box STT fallback, the normal Claude/Codex
   // session runner owns context and tools, then OpenAI's HTTP TTS speaks its text.
@@ -2923,6 +2925,73 @@ ${voiceAutonomyPolicy()}
     }
   });
 
+  // GPT-Live (gpt-live-1): the browser posts its WebRTC SDP offer; we build the session
+  // (instructions, history, delegation) and exchange it with OpenAI. scope:'thread' voices
+  // one chat thread (client delegation → that thread's own agent); scope:'global' is the
+  // Voice screen (Responses delegation → the box voice tools, run via /api/voice/tool).
+  app.post('/api/voice/live/session', requireAuth, async (req, res) => {
+    if (!enabled()) return res.status(500).json({ error: 'OPENAI_API_KEY not configured on the box' });
+    const body = req.body || {};
+    const sdp = typeof body.sdp === 'string' ? body.sdp : '';
+    if (!sdp.trim()) return res.status(400).json({ error: 'sdp offer required' });
+    const scope = body.scope === 'global' ? 'global' : 'thread';
+    const reconnectVsid = String(body.vsid || '').replace(/[^\w.-]/g, '').slice(0, 80);
+    const vsid = reconnectVsid || `${new Date().toISOString().slice(0, 10)}-live-${randomBytes(3).toString('hex')}`;
+    try {
+      let session;
+      let meta = {};
+      if (scope === 'thread') {
+        const sessionId = String(body.sessionId || '').replace(/[^\w.-]/g, '').slice(0, 120);
+        const agent = String(body.agent || 'claude').toLowerCase();
+        let turns = [];
+        if (sessionId) { try { turns = loadSessionTurns(sessionId, agent).turns || []; } catch {} }
+        const { input, omitted } = liveInputFromTurns(turns, { redact: (t) => redactSecrets(t).text });
+        session = buildLiveSession({
+          scope, config: LIVE, input,
+          instructions: liveThreadInstructions({ ownerName, title: short(body.title || '', 120), agent, cwd: short(body.cwd || '', 160), omitted, hasHistory: input.length > 0 }),
+        });
+        meta = { scope, sessionId, agent, historyMessages: input.length, omitted };
+      } else {
+        const snapshot = await liveSnapshot();
+        let input = [];
+        if (reconnectVsid) {
+          input = liveInputFromTurns(readTurns(vsid), { maxMessages: 30, maxTokens: 4000 }).input;
+        }
+        session = buildLiveSession({
+          scope, config: LIVE, input,
+          instructions: liveGlobalInstructions({ ownerName, snapshot: short(snapshot, 4000) }),
+          backendInstructions: liveBackendInstructions(staticPersona(), snapshot),
+          tools: liveBackendTools(toolSchemas),
+        });
+        meta = { scope, reconnect: !!reconnectVsid, historyMessages: input.length };
+      }
+      let j;
+      try {
+        j = await createLiveWebrtcSession({ apiKey: OPENAI_KEY, session, sdp });
+      } catch (e) {
+        const resp = session.delegation && session.delegation.responses;
+        if (!(e.retryWithoutReasoning && resp && resp.reasoning)) throw e;
+        delete resp.reasoning;
+        j = await createLiveWebrtcSession({ apiKey: OPENAI_KEY, session, sdp });
+      }
+      resolvedModel = LIVE.model;
+      try {
+        appendFileSync(transcriptPath(vsid), JSON.stringify({
+          ts: Date.now(), kind: 'meta', text: reconnectVsid ? 'live reconnected' : 'live session started',
+          model: LIVE.model, live_session: j.session && j.session.id, ...meta,
+        }) + '\n');
+      } catch {}
+      res.status(201).json({
+        session: { id: j.session && j.session.id }, transport: { type: 'webrtc', sdp: j.transport.sdp },
+        vsid, scope, model: LIVE.model, voice: LIVE.voice,
+        backendModel: scope === 'global' ? LIVE.backendModel : null, cursor: seq - 1, ...meta,
+      });
+    } catch (e) {
+      console.error('[box] live voice session failed:', short(String(e && e.message || e), 300));
+      res.status(e && e.status && e.status < 500 ? 502 : 500).json({ error: short(String((e && e.message) || e), 300) });
+    }
+  });
+
   app.post('/api/voice/tool', requireAuth, async (req, res) => {
     const { name, args, call_id, vsid } = req.body || {};
     const tool = toolByName.get(String(name || ''));
@@ -3032,7 +3101,8 @@ ${voiceAutonomyPolicy()}
 
   app.get('/api/voice/status', requireAuth, (req, res) => {
     res.json({
-      enabled: enabled(), mode: MODE, model: resolvedModel, preferredModel: MODEL,
+      enabled: enabled(), mode: MODE, model: MODE === 'live' ? LIVE.model : resolvedModel, preferredModel: MODE === 'live' ? LIVE.model : MODEL,
+      live: { model: LIVE.model, voice: LIVE.voice, backendModel: LIVE.backendModel, backendReasoning: LIVE.backendReasoning, threadVoice: enabled() },
       fallbackModel: FALLBACK_MODEL || null, fallback: modelFallback, voice: VOICE,
       responseStyle: RESPONSE_STYLE,
       interruptResponse: INTERRUPT_RESPONSE,
@@ -3061,6 +3131,6 @@ ${voiceAutonomyPolicy()}
     });
   });
 
-  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODE}${MODE === 'realtime' ? `; ${MODEL}${FALLBACK_MODEL ? ` fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}` : `; ${ADAPTER_AGENT} adapter via ${ADAPTER_TRANSPORT}`}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
+  console.log(`[box] voice assistant: ${enabled() ? `ready (${MODE}${MODE === 'live' ? `; ${LIVE.model} backend=${LIVE.backendModel}` : ''}${MODE === 'realtime' ? `; ${MODEL}${FALLBACK_MODEL ? ` fallback=${FALLBACK_MODEL}` : ''}, voice=${VOICE}` : MODE === 'adapter' ? `; ${ADAPTER_AGENT} adapter via ${ADAPTER_TRANSPORT}` : ''}, ${TOOLS.length} tools)` : 'disabled (no OPENAI_API_KEY)'}`);
   return { enabled };
 }

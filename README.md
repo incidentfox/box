@@ -345,10 +345,37 @@ that holds the box's controls.
   and asserts the spoken answer) — both against an isolated test instance; see
   `CLAUDE.md` for the isolated-HOME pattern.
 
+### GPT-Live voice (default) — Voice screen + voice mode inside any chat
+
+`VOICE_ASSISTANT_MODE=live` (the default) runs voice on OpenAI's **GPT-Live**
+(`gpt-live-1`), a full-duplex speech-to-speech model: it listens while it speaks, handles
+interruptions itself, and hands real work to a backend ("delegation"). Sessions last up to
+2 hours and cost $0.05/min plus backend tokens. The browser connects over WebRTC; the box
+exchanges the SDP offer at `POST /api/voice/live/session`, so the API key stays server-side
+(`server/live-voice.mjs`, client engine `public/live-voice.js`).
+
+- **Voice inside a chat thread** — the waveform button in any chat's composer switches that
+  thread to voice, like voice mode inside a ChatGPT chat. GPT-Live is seeded with the
+  thread's recent history (secrets redacted). When you ask for work it sends your words
+  **into the thread** as a normal message (shown with 🎙), so the thread's own Claude/Codex
+  agent does it with its full context and tools, then speaks the agent's final reply back.
+  Agent questions are voiced right away; typed messages during a call keep voice informed.
+  Leaving the chat ends the call (`public/thread-voice.js`).
+- **Voice screen** — GPT-Live with Responses delegation: OpenAI runs a backend model
+  (`VOICE_LIVE_BACKEND_MODEL`, default `gpt-6-luna`) carrying the box voice tools plus hosted
+  web search; each tool call runs here through `/api/voice/tool`.
+- Config: `VOICE_LIVE_MODEL`, `VOICE_LIVE_VOICE` (falls back to `VOICE_ASSISTANT_VOICE`),
+  `VOICE_LIVE_BACKEND_MODEL`, `VOICE_LIVE_BACKEND_REASONING`, `VOICE_LIVE_ACK_DELAY_MS`.
+- Tests: `node server/live-voice.test.mjs`, `node public/thread-voice.test.mjs`, and
+  `LV_SCENARIO=thread|global node scripts/live-voice-e2e-browser.mjs` (a fake mic speaks to the
+  real model, against an isolated test instance with `VOICE_TOOLS_DRYRUN=1`).
+
+The sections below describe the older `realtime` and `adapter` modes, which remain available.
+
 ### Experimental CLI adapter mode
 
-`adapter` is the default `VOICE_ASSISTANT_MODE`; set `VOICE_ASSISTANT_MODE=realtime` to
-return to the original OpenAI Realtime path. `VOICE_ADAPTER_TRANSPORT=livekit` is the
+Set `VOICE_ASSISTANT_MODE=adapter` for this mode, or `VOICE_ASSISTANT_MODE=realtime` for the
+original OpenAI Realtime path. `VOICE_ADAPTER_TRANSPORT=livekit` is the
 new default adapter transport: a persistent LiveKit WebRTC room carries microphone and
 speaker audio, **Deepgram nova-3** streams interim text, Silero VAD plus LiveKit's
 hosted semantic turn detector finalizes the turn, and **Cartesia Sonic 3** speaks the

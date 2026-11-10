@@ -1496,3 +1496,18 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .waitTerminal { font-size: 12px; color: var(--muted); }
 .waitTerminal summary { cursor: pointer; padding: 5px 0; }
 .waitTerminal .waitDialog { margin-top: 8px; color: var(--ink); }
+
+/* in-thread voice mode (thread-voice.js) */
+.tvBar { display: flex; align-items: center; gap: 11px; background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 8px 8px 8px 10px; margin-bottom: 8px; box-shadow: 0 4px 18px var(--shadow, rgba(0,0,0,.06)); }
+.tvBar.hidden { display: none; }
+.tvOrb { --lvl: 0; position: relative; width: 34px; height: 34px; flex: none; border-radius: 50%; background: radial-gradient(circle at 35% 35%, color-mix(in srgb, var(--accent) 70%, #fff), var(--accent)); transform: scale(calc(0.86 + var(--lvl) * 0.5)); transition: transform .08s linear, filter .2s; }
+.tvOrb span { position: absolute; inset: -5px; border-radius: 50%; border: 2px solid var(--accent); opacity: 0; }
+.tvOrb.working span { animation: tvRing 1.4s ease-out infinite; }
+.tvOrb.hearing { filter: hue-rotate(-25deg) saturate(1.2); }
+@keyframes tvRing { 0% { transform: scale(.9); opacity: .55; } 100% { transform: scale(1.35); opacity: 0; } }
+.tvMain { flex: 1; min-width: 0; }
+.tvStatus { font-size: 13px; font-weight: 600; color: var(--ink); }
+.tvCaption { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 1.3em; }
+.tvBar .iconbtn.active { color: #e0392b; }
+.tvEndBtn { flex: none; padding: 8px 14px; border-radius: 16px; font-size: 14px; font-weight: 600; background: #e0392b; color: #fff; }
+#threadVoiceBtn.active { color: var(--accent); }

@@ -392,6 +392,7 @@ function applyChatCapabilities() {
   const foreign = chatIsForeign();
   const setVis = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
   setVis('archiveBtn', !foreign);   // archive/favorite/fork/schedule are the owner's calls
+  setVis('threadVoiceBtn', !foreign); // voice runs on this box's OpenAI key + this box's agents
   setVis('attnBtn', !foreign);      // the needs-attention inbox is the box owner's queue
 }
 function scrollBottom(smooth) { const m = $('messages'); m.scrollTo({ top: m.scrollHeight, behavior: smooth ? 'smooth' : 'auto' }); updateToBottom(); }
@@ -485,6 +486,7 @@ const ICONS = {
   pencil: SVG('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
   paperclip: SVG('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'),
   mic: SVG('<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/>'),
+  waveform: SVG('<path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/>', { w: 2.1 }),
   send: SVG('<path d="M12 19V5M5 12l7-7 7 7"/>', { w: 2.4 }),
   stop: SVG('<rect x="6" y="6" width="12" height="12" rx="3"/>', { fill: 'currentColor' }),
   close: SVG('<path d="M6 6l12 12M18 6L6 18"/>', { w: 2.2 }),
@@ -3418,6 +3420,7 @@ function beginTurn(text, images, author) { clearWaitingCard(); liveUser = addUse
 function onServer(o) {
   if (o.type === 'ping') return; // server heartbeat — onmessage wrapper already reset watchdog
   if (o.key && o.key !== cur.key) return;
+  if (window.ThreadVoice && ThreadVoice.active) { try { ThreadVoice.onChatEvent(o); } catch (e) { console.warn('[thread-voice]', e); } }
   if (o.type === 'sync') return onSync(o);
   if (o.activityAt || o.activityLabel) setLiveActivity(o.activityLabel, o.activityAt);
   // cur.hadHistory MUST flip true once the real id is known: a brand-new chat opens with
@@ -6735,6 +6738,7 @@ let pcmFrames = [], pcmRate = 16000, pcmSamples = 0;
 const REC_MAX_SEC = 1800;                  // absolute ceiling (30 min) so a left-on mic can't OOM the page
 const REC_MAX_BYTES = 23 * 1024 * 1024;    // keep the wav under the server's 25MB upload limit (binds first at high sample rates)
 $('micBtn').onclick = () => (recording ? stopRec(true) : startRec());
+$('threadVoiceBtn').onclick = () => { if (window.ThreadVoice) ThreadVoice.start(); };
 $('recCancel').onclick = () => stopRec(false);
 $('recConfirm').onclick = () => stopRec(true);
 
