@@ -19,6 +19,35 @@
     try { return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`; } catch { return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`; }
   }
 
+  // Parallel function calls (parallel_tool_calls: true): one backend turn can emit several
+  // function_call items, and a fast tool may finish before the next item even arrives. So a
+  // turn continues (response.create) only when ALL its calls have answered AND the backend
+  // turn itself is done (response.completed/failed/incomplete). If that terminal event never
+  // shows up, a fallback timer continues anyway so a call can't wedge the conversation.
+  function createCallGate(o) {
+    const onContinue = o.onContinue, fallbackMs = o.fallbackMs == null ? 3000 : o.fallbackMs;
+    const setT = o.setTimer || ((f, ms) => setTimeout(f, ms)), clearT = o.clearTimer || ((t) => clearTimeout(t));
+    const turns = new Map(); // delegationId → { inFlight, done, timer }
+    function maybeContinue(id) {
+      const t = turns.get(id);
+      if (!t || t.inFlight > 0) return;
+      if (t.timer) { clearT(t.timer); t.timer = null; }
+      if (t.done) { turns.delete(id); onContinue(id); return; }
+      t.timer = setT(() => { const c = turns.get(id); if (c && c.inFlight <= 0) { turns.delete(id); onContinue(id); } }, fallbackMs);
+    }
+    return {
+      callStarted(id) {
+        const t = turns.get(id) || { inFlight: 0, done: false, timer: null };
+        if (t.timer) { clearT(t.timer); t.timer = null; }
+        t.inFlight++; turns.set(id, t);
+      },
+      callFinished(id) { const t = turns.get(id); if (!t) return; t.inFlight--; maybeContinue(id); },
+      // Only meaningful while this turn has calls; a final text-only turn has no entry.
+      turnDone(id) { const t = turns.get(id); if (!t) return; t.done = true; maybeContinue(id); },
+      pending(id) { const t = turns.get(id); return t ? t.inFlight : 0; },
+    };
+  }
+
   function create(opts) {
     const o = opts || {};
     const api = o.api || ((path, init) => fetch(path, init));
@@ -31,7 +60,7 @@
     let finalized = false, closeTimer = null, info = null, usageSeconds = 0;
     let outCtx = null, outAnalyser = null, outBuf = null, inAnalyser = null, inBuf = null;
     const segments = []; // { id, role, text, startMs, endMs, final }
-    const pendingCalls = new Map(); // delegationId → { inFlight, continueQueued }
+    const callGate = createCallGate({ onContinue: () => send({ type: 'response.create', event_id: uid('evt') }) });
 
     function setState(s) { state = s; try { onState(s); } catch {} }
     function send(obj) {
@@ -74,16 +103,13 @@
 
     // ---- Responses delegation: function calls ----
     async function runFunctionCall(delegationId, item) {
-      const p = pendingCalls.get(delegationId) || { inFlight: 0 };
-      p.inFlight++; pendingCalls.set(delegationId, p);
+      callGate.callStarted(delegationId);
       let output;
       try { output = await onFunctionCall({ name: item.name, arguments: item.arguments, call_id: item.call_id, delegationId }); }
       catch (e) { output = JSON.stringify({ error: String((e && e.message) || e).slice(0, 200) }); }
       if (typeof output !== 'string') output = JSON.stringify(output == null ? { ok: true } : output);
       send({ type: 'response.item.create', event_id: uid('evt'), item: { type: 'function_call_output', call_id: item.call_id, output } });
-      p.inFlight--;
-      // Continue the backend once every known call for this delegation has its result.
-      if (p.inFlight <= 0) { pendingCalls.delete(delegationId); send({ type: 'response.create', event_id: uid('evt') }); }
+      callGate.callFinished(delegationId);
     }
 
     function handle(ev) {
@@ -105,6 +131,8 @@
           try { onBackendEvent(inner, ev.delegation_id); } catch {}
           if (inner.type === 'response.output_item.done' && inner.item && inner.item.type === 'function_call' && onFunctionCall) {
             runFunctionCall(ev.delegation_id, inner.item);
+          } else if (inner.type === 'response.completed' || inner.type === 'response.failed' || inner.type === 'response.incomplete') {
+            callGate.turnDone(ev.delegation_id);
           }
           break;
         }
@@ -236,5 +264,5 @@
     };
   }
 
-  window.LiveVoice = { create };
+  window.LiveVoice = { create, createCallGate };
 })();

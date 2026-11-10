@@ -1376,6 +1376,8 @@ const VO_TOOL_LABELS = {
   get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
   email_jimmy: 'Sending email…', calendar: 'Checking calendar…', think_hard: 'Thinking hard…',
   voice_memory: 'Updating memory…', file_access: 'Checking file access…',
+  brain_save: 'Saving to the brain…', gmail_search: 'Checking email…', gmail_read: 'Opening email…',
+  calendar_add: 'Adding to calendar…', needs_jimmy_resolve: 'Recording decision…',
 };
 
 /* ---------- false-interruption recovery (road noise cancels a reply → resume it) ---------- */
