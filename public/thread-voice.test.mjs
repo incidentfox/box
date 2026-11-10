@@ -138,6 +138,14 @@ await wait(1800);
 assert.equal(sent.length, before + 1);
 assert.equal(sent[sent.length - 1].opts.displayText, '🎙 check the deploy and the logs too');
 
+// 6d) the agent is busy with an earlier (typed) turn → the voice says the request is queued
+ctx.running = true;
+engine.say('user', 'also update the readme', 30000, 31000);
+engine.opts.onDelegation({ id: 'del_8', target: 'client', offsetMs: 31000 });
+await wait(1600);
+assert.ok(engine.commentaries.some((c) => c.id === 'del_8' && /queued behind it/.test(c.text)));
+ctx.running = false;
+
 // 7) leaving the thread / ending stops the call
 TV.stop('ended');
 assert.equal(TV.active, false);
