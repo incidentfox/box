@@ -41,6 +41,7 @@ let voResponseDiag = null, voLastAudioTranscriptAt = 0;
 let voDropCurrentResponse = false; // empty/noise turn: cancel and suppress the model's accidental reply
 // Experimental adapter mode: browser VAD records one utterance, server STT routes it
 // through a persistent Claude/Codex session, then HTTP TTS plays the returned text.
+let voLive = null, voLiveBubbles = new Map(), voLiveRaf = 0, voLiveReconnects = 0; // GPT-Live (mode 'live')
 let voMode = 'realtime', voAdapterCfg = null, voAdapterAudioCtx = null, voAdapterAnalyser = null;
 let voAdapterRaf = 0, voAdapterRecorder = null, voAdapterChunks = [], voAdapterSpeechAt = 0;
 let voAdapterSilentAt = 0, voAdapterBusy = false, voAdapterSpeaking = false;
@@ -400,7 +401,8 @@ function voClockTick() {
   const cost = (voUsage.atIn * VO_PRICES.atIn + voUsage.atInCached * VO_PRICES.atInCached
     + voUsage.txIn * VO_PRICES.txIn + voUsage.txInCached * VO_PRICES.txInCached
     + voUsage.atOut * VO_PRICES.atOut + voUsage.txOut * VO_PRICES.txOut) / 1e6;
-  let label = cost > 0.005 ? '$' + cost.toFixed(2) : '';
+  const liveCost = voMode === 'live' ? (s / 60) * 0.05 : 0; // gpt-live-1: $0.05/min (backend tokens extra)
+  let label = (cost + liveCost) > 0.005 ? '$' + (cost + liveCost).toFixed(2) : '';
   if (voLatencies.length >= 2) {
     const sorted = [...voLatencies].sort((a, b) => a - b);
     const p50 = sorted[Math.floor(sorted.length / 2)];
@@ -437,9 +439,13 @@ async function voStart() {
     // requires an open mic while TTS plays; leave echo protection enabled.
     voAudioPolicy = { ...VO_AUDIO_POLICY_DEFAULT, ...(st.audioPolicy || {}) };
     voMemAudio = !!(st.memory && st.memory.storeAudio);
-    voMode = st.mode === 'adapter' ? 'adapter' : 'realtime';
+    voMode = st.mode === 'adapter' ? 'adapter' : st.mode === 'live' ? 'live' : 'realtime';
     if (voMode === 'adapter') await voStartAdapter(st.adapter || {}, livekitMicWarmup);
-    else {
+    else if (voMode === 'live') {
+      voStopLivekitMicWarmup(livekitMicWarmup);
+      voLiveReconnects = 0;
+      await voStartLive(false);
+    } else {
       voStopLivekitMicWarmup(livekitMicWarmup);
       await voConnect(false);
     }
@@ -454,6 +460,94 @@ async function voStart() {
   if (voPollIv) clearInterval(voPollIv);
   voPollIv = setInterval(voPollUpdates, 5000);
   voKeepAwake();
+}
+
+/* ---------- GPT-Live (gpt-live-1) mode ----------
+ * Full-duplex speech-to-speech via public/live-voice.js. GPT-Live talks; a Responses
+ * backend (configured server-side with the box tools) does the work, and every function
+ * call it makes runs here through /api/voice/tool, exactly like the realtime path. */
+function voLiveCaption(seg) {
+  let b = voLiveBubbles.get(seg.id);
+  if (!b) { b = voBubble(seg.role === 'user' ? 'user' : 'asst', ''); voLiveBubbles.set(seg.id, b); }
+  b.textContent = seg.text;
+  voScroll();
+  if (seg.final) {
+    voLiveBubbles.delete(seg.id);
+    const text = seg.text.trim();
+    if (!text) { b.remove(); return; }
+    voEventBuf.push({ ts: Date.now(), kind: seg.role === 'user' ? 'user' : 'assistant', text });
+    if (seg.role === 'user') voSpeechStopAt = Date.now();
+  } else if (seg.role === 'assistant' && voSpeechStopAt) {
+    voLatencies.push(Date.now() - voSpeechStopAt); if (voLatencies.length > 30) voLatencies.shift();
+    voSpeechStopAt = 0;
+  }
+}
+async function voLiveTool({ name, arguments: args, call_id }) {
+  const chip = voChip(VO_TOOL_LABELS[name] || name);
+  const t0 = Date.now();
+  let output;
+  try {
+    const r = await api('/api/voice/tool', { method: 'POST', body: JSON.stringify({ name, args, call_id, vsid: voVsid }) });
+    const j = await r.json();
+    output = j.output || '{"error":"empty tool result"}';
+  } catch (e) {
+    output = JSON.stringify({ error: 'box unreachable: ' + String((e && e.message) || e).slice(0, 120) });
+  }
+  const failed = /"error"/.test(output.slice(0, 60));
+  voDiag('live', 'tool_done', { name, failed, ms: Date.now() - t0, outputChars: output.length });
+  chip.classList.add(failed ? 'fail' : 'ok');
+  const spin = chip.querySelector('.voSpin'); if (spin) spin.remove();
+  return output;
+}
+function voLiveAnimate() {
+  if (!voLive || voMode !== 'live') return;
+  if (voState === 'live') {
+    const out = voLive.outputLevel();
+    const orb = $('voOrb');
+    if (!orb.classList.contains('thinking') || out > 0.04) voOrbMode(out > 0.04 ? 'speaking' : 'listening');
+  }
+  voLiveRaf = requestAnimationFrame(voLiveAnimate);
+}
+async function voStartLive(isReconnect) {
+  voSetState(isReconnect ? 'reconnecting' : 'connecting');
+  const engine = LiveVoice.create({
+    api, audioEl: voAudioEl,
+    onCaption: voLiveCaption,
+    onDelegation: (d) => { voOrbMode('thinking'); voDiag('live', 'delegation', { target: d.target || '' }); },
+    onFunctionCall: voLiveTool,
+    onBackendEvent: (inner) => {
+      if (inner.type === 'response.completed' || inner.type === 'response.failed' || inner.type === 'response.incomplete') voOrbMode('listening');
+    },
+    onError: (err) => { voDiag('live', 'error', { code: String(err.code || ''), message: String(err.message || '').slice(0, 160) }); },
+    onClosed: ({ reason, usageSeconds }) => {
+      if (voLive !== engine) return;
+      voDiag('live', 'closed', { reason, usageSeconds });
+      voLive = null;
+      if (voState === 'ended' || voState === 'off') return;
+      // 2-hour cap or a dead zone: resume the same conversation (server folds in the transcript).
+      if ((reason === 'expired' || reason === 'connection_lost') && voLiveReconnects < 6) {
+        voLiveReconnects++;
+        voSetState('reconnecting');
+        voReconnectT = setTimeout(() => voStartLive(true).catch(() => {}), Math.min(8000, 800 * voLiveReconnects));
+        return;
+      }
+      voEnd(reason === 'content' ? 'ended' : 'ended');
+      if (reason === 'content') voNotice('Ended by a safety filter.');
+    },
+  });
+  voLive = engine;
+  if (!voVsid) voVsid = null;
+  const info = await engine.start({ scope: 'global', vsid: isReconnect ? voVsid : undefined });
+  if (voLive !== engine) { engine.close(); return; }
+  voVsid = info.vsid;
+  if (!isReconnect) voCursor = info.cursor || 0;
+  voConnectedAt = Date.now();
+  engine.setMuted(voMuted);
+  voSetState('live');
+  voBanner('');
+  voNotice(isReconnect ? 'Reconnected.' : `GPT-Live ready (${info.model}, backend ${info.backendModel || 'box'}). Just talk — you can interrupt anytime.`);
+  if (voLiveRaf) cancelAnimationFrame(voLiveRaf);
+  voLiveRaf = requestAnimationFrame(voLiveAnimate);
 }
 
 function voAdapterId() {
@@ -1039,6 +1133,9 @@ function voEnd(finalState) {
   try { if (voAdapterRecorder && voAdapterRecorder.state !== 'inactive') voAdapterRecorder.stop(); } catch {}
   voAdapterRecorder = null; voAdapterChunks = []; voAdapterBusy = false; voAdapterSpeaking = false;
   voAdapterStopStreamingStt(); voAdapterCfg = null;
+  if (voLive) { const l = voLive; voLive = null; try { l.close(); } catch {} }
+  if (voLiveRaf) cancelAnimationFrame(voLiveRaf);
+  voLiveRaf = 0; voLiveBubbles.clear();
   // Telemetry: one summary line per call so self-interruption / misattribution rates are
   // queryable from the persisted diagnostics without a live session (see AC #4).
   voDiag('pipeline', 'audio_incident_summary', {
@@ -1061,6 +1158,7 @@ function voEnd(finalState) {
 
 function voToggleMute() {
   voMuted = !voMuted;
+  if (voLive) voLive.setMuted(voMuted);
   voApplyMic();   // compose with the half-duplex gate
   $('voMute').classList.toggle('active', voMuted);
   voSetState(voState);
@@ -1351,7 +1449,8 @@ async function voRunTool(item) {
 /* ---------- background-task updates → proactive announcements ---------- */
 
 async function voPollUpdates() {
-  if (!voVsid || !voDc || voDc.readyState !== 'open') return;
+  if (!voVsid) return;
+  if (voMode === 'live' ? !(voLive && voLive.state === 'live') : (!voDc || voDc.readyState !== 'open')) return;
   try {
     const r = await api(`/api/voice/updates?cursor=${voCursor}`);
     const j = await r.json();
@@ -1365,6 +1464,11 @@ async function voPollUpdates() {
       // Queue as an explicit SYSTEM event. The queue guarantees it is never delivered
       // mid-utterance and never fired as a user turn; the framing tells the model to
       // treat it as a system event, wait for a pause, summarize, and ask for his take.
+      if (voMode === 'live' && voLive) {
+        // GPT-Live paces spoken updates itself: commentary is said at a natural point.
+        voLive.commentary(null, `[TASK UPDATE — a background event, not Jimmy speaking] ${e.speak} Mention it once with purpose, impact, and next step, then return to the topic.`);
+        continue;
+      }
       if (voNotifyQ) voNotifyQ.enqueue(
         `[TASK UPDATE — system event, NOT the user speaking] ${e.speak} `
         + `This was explicitly watched or is urgent. Mention it once with purpose, impact, and next step; do not ask a generic follow-up and do not switch to unrelated items.`,
@@ -1473,7 +1577,10 @@ function voAttachAnalyser(stream) {
       const r = await api('/api/config');
       if (r.ok) {
         const cfgJson = await r.json();
-        if (btn && cfgJson.features && cfgJson.features.voiceAssistant) btn.classList.remove('hidden');
+        if (cfgJson.features && cfgJson.features.voiceAssistant) {
+          if (btn) btn.classList.remove('hidden');
+          const tvb = $('threadVoiceBtn'); if (tvb) tvb.classList.remove('hidden');
+        }
         return;
       }
     } catch {}
