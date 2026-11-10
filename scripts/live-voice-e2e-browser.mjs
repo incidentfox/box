@@ -145,22 +145,27 @@ if (SCENARIO === 'global') {
   step('ask_thread_agent sent the request into the thread', sent, handoff ? handoff.opts.displayText : '');
   step('the calendar lookup did not go into the thread', !(await page.evaluate(() => window.__sent.some((s) => /calendar/i.test(s.text)))));
   if (sent) {
-    // The thread's agent "runs" and replies; ThreadVoice must voice it (only NEW lines count).
-    const spokenBefore = await page.evaluate(() => ThreadVoice.transcript().split('\n').filter((l) => l.startsWith('assistant:')).length);
+    // The thread's agent "runs" and replies; ThreadVoice must voice it. Only speech that starts
+    // AFTER the synthetic reply lands counts (not the "on it" acknowledgement).
     await page.evaluate((display) => {
       const ev = (o) => onServer({ key: cur.key, ...o });
       ev({ type: 'turn_start', text: display });
       ev({ type: 'text', delta: 'Running the voice tests now.' });
       ev({ type: 'tool', name: 'Bash', input: 'npm test' });
-      setTimeout(() => { ev({ type: 'text', delta: 'All forty-two voice tests pass, and the live-voice suite is green.' }); ev({ type: 'done' }); }, 2500);
+      setTimeout(() => {
+        window.__asst = () => ThreadVoice.transcript().split('\n').filter((l) => l.startsWith('assistant:')).map((l) => l.slice(10)).join(' ¶ ');
+        window.__doneAt = window.__asst().length; // a reply can continue the ack's caption segment
+        ev({ type: 'text', delta: 'All forty-two voice tests pass, and the live-voice suite is green.' }); ev({ type: 'done' });
+      }, 2500);
     }, handoff.opts.displayText);
     let said = ''; const t0 = Date.now();
     while (Date.now() - t0 < 45000) {
-      said = await page.evaluate((n) => ThreadVoice.transcript().split('\n').filter((l) => l.startsWith('assistant:')).slice(n).join(' ¶ '), spokenBefore);
-      if (/forty|42|green/i.test(said)) break;
+      said = await page.evaluate(() => (window.__doneAt == null ? '' : window.__asst().slice(window.__doneAt)));
+      if (/forty|42|green|pass/i.test(said)) break;
       await page.waitForTimeout(400);
     }
-    step('agent reply was spoken back', /forty|42|green/i.test(said), `"${said.slice(0, 200)}"`);
+    step('agent reply was spoken back', /forty|42|green|pass/i.test(said), `"${said.slice(0, 200)}"`);
+    console.log('  final transcript:\n    ' + (await page.evaluate(() => ThreadVoice.transcript())).split('\n').join('\n    '));
   }
   // 3) full-screen view: expanded → minimize to the bar → tap the bar to re-expand
   await page.screenshot({ path: shotAs('expanded'), fullPage: false });
