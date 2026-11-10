@@ -33,6 +33,7 @@ import { createVoiceMemory } from './voice-memory.mjs';
 import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from './slack-context.mjs';
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
+import { createJimmyContext } from './jimmy-context.mjs';
 import { buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
@@ -994,6 +995,24 @@ export function registerVoiceAssistant(app, ctx) {
     const candidates = [cfg('BRAIN_DIR'), '/opt/software-factory/company-brain', join(HOME, 'brain')];
     for (const d of candidates) { try { if (d && existsSync(d)) return d; } catch {} }
     return null;
+  };
+
+  // "Who Jimmy is right now" — distilled from his CLAUDE.md files, Claude memory, the
+  // company brain, and open needs-Jimmy items; cached 5 min, redacted. Added to every
+  // GPT-Live prompt (thread, global, backend) so voice has the same context as Claude.
+  const jimmyContext = createJimmyContext({
+    HOME,
+    brainDir: () => brainDir() || '',
+    memoryDir: cfg('VOICE_CONTEXT_MEMORY_DIR'),
+    readNeeds: async () => {
+      const n = await selfFetch('/api/needs-attention');
+      return ((n && n.items) || []).map((i) => i && i.title).filter(Boolean);
+    },
+    redact: (t) => redactSecrets(t).text,
+  });
+  const voiceContext = async () => {
+    if (/^(0|off|false)$/i.test(cfg('VOICE_JIMMY_CONTEXT'))) return '';
+    try { return await jimmyContext.get(); } catch { return ''; }
   };
 
   // Full last assistant text from a session JSONL tail — UNtruncated, so read_session_output
@@ -2408,7 +2427,7 @@ export function registerVoiceAssistant(app, ctx) {
 You are "Box" — ${ownerName}'s realtime voice copilot on his always-on dev server: the voice layer of the app that controls his coding-agent fleet (Claude Code, Codex), the Linear board, research, the company brain, notes, email, and calendar. Success = he gets real work done and real decisions made, hands-free. You ACT through tools; you never pretend to.
 
 # Who you're talking to
-Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: MindBill (mindbill.org), a California workers'-comp medical-legal billing SaaS displacing daisyBill. Anchor customer: Spectrum Medical Evaluators (~200 doctors, ~3,000 bills/month, $3 per bill plus a $999 monthly minimum). This week: the Monaco outbound-sales kickoff, a Rise4 call, and the CCWC conference in Anaheim. Side line, lower priority: psychiatry automation (Bay Area Psychiatric Spravato forms). He is usually DRIVING when he talks to you.
+Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: MindBill (mindbill.org), a California workers'-comp medical-legal billing SaaS displacing daisyBill. Anchor customer: Spectrum Medical Evaluators (~200 doctors, ~3,000 bills/month, $3 per bill plus a $999 monthly minimum). He often talks to you while driving. A fresher "WHO JIMMY IS RIGHT NOW" block, when present below, overrides this summary.
 
 # Personality & Tone
 - A sharp, warm, direct colleague. Opinionated: push back with reasons and numbers — he explicitly wants a thought partner, not a yes-man.
@@ -2946,24 +2965,25 @@ ${voiceAutonomyPolicy()}
         let turns = [];
         if (sessionId) { try { turns = loadSessionTurns(sessionId, agent).turns || []; } catch {} }
         const { input, omitted } = liveInputFromTurns(turns, { redact: (t) => redactSecrets(t).text });
+        const context = await voiceContext();
         session = buildLiveSession({
           scope, config: LIVE, input,
-          instructions: liveThreadInstructions({ ownerName, title: short(body.title || '', 120), agent, cwd: short(body.cwd || '', 160), omitted, hasHistory: input.length > 0 }),
+          instructions: liveThreadInstructions({ ownerName, title: short(body.title || '', 120), agent, cwd: short(body.cwd || '', 160), omitted, hasHistory: input.length > 0, context }),
         });
-        meta = { scope, sessionId, agent, historyMessages: input.length, omitted };
+        meta = { scope, sessionId, agent, historyMessages: input.length, omitted, contextChars: context.length };
       } else {
-        const snapshot = await liveSnapshot();
+        const [snapshot, context] = await Promise.all([liveSnapshot(), voiceContext()]);
         let input = [];
         if (reconnectVsid) {
           input = liveInputFromTurns(readTurns(vsid), { maxMessages: 30, maxTokens: 4000 }).input;
         }
         session = buildLiveSession({
           scope, config: LIVE, input,
-          instructions: liveGlobalInstructions({ ownerName, snapshot: short(snapshot, 4000) }),
-          backendInstructions: liveBackendInstructions(staticPersona(), snapshot),
+          instructions: liveGlobalInstructions({ ownerName, snapshot: short(snapshot, 4000), context }),
+          backendInstructions: liveBackendInstructions(staticPersona(), snapshot, context),
           tools: liveBackendTools(toolSchemas),
         });
-        meta = { scope, reconnect: !!reconnectVsid, historyMessages: input.length };
+        meta = { scope, reconnect: !!reconnectVsid, historyMessages: input.length, contextChars: context.length };
       }
       let j;
       try {

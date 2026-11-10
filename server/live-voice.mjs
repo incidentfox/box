@@ -77,7 +77,15 @@ export function liveInputFromTurns(turns, {
   return { input: kept, tokens, omitted: Math.max(0, all.length - kept.length) };
 }
 
-export function liveThreadInstructions({ ownerName = 'Jimmy', title = '', agent = 'claude', cwd = '', omitted = 0, hasHistory = false } = {}) {
+// The "who Jimmy is right now" block (server/jimmy-context.mjs) framed for a voice model:
+// it IS part of his Claude setup and should answer from this, not claim ignorance.
+export function liveContextSection(context = '', ownerName = 'Jimmy') {
+  const c = String(context || '').trim();
+  if (!c) return '';
+  return `\n\nYou are part of ${ownerName}'s Claude setup — the same assistant system as his Claude Code sessions on this box, and you share their context about him, below. Answer questions about him, his job, his company, his customers, and what is going on from this context directly and confidently; never say you don't know who he is or that you have no context. If he tells you something newer than this, believe him. For live state not covered here, use the backend.\n\n${c}`;
+}
+
+export function liveThreadInstructions({ ownerName = 'Jimmy', title = '', agent = 'claude', cwd = '', omitted = 0, hasHistory = false, context = '' } = {}) {
   const agentName = agent === 'codex' ? 'Codex' : agent === 'claude' ? 'Claude Code' : agent;
   return `You are the voice of one of ${ownerName}'s coding-agent chat threads on his always-on dev box. He switched this chat into voice mode so he can talk instead of type. Thread: "${title || 'untitled'}" — agent: ${agentName}${cwd ? `, working in ${cwd}` : ''}.
 ${hasHistory ? `The prior messages are this thread's recent history${omitted ? ` (${omitted} older messages omitted)` : ''}: "user" is ${ownerName}, "assistant" is the ${agentName} agent. Treat them as what has already happened in this chat.` : 'This is a brand-new chat with no history yet.'}
@@ -97,15 +105,15 @@ Generate <|SpawnThinking|> when:
 - The answer needs details that are not in the thread history.
 Do not generate <|SpawnThinking|> when:
 - You can answer from the thread history: "what did it just say", "where are we", "summarize this", explaining something already discussed.
-- He is greeting you, chatting, or thinking out loud without asking for anything.
+${context ? '- You can answer from the context about him below: who he is, where he works, his company, customers, priorities, and what is going on.\n' : ''}- He is greeting you, chatting, or thinking out loud without asking for anything.
 - You need a brief clarification to understand the request.
 Generate <|SpawnThinking|> before giving an answer that depends on backend work.
 Do not guess the result while waiting.
 
-While the agent works, keep it short ("on it") and then stay quiet — agent turns can take minutes. If he asks, say it's still working and what it's doing if you know. When a result arrives, give the gist in one to three sentences and offer more detail instead of reading long output. Never claim the agent did something before its result arrives.`;
+While the agent works, keep it short ("on it") and then stay quiet — agent turns can take minutes. If he asks, say it's still working and what it's doing if you know. When a result arrives, give the gist in one to three sentences and offer more detail instead of reading long output. Never claim the agent did something before its result arrives.${liveContextSection(context, ownerName)}`;
 }
 
-export function liveGlobalInstructions({ ownerName = 'Jimmy', snapshot = '' } = {}) {
+export function liveGlobalInstructions({ ownerName = 'Jimmy', snapshot = '', context = '' } = {}) {
   return `You are "Box", ${ownerName}'s realtime voice copilot on his always-on dev server — the voice layer of the app that runs his coding-agent fleet (Claude Code, Codex), his Linear board, research, the company brain, notes, Slack, email, and calendar. Success means he gets real work done and real decisions made, hands-free. He is usually driving.
 
 Personality: a sharp, warm, direct colleague and thought partner, not a yes-man — push back with reasons and numbers. Plain spoken English only: no markdown or lists, no reading URLs ("I'll email the link"). Round numbers. Name work by what it is ("the clearinghouse-rejections ticket"), not by its code. Ask one question at a time. Never ask him to look at the screen.
@@ -128,24 +136,24 @@ Generate <|SpawnThinking|> when:
 Do not generate <|SpawnThinking|> when:
 - He greets you, chats, or asks you to repeat or rephrase a result already provided.
 - You can answer from this conversation or a still-current result.
-- You need a brief clarification to understand the request.
+${context ? '- You can answer from the context about him below: who he is, where he works, his company, customers, priorities, and what is going on.\n' : ''}- You need a brief clarification to understand the request.
 Generate <|SpawnThinking|> before giving an answer that depends on backend work.
 Do not guess the result while waiting.
 
-Report results in one or two crisp sentences; offer detail rather than reading long output. If a result says something failed, say so plainly.
+Report results in one or two crisp sentences; offer detail rather than reading long output. If a result says something failed, say so plainly.${liveContextSection(context, ownerName)}
 ${snapshot ? `\nCURRENT CONTEXT SNAPSHOT (may be stale; the backend has live tools):\n${snapshot}` : ''}`;
 }
 
 // The backend (Responses) prompt: the full box persona + tool rules, with the parts that
 // only make sense for a model that speaks (wait_for_user, self-echo) removed.
-export function liveBackendInstructions(persona = '', snapshot = '') {
+export function liveBackendInstructions(persona = '', snapshot = '', context = '') {
   const kept = String(persona || '').split('\n')
     .filter((l) => !/wait_for_user|Self-echo|microphone loopback|deep_research/i.test(l))
     .map((l) => l.replace(/,?\s*web_search\b/g, ''))
     .join('\n');
   return `You are the backend for a live voice conversation. A separate voice model talks with Jimmy and hands you requests; it speaks whatever text you return (paraphrasing it). So: do the work with your tools, then return a SHORT, speakable result — the concrete facts, outcome, and next step in plain sentences, no markdown, no URLs, no long lists. Never claim an action happened unless its tool call succeeded. If the request is ambiguous, return the single clarifying question to ask.
 
-${kept}${snapshot ? `\n\nCURRENT CONTEXT SNAPSHOT:\n${snapshot}` : ''}`;
+${kept}${context ? `\n\n${String(context).trim()}` : ''}${snapshot ? `\n\nCURRENT CONTEXT SNAPSHOT:\n${snapshot}` : ''}`;
 }
 
 // Realtime-style tool schemas → Responses function tools (same shape). Voice-only tools are
