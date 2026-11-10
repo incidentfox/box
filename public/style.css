@@ -517,8 +517,10 @@ body.bulkMode .sCardFront { cursor: pointer; }
 	.chip.bash { background: #14110e; color: #e9c08a; }
 	#modeChip { flex: 0 1 auto; padding-inline: 10px; }
 	#modeLabel, #agentLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-	.chip.agent { flex: 0 0 auto; padding-inline: 11px; }
-	#agentDot { width: 8px; height: 8px; border-radius: 50%; background: #8d7b68; }
+	/* Shrinks (label ellipsizes) so the icon buttons + send never overflow the row. */
+	.chip.agent { flex: 0 1 auto; padding-inline: 11px; }
+	.toolsRow .iconbtn { flex: none; }
+	#agentDot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #8d7b68; }
 	.chip.agent.codex #agentDot { background: #1f6feb; }
 	.chip.agent.codex { background: #e7f0fb; color: #1f4f9c; }
 	.chip.agent.gemini #agentDot { background: #0f9d58; }
@@ -549,10 +551,12 @@ body.bulkMode .sCardFront { cursor: pointer; }
   .toolsRow { gap: 5px; }
   .inputWrap { padding-inline: 9px; }
   .chip { padding-inline: 9px; font-size: 12.5px; }
-  #modeChip { width: 42px; padding-inline: 0; }
+  #modeChip { flex: none; width: 42px; padding-inline: 0; }
   #modeLabel { display: none; }
   .iconbtn { width: 36px; height: 36px; }
   .iconbtn svg { width: 20px; height: 20px; }
+  .toolsRow .iconbtn { width: 34px; height: 34px; }
+  .toolsRow { gap: 4px; }
   .chatBar { gap: 3px; padding-inline: 9px; }
   .chatBar .ctitle { height: 36px; font-size: 16px; padding-inline: 2px; }
 }

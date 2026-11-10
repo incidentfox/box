@@ -62,7 +62,7 @@ assert.equal(engine.commentaries[0].id, null);
 // 1) user asks for work → delegation → sent into the thread with the voice hint
 engine.say('user', 'Run the unit tests for the voice module', 100, 900);
 engine.opts.onDelegation({ id: 'del_1', target: 'client', offsetMs: 950 });
-await wait(1100);
+await wait(1600);
 assert.equal(sent.length, 1);
 assert.match(sent[0].text, /^Run the unit tests for the voice module\n\n\(Sent by voice/);
 assert.equal(sent[0].opts.displayText, '🎙 Run the unit tests for the voice module');
@@ -83,7 +83,7 @@ assert.ok(!/Let me run them/.test(reply.text), 'pre-tool chatter is not spoken')
 engine.say('assistant', 'Want me to open a PR with that fix?', 1000, 2000);
 engine.say('user', 'yes do it', 2200, 2600);
 engine.opts.onDelegation({ id: 'del_2', target: 'client', offsetMs: 2650 });
-await wait(1100);
+await wait(1600);
 assert.equal(sent.length, 2);
 assert.match(sent[1].text, /^yes do it\n\n\(Replying to the voice assistant, which had just said: "Want me to open a PR with that fix\?"\)/);
 
@@ -102,9 +102,41 @@ assert.ok(engine.thoughts.some((t) => t.id === null && /typed message: Typed rep
 // 6) blocked send (chat live on another device) is reported, not left hanging
 engine.say('user', 'deploy it now please', 3000, 3500);
 engine.opts.onDelegation({ id: 'del_3', target: 'client', offsetMs: 3600 });
-await wait(1100);
+await wait(1600);
 TV.onChatEvent({ type: 'blocked', text: 'x' });
 assert.ok(engine.commentaries.some((c) => c.id === 'del_3' && /open live on another device/.test(c.text)));
+
+// 6b) INC-2443: a sentence split across two delegations reaches the thread whole
+engine.say('user', 'Please run the unit tests for the', 4000, 5200);
+engine.opts.onDelegation({ id: 'del_4', target: 'client', offsetMs: 5300 });
+await wait(1600);
+engine.say('assistant', 'On it.', 5300, 5600);
+engine.say('user', 'voice module and tell me if they pass', 5900, 7400);
+engine.opts.onDelegation({ id: 'del_5', target: 'client', offsetMs: 7500 });
+await wait(1600);
+const whole = sent[sent.length - 1];
+assert.equal(whole.opts.displayText, '🎙 Please run the unit tests for the voice module and tell me if they pass');
+assert.match(whole.text, /cut off mid-sentence/);
+const spokenBefore = engine.commentaries.length;
+TV.onChatEvent({ type: 'turn_start', text: '🎙 Please run the unit tests for the' });
+TV.onChatEvent({ type: 'text', delta: 'Tests for what?' });
+TV.onChatEvent({ type: 'done' });
+assert.equal(engine.commentaries.length, spokenBefore, 'the cut-off fragment reply is not spoken');
+TV.onChatEvent({ type: 'turn_start', text: whole.opts.displayText });
+TV.onChatEvent({ type: 'text', delta: 'All voice tests pass.' });
+TV.onChatEvent({ type: 'done' });
+assert.ok(engine.commentaries.some((c) => c.id === 'del_5' && /All voice tests pass/.test(c.text)));
+
+// 6c) delegations that arrive while the transcript is still settling become one send
+const before = sent.length;
+engine.say('user', 'check the deploy', 20000, 21000);
+engine.opts.onDelegation({ id: 'del_6', target: 'client', offsetMs: 21000 });
+await wait(400);
+engine.say('user', 'and the logs too', 21100, 22000);
+engine.opts.onDelegation({ id: 'del_7', target: 'client', offsetMs: 22000 });
+await wait(1800);
+assert.equal(sent.length, before + 1);
+assert.equal(sent[sent.length - 1].opts.displayText, '🎙 check the deploy and the logs too');
 
 // 7) leaving the thread / ending stops the call
 TV.stop('ended');

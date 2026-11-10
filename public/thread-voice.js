@@ -106,34 +106,51 @@
       const prior = segs.filter((s) => s.role === 'assistant' && (!firstUser || s.startMs < firstUser.startMs)).pop();
       if (prior && prior.text.trim()) context = prior.text.trim();
     }
-    return { text, endMs, context };
+    return { text, endMs, context, startMs: users.length ? users[0].startMs : null };
   }
 
+  // A sentence must reach the thread as ONE message. GPT-Live can delegate before Jimmy has
+  // finished (a mid-sentence pause, or its own "on it" splitting the transcript), then delegate
+  // again for the rest — which used to send only the tail (INC-2443). So: wait longer for the
+  // transcript to settle, fold delegations that arrive meanwhile into the same send, and if a
+  // send continues the previous one, re-send the whole sentence instead of the fragment.
+  const SETTLE_MS = 1200, SETTLE_CAP_MS = 4000, CONTINUE_GAP_MS = 1500, CONTINUE_WINDOW_MS = 15000;
   function onDelegation(d) {
     if (!tv) return;
     const call = tv;
-    const startedAt = Date.now();
-    // The delegation can arrive before the utterance is fully transcribed — wait for the
-    // user's transcript to settle (or 2.5s), then send the request.
+    if (call.pending) { call.pending.ids.push(d.id); return; }
+    const pending = call.pending = { ids: [d.id], startedAt: Date.now() };
     const tick = () => {
       if (tv !== call) return;
-      const quiet = Date.now() - call.lastUserDeltaAt > 700;
-      if (!quiet && Date.now() - startedAt < 2500) return setTimeout(tick, 150);
-      dispatch(d);
+      const quiet = Date.now() - call.lastUserDeltaAt > SETTLE_MS;
+      if (!quiet && Date.now() - pending.startedAt < SETTLE_CAP_MS) return setTimeout(tick, 150);
+      call.pending = null;
+      dispatch(pending.ids);
     };
     setTimeout(tick, 250);
   }
 
-  function dispatch(d) {
-    const { text, endMs, context } = userTextSince(tv.consumedMs);
+  function dispatch(ids) {
+    const id = ids[ids.length - 1];
+    const sentence = userTextSince(tv.consumedMs);
+    let { text } = sentence;
+    const { endMs, context, startMs } = sentence;
+    const prev = tv.lastSent;
     tv.consumedMs = Math.max(tv.consumedMs, endMs);
-    if (!text) { tv.engine.commentary(d.id, 'I did not catch the request — ask Jimmy to say it again.'); return; }
+    for (const other of ids.slice(0, -1)) tv.engine.thinking(other, 'Merged into the next request (same sentence).');
+    if (!text) { tv.engine.commentary(id, 'I did not catch the request — ask Jimmy to say it again.'); return; }
     if (cur.key !== tv.key) return;
-    const body = context ? `${text}\n\n(Replying to the voice assistant, which had just said: "${context.slice(0, 400)}")` : text;
-    const item = { id: d.id, gen: tv.gen, text, sentAt: Date.now(), started: false, done: false, chunks: [''], afterTool: false };
+    // Continuation of the message just sent (no real pause between them): send the whole thing.
+    const continues = prev && prev.gen === tv.gen && !prev.item.done && startMs != null && startMs - prev.endMs < CONTINUE_GAP_MS
+      && Date.now() - prev.at < CONTINUE_WINDOW_MS;
+    if (continues) { text = `${prev.text} ${text}`; prev.item.superseded = true; }
+    let body = context && !continues ? `${text}\n\n(Replying to the voice assistant, which had just said: "${context.slice(0, 400)}")` : text;
+    if (continues) body += '\n\n(My previous voice message was cut off mid-sentence — this is the full request; it replaces that one.)';
+    const item = { id, gen: tv.gen, text, sentAt: Date.now(), started: false, done: false, chunks: [''], afterTool: false };
+    tv.lastSent = { text, endMs, gen: tv.gen, at: Date.now(), item };
     tv.awaiting.push(item);
     enqueueText(`${body}\n\n${VOICE_HINT}`, { displayText: `🎙 ${text}` });
-    tv.engine.thinking(d.id, `Sent to the thread's agent: "${text.slice(0, 300)}". It is working; no result yet.`);
+    tv.engine.thinking(id, `Sent to the thread's agent: "${text.slice(0, 300)}". It is working; no result yet.`);
     paintStatus();
   }
 
@@ -144,6 +161,7 @@
     let final = chunks.length ? chunks[chunks.length - 1] : '';
     if (final.length < 60 && chunks.length > 1) final = chunks.slice(-2).join('\n\n');
     const did = delegationFor(item);
+    if (item.superseded) { paintStatus(); return; } // the full re-sent request speaks instead
     if (reason === 'error') tv.engine.commentary(did, `The agent hit an error: ${speakable(item.error || 'unknown error', 300)}`);
     else if (!final) tv.engine.commentary(did, 'The agent finished without a written reply. Ask Jimmy what he wants next.');
     else tv.engine.commentary(did, `The agent's reply (summarize it for Jimmy; the full text is in the chat): ${speakable(final)}`);
@@ -252,7 +270,7 @@
     if (!cur || cur.mode === 'bash') { toast('Voice works in a normal chat'); return; }
     if (!window.LiveVoice || !window.RTCPeerConnection) { toast('This browser cannot do live voice'); return; }
     ensureUi(); show(true); setStatus('Connecting…'); setCaption('', '');
-    const call = { key: cur.key, awaiting: [], consumedMs: -1, lastUserDeltaAt: 0, reconnects: 0, gen: 0, turn: null, lastTool: '', vsid: null };
+    const call = { key: cur.key, awaiting: [], consumedMs: -1, lastUserDeltaAt: 0, lastSent: null, pending: null, reconnects: 0, gen: 0, turn: null, lastTool: '', vsid: null };
     tv = call;
     call.engine = makeEngine(call);
     call.raf = requestAnimationFrame(animate);
@@ -266,6 +284,7 @@
       call.vsid = info.vsid;
       call.gen++;
       call.consumedMs = -1; // transcript timestamps restart with each session
+      call.lastSent = null; call.pending = null;
       const pending = call.awaiting.filter((a) => !a.done).length;
       call.engine.commentary(null, call.reconnects
         ? `The voice connection was restored. Do not greet again; say "I'm back" and keep listening.${pending ? ' The agent is still working on the last request.' : ''}`
