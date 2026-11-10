@@ -1,4 +1,5 @@
-/* GPT-Live client engine — shared by the Voice screen (global scope) and in-thread voice.
+/* GPT-Live client engine + box-tool runner — shared by the Voice screen (global scope) and
+ * in-thread voice (public/thread-voice.js).
  *
  * Browser mic ↔ OpenAI gpt-live-1 over WebRTC. The box server creates the session from
  * our SDP offer (POST /api/voice/live/session), so the API key never reaches the browser.
@@ -46,6 +47,37 @@
       turnDone(id) { const t = turns.get(id); if (!t) return; t.done = true; maybeContinue(id); },
       pending(id) { const t = turns.get(id); return t ? t.inFlight : 0; },
     };
+  }
+
+  // Chip labels for the box voice tools (Voice screen + thread voice).
+  const TOOL_LABELS = {
+    get_overview: 'Checking the box…', list_sessions: 'Listing sessions…', check_session: 'Checking session…',
+    send_to_session: 'Messaging agent…', start_agent: 'Starting agent…', delegate_ticket: 'Delegating ticket…',
+    linear_board: 'Reading board…', linear_create: 'Creating issue…', linear_update: 'Updating issue…',
+    linear_issue: 'Reading issue details…',
+    needs_jimmy: 'Checking decisions…', web_search: 'Searching the web…', deep_research: 'Launching research…',
+    check_tasks: 'Checking tasks…', brain_search: 'Searching the brain…', brain_read: 'Reading the brain…',
+    get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
+    email_jimmy: 'Sending email…', calendar: 'Checking calendar…', think_hard: 'Thinking hard…',
+    voice_memory: 'Updating memory…', file_access: 'Checking file access…',
+    brain_save: 'Saving to the brain…', gmail_search: 'Checking email…', gmail_read: 'Opening email…',
+    calendar_add: 'Adding to calendar…', needs_jimmy_resolve: 'Recording decision…',
+  };
+  const toolLabel = (name) => TOOL_LABELS[name] || String(name || 'tool');
+
+  // Run one box voice tool server-side (POST /api/voice/tool). Never throws: a transport
+  // failure becomes an {"error"} output the model can say out loud.
+  async function runBoxTool(api, { name, args, call_id, vsid }) {
+    const t0 = Date.now();
+    let output;
+    try {
+      const r = await api('/api/voice/tool', { method: 'POST', body: JSON.stringify({ name, args, call_id, vsid: vsid || null }) });
+      const j = await r.json();
+      output = j.output || '{"error":"empty tool result"}';
+    } catch (e) {
+      output = JSON.stringify({ error: 'box unreachable: ' + String((e && e.message) || e).slice(0, 120) });
+    }
+    return { output, failed: /"error"/.test(output.slice(0, 60)), ms: Date.now() - t0 };
   }
 
   function create(opts) {
@@ -264,5 +296,5 @@
     };
   }
 
-  window.LiveVoice = { create, createCallGate };
+  window.LiveVoice = { create, createCallGate, runBoxTool, toolLabel, TOOL_LABELS };
 })();

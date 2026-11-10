@@ -484,17 +484,8 @@ function voLiveCaption(seg) {
 }
 async function voLiveTool({ name, arguments: args, call_id }) {
   const chip = voChip(VO_TOOL_LABELS[name] || name);
-  const t0 = Date.now();
-  let output;
-  try {
-    const r = await api('/api/voice/tool', { method: 'POST', body: JSON.stringify({ name, args, call_id, vsid: voVsid }) });
-    const j = await r.json();
-    output = j.output || '{"error":"empty tool result"}';
-  } catch (e) {
-    output = JSON.stringify({ error: 'box unreachable: ' + String((e && e.message) || e).slice(0, 120) });
-  }
-  const failed = /"error"/.test(output.slice(0, 60));
-  voDiag('live', 'tool_done', { name, failed, ms: Date.now() - t0, outputChars: output.length });
+  const { output, failed, ms } = await LiveVoice.runBoxTool(api, { name, args, call_id, vsid: voVsid });
+  voDiag('live', 'tool_done', { name, failed, ms, outputChars: output.length });
   chip.classList.add(failed ? 'fail' : 'ok');
   const spin = chip.querySelector('.voSpin'); if (spin) spin.remove();
   return output;
@@ -1366,19 +1357,7 @@ function voHandleEvent(ev) {
 
 /* ---------- tools ---------- */
 
-const VO_TOOL_LABELS = {
-  get_overview: 'Checking the box…', list_sessions: 'Listing sessions…', check_session: 'Checking session…',
-  send_to_session: 'Messaging agent…', start_agent: 'Starting agent…', delegate_ticket: 'Delegating ticket…',
-  linear_board: 'Reading board…', linear_create: 'Creating issue…', linear_update: 'Updating issue…',
-  linear_issue: 'Reading issue details…',
-  needs_jimmy: 'Checking decisions…', web_search: 'Searching the web…', deep_research: 'Launching research…',
-  check_tasks: 'Checking tasks…', brain_search: 'Searching the brain…', brain_read: 'Reading the brain…',
-  get_briefing: 'Opening briefing…', take_note: 'Noting…', read_notes: 'Reading notes…',
-  email_jimmy: 'Sending email…', calendar: 'Checking calendar…', think_hard: 'Thinking hard…',
-  voice_memory: 'Updating memory…', file_access: 'Checking file access…',
-  brain_save: 'Saving to the brain…', gmail_search: 'Checking email…', gmail_read: 'Opening email…',
-  calendar_add: 'Adding to calendar…', needs_jimmy_resolve: 'Recording decision…',
-};
+const VO_TOOL_LABELS = (window.LiveVoice && window.LiveVoice.TOOL_LABELS) || {}; // shared with thread voice
 
 /* ---------- false-interruption recovery (road noise cancels a reply → resume it) ---------- */
 
@@ -1427,21 +1406,9 @@ async function voRunTool(item) {
     return;
   }
   const chip = voChip(VO_TOOL_LABELS[item.name] || item.name);
-  let output = '';
-  const t0 = Date.now();
   voDiag('pipeline', 'tool_start', { name: item.name });
-  try {
-    const r = await api('/api/voice/tool', {
-      method: 'POST',
-      body: JSON.stringify({ name: item.name, args: item.arguments, call_id: item.call_id, vsid: voVsid }),
-    });
-    const j = await r.json();
-    output = j.output || '{"error":"empty tool result"}';
-  } catch (e) {
-    output = JSON.stringify({ error: 'box unreachable: ' + String((e && e.message) || e).slice(0, 120) });
-  }
-  const failed = /"error"/.test(output.slice(0, 60));
-  voDiag('pipeline', 'tool_done', { name: item.name, failed, ms: Date.now() - t0, outputChars: output.length });
+  const { output, failed, ms } = await LiveVoice.runBoxTool(api, { name: item.name, args: item.arguments, call_id: item.call_id, vsid: voVsid });
+  voDiag('pipeline', 'tool_done', { name: item.name, failed, ms, outputChars: output.length });
   chip.classList.add(failed ? 'fail' : 'ok');
   chip.querySelector('.voSpin').remove();
   voSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: item.call_id, output } });

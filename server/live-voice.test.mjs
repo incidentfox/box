@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools,
+  ASK_THREAD_AGENT_TOOL, buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools,
   liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig, speakableText,
   LIVE_INPUT_MAX_TOKENS, liveContextSection,
 } from './live-voice.mjs';
@@ -17,12 +17,11 @@ const cfgOf = (env) => (k, d = '') => (env[k] == null || env[k] === '' ? d : env
 
 // config defaults + '' treated as unset (INC-1088 lesson)
 {
-  const c = liveVoiceConfig(cfgOf({ VOICE_LIVE_ACK_DELAY_MS: '' }));
+  const c = liveVoiceConfig(cfgOf({ VOICE_LIVE_MODEL: '' }));
   assert.equal(c.model, 'gpt-live-1');
   assert.equal(c.voice, 'marin');
   assert.equal(c.backendModel, 'gpt-6-luna');
-  assert.equal(c.ackDelayMs, 600);
-  assert.equal(liveVoiceConfig(cfgOf({ VOICE_LIVE_ACK_DELAY_MS: '99999', VOICE_ASSISTANT_VOICE: 'cedar' })).ackDelayMs, 5000);
+  assert.equal(c.ackDelayMs, undefined); // client delegation (and its ack delay) is gone
   assert.equal(liveVoiceConfig(cfgOf({ VOICE_ASSISTANT_VOICE: 'cedar' })).voice, 'cedar');
   assert.equal(liveVoiceConfig(cfgOf({ VOICE_ASSISTANT_VOICE: 'cedar', VOICE_LIVE_VOICE: 'gleam' })).voice, 'gleam');
 }
@@ -51,18 +50,32 @@ const cfgOf = (env) => (k, d = '') => (env[k] == null || env[k] === '' ? d : env
   assert.equal(red.input[0].content[0].text, 'key [redacted]');
 }
 
-// prompts carry the documented delegation-policy structure
+// prompts carry the documented delegation-policy structure. The VOICE prompts hold only
+// conversational behaviour + when to delegate — no tool list (GPT-Live office hours); tools
+// and their rules live in the backend instructions.
 {
   const t = liveThreadInstructions({ title: 'Fix voice', agent: 'codex', cwd: '/repo', hasHistory: true, omitted: 3 });
-  for (const needle of ['Backchannel policy:', 'Interruption policy:', 'Delegation policy:', 'Backend tools:', 'Generate <|SpawnThinking|> when:', 'Do not generate <|SpawnThinking|> when:', 'Codex', 'Fix voice', '3 older messages omitted']) {
+  for (const needle of ['Backchannel policy:', 'Interruption policy:', 'Delegation policy:', 'Generate <|SpawnThinking|> when:', 'Do not generate <|SpawnThinking|> when:', 'Codex', 'Fix voice', '3 older messages omitted']) {
     assert.ok(t.includes(needle), `thread prompt missing ${needle}`);
   }
   assert.match(liveThreadInstructions({}), /brand-new chat/);
   const g = liveGlobalInstructions({ snapshot: 'Agents active right now: none.' });
   assert.ok(g.includes('Generate <|SpawnThinking|> when:') && g.includes('CURRENT CONTEXT SNAPSHOT'));
+  for (const voice of [t, g]) {
+    assert.ok(!voice.includes('Backend tools:'), 'no tool list in a voice prompt');
+    assert.ok(!/ask_thread_agent|start_agent|send_to_session|gmail_|calendar_add|brain_save|think_hard|linear_\w+|web_search/.test(voice), 'no tool names in a voice prompt');
+  }
   const b = liveBackendInstructions('- keep\n- wait_for_user: silence\n- Self-echo: drop\n- Quick facts → web_search. Big open questions → deep_research.\n- tools: a, web_search, b', 'snap');
   assert.ok(b.includes('- keep') && !b.includes('wait_for_user') && !b.includes('Self-echo') && !b.includes('deep_research'));
   assert.ok(b.includes('- tools: a, b') && b.includes('snap'));
+  assert.ok(!b.includes('ask_thread_agent'), 'Voice-screen backend has no thread section');
+  // thread backend: the split between direct tools and the thread's own agent
+  const tb = liveBackendInstructions('- persona: start_agent for new work', 'snap', 'CTX', { thread: { title: 'Fix voice', agent: 'codex', cwd: '/repo' } });
+  assert.ok(tb.includes('ask_thread_agent') && tb.includes('"Fix voice"') && tb.includes('Codex agent, working in /repo'));
+  assert.match(tb, /email, calendar, the company brain, Linear tickets/);
+  assert.match(tb, /Do not use start_agent, send_to_session, or delegate_ticket for this thread's own work/);
+  assert.ok(tb.indexOf('- persona') < tb.indexOf('inside one chat thread'), 'thread rules come after (and override) the persona');
+  assert.ok(tb.indexOf('inside one chat thread') < tb.indexOf('CTX') && tb.indexOf('CTX') < tb.indexOf('CURRENT CONTEXT SNAPSHOT'));
 }
 
 // backend tools: drop voice-only + Parallel-backed tools, add hosted web search
@@ -76,26 +89,33 @@ const cfgOf = (env) => (k, d = '') => (env[k] == null || env[k] === '' ? d : env
   assert.deepEqual(tools.map((t) => t.name || t.type), ['web_search', 'list_sessions']);
   assert.equal(tools[0].type, 'web_search');
   assert.deepEqual(tools[1], { type: 'function', name: 'list_sessions', description: 'd', parameters: { type: 'object', properties: { q: { type: 'string' } } } });
+  // thread scope adds the client-handled ask_thread_agent
+  const tt = liveBackendTools([{ type: 'function', name: 'calendar', parameters: {} }], { extra: [ASK_THREAD_AGENT_TOOL] });
+  assert.deepEqual(tt.map((t) => t.name || t.type), ['web_search', 'calendar', 'ask_thread_agent']);
+  assert.deepEqual(ASK_THREAD_AGENT_TOOL.parameters.required, ['request']);
+  assert.equal(ASK_THREAD_AGENT_TOOL.type, 'function');
 }
 
-// session shape per scope
+// session shape: both scopes use Responses delegation with the given tools
 {
   const config = liveVoiceConfig(cfgOf({}));
-  const thread = buildLiveSession({ scope: 'thread', config, instructions: 'i', input: [{ type: 'message' }] });
-  assert.deepEqual(thread.delegation, { type: 'client', acknowledgement_delay_ms: 600 });
+  const thread = buildLiveSession({ config, instructions: 'i', input: [{ type: 'message' }], backendInstructions: 'tb', tools: [{ type: 'web_search' }, ASK_THREAD_AGENT_TOOL] });
+  assert.equal(thread.delegation.type, 'responses');
+  assert.equal(thread.delegation.responses.instructions, 'tb');
+  assert.ok(thread.delegation.responses.tools.some((t) => t.name === 'ask_thread_agent'));
   assert.equal(thread.audio.output.voice, 'marin');
   assert.equal(thread.audio.format, undefined); // WebRTC negotiates the format
   assert.equal(thread.input.length, 1);
-  const global = buildLiveSession({ scope: 'global', config, instructions: 'i', backendInstructions: 'b', tools: [{ type: 'web_search' }] });
+  const global = buildLiveSession({ config, instructions: 'i', backendInstructions: 'b', tools: [{ type: 'web_search' }] });
   assert.equal(global.delegation.type, 'responses');
   assert.equal(global.delegation.responses.model, 'gpt-6-luna');
   assert.deepEqual(global.delegation.responses.reasoning, { effort: 'low' });
   assert.equal(global.delegation.responses.parallel_tool_calls, true);
-  const serial = buildLiveSession({ scope: 'global', config: liveVoiceConfig(cfgOf({ VOICE_LIVE_PARALLEL_TOOLS: '0' })), instructions: 'i' });
+  const serial = buildLiveSession({ config: liveVoiceConfig(cfgOf({ VOICE_LIVE_PARALLEL_TOOLS: '0' })), instructions: 'i' });
   assert.equal(serial.delegation.responses.parallel_tool_calls, false);
   assert.equal(liveVoiceConfig(cfgOf({ VOICE_LIVE_PARALLEL_TOOLS: '' })).parallelTools, true);
   assert.equal(global.input, undefined);
-  const noReason = buildLiveSession({ scope: 'global', config: { ...config, backendReasoning: 'none' }, instructions: 'i' });
+  const noReason = buildLiveSession({ config: { ...config, backendReasoning: 'none' }, instructions: 'i' });
   assert.equal(noReason.delegation.responses.reasoning, undefined);
 }
 

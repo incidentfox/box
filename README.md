@@ -355,17 +355,22 @@ exchanges the SDP offer at `POST /api/voice/live/session`, so the API key stays 
 (`server/live-voice.mjs`, client engine `public/live-voice.js`).
 
 - **Voice inside a chat thread** — the waveform button in any chat's composer switches that
-  thread to voice, like voice mode inside a ChatGPT chat. GPT-Live is seeded with the
-  thread's recent history (secrets redacted). When you ask for work it sends your words
-  **into the thread** as a normal message (shown with 🎙), so the thread's own Claude/Codex
-  agent does it with its full context and tools, then speaks the agent's final reply back.
-  Agent questions are voiced right away; typed messages during a call keep voice informed.
-  Leaving the chat ends the call (`public/thread-voice.js`).
+  thread to voice, like voice mode inside a ChatGPT chat: a full-screen view (thread title,
+  orb, live captions, tool chips, mute / back-to-chat / end) that minimizes to a small bar
+  above the composer while the chat keeps streaming behind it (tap the bar to re-expand).
+  GPT-Live is seeded with the thread's recent history (secrets redacted) and uses the same
+  Responses backend and box tools as the Voice screen, so quick lookups (email, calendar,
+  brain, Linear, sessions) are answered directly. Real work in the thread goes through the
+  client-handled `ask_thread_agent` tool: the request is sent **into the thread** as a normal
+  message (shown with 🎙), the thread's own Claude/Codex agent does it, and its final reply is
+  spoken back. Agent questions are voiced right away; typed messages during a call keep voice
+  informed. Leaving the chat ends the call (`public/thread-voice.js`).
 - **Voice screen** — GPT-Live with Responses delegation: OpenAI runs a backend model
   (`VOICE_LIVE_BACKEND_MODEL`, default `gpt-6-luna`) carrying the box voice tools plus hosted
   web search; each tool call runs here through `/api/voice/tool`.
 - Config: `VOICE_LIVE_MODEL`, `VOICE_LIVE_VOICE` (falls back to `VOICE_ASSISTANT_VOICE`),
-  `VOICE_LIVE_BACKEND_MODEL`, `VOICE_LIVE_BACKEND_REASONING`, `VOICE_LIVE_ACK_DELAY_MS`.
+  `VOICE_LIVE_BACKEND_MODEL`, `VOICE_LIVE_BACKEND_REASONING`,
+  `VOICE_LIVE_PARALLEL_TOOLS`.
 - Tests: `node server/live-voice.test.mjs`, `node public/thread-voice.test.mjs`, and
   `LV_SCENARIO=thread|global node scripts/live-voice-e2e-browser.mjs` (a fake mic speaks to the
   real model, against an isolated test instance with `VOICE_TOOLS_DRYRUN=1`).
