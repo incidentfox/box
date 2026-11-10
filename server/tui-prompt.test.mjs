@@ -30,3 +30,13 @@ test('numbered questions retain their answer mapping', () => {
 test('ordinary output does not become a dialog', () => {
   assert.equal(parsePrompt(['1. Build the app', '2. Ship it']), null);
 });
+test('multi-question review screen is a submittable prompt', () => {
+  const p = parsePrompt([
+    '────────────────────────────', '←  ☒ Resubmit  ☒ Injury date  ✔ Submit  →', '', 'Review your answers', '',
+    ' ● How should the injury record show the date?', '   → Single date 12/11/2025 (Recommended)', '',
+    'Ready to submit your answers?', '', '❯ 1. Submit answers', '  2. Cancel',
+  ]);
+  assert.equal(p.kind, 'review');
+  assert.equal(p.title, 'Ready to submit your answers?');
+  assert.deepEqual(p.options.map(x => [x.n, x.label]), [[1, 'Submit answers'], [2, 'Cancel']]);
+});

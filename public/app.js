@@ -3147,27 +3147,49 @@ function toolChip(name, info, data) {
       wrap.appendChild(fb);
       return wrap;
     }
-    for (const q of questions) {
+    // One pick per question. While the session is parked on this ask, taps ANSWER the live prompt
+    // (all questions at once, + the multi-question review screen) — never queue a chat message,
+    // which would sit behind the parked turn forever.
+    const picks = new Array(questions.length).fill(null);
+    const askHint = document.createElement('div'); askHint.className = 'waitHint askUserHint';
+    const answered = !!(data && data.result);
+    questions.forEach((q, qi) => {
       const qEl = document.createElement('div'); qEl.className = 'askUserQ';
       if (q.header) { const h = document.createElement('div'); h.className = 'askUserHeader'; h.textContent = q.header; qEl.appendChild(h); }
       if (q.question) { const qt = document.createElement('div'); qt.className = 'askUserQuestion'; qt.textContent = q.question; qEl.appendChild(qt); }
-      for (const opt of (q.options || [])) {
+      (q.options || []).forEach((opt, oi) => {
         const btn = document.createElement('button'); btn.className = 'askUserOpt';
         btn.innerHTML = `<span class="askOptLabel">${esc(opt.label)}</span>` + (opt.description ? `<span class="askOptDesc">${esc(opt.description)}</span>` : '');
         btn.onclick = () => {
+          if (answered || wrap.dataset.sent) return;
+          if (waitingState && waitingState.answerable) {
+            qEl.querySelectorAll('.askUserOpt').forEach((b) => b.classList.remove('selected'));
+            btn.classList.add('selected');
+            picks[qi] = { index: oi + 1, label: opt.label };
+            const left = picks.filter((x) => !x).length;
+            if (left) { askHint.textContent = `Now pick ${left === 1 ? 'the last answer' : `${left} more answers`} below.`; return; }
+            wrap.dataset.sent = '1';
+            wrap.querySelectorAll('.askUserOpt').forEach((b) => { b.disabled = true; });
+            askHint.textContent = 'Sending your answers…';
+            try { ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel: { ask: picks } })); }
+            catch { delete wrap.dataset.sent; wrap.querySelectorAll('.askUserOpt').forEach((b) => { b.disabled = false; }); askHint.textContent = 'Connection lost — reconnect and tap again.'; }
+            return;
+          }
           if (btn.classList.contains('selected')) return;
           wrap.querySelectorAll('.askUserOpt').forEach((b) => b.classList.remove('selected'));
           btn.classList.add('selected');
           enqueueText(opt.label, { force: true, displayText: opt.label });
         };
         qEl.appendChild(btn);
-      }
+      });
       // "Other" — just focuses the composer so they can type freely
       const other = document.createElement('button'); other.className = 'askUserOpt askUserOther'; other.textContent = 'Other…';
       other.onclick = () => { try { $('input').focus(); } catch {} };
       qEl.appendChild(other);
       wrap.appendChild(qEl);
-    }
+    });
+    if (questions.length > 1 && !answered) askHint.textContent = `Pick one answer for each of the ${questions.length} questions.`;
+    wrap.appendChild(askHint);
     return wrap;
   }
   // SendUserFile → render as tappable file download cards instead of a generic chip
@@ -3467,11 +3489,11 @@ function onServer(o) {
   else if (o.type === 'tool_result') { if (live && live.toolData && live.toolData[o.id]) live.toolData[o.id].result = o.content; }
   else if (o.type === 'bash_out') { const viewport = captureChatViewport(); if (!live) startAssistant(); clearLoading(); if (!live.bash) { live.bash = document.createElement('div'); live.bash.className = 'bashout'; live.body.appendChild(live.bash); } live.bash.textContent += o.text; restoreChatViewport(viewport); }
   else if (o.type === 'notice') { const viewport = captureChatViewport(); if (!live) startAssistant(); const n = document.createElement('div'); n.className = 'notice'; n.textContent = o.text; live.body.appendChild(n); restoreChatViewport(viewport); }
-  else if (o.type === 'error') { const viewport = captureChatViewport(); if (!live) startAssistant(); clearLoading(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.msg; live.body.appendChild(e); restoreChatViewport(viewport); }
+  else if (o.type === 'error') { document.querySelectorAll('.askUserCard[data-sent]').forEach((c) => { delete c.dataset.sent; c.querySelectorAll('.askUserOpt').forEach((b) => { b.disabled = false; }); const h = c.querySelector('.askUserHint'); if (h) h.textContent = 'Not sent — see the error below.'; }); const viewport = captureChatViewport(); if (!live) startAssistant(); clearLoading(); const e = document.createElement('div'); e.className = 'err'; e.textContent = o.msg; live.body.appendChild(e); restoreChatViewport(viewport); }
   else if (o.type === 'blocked') renderBlocked(o);
   else if (o.type === 'native_wait') toast(o.msg || 'Queued behind the terminal turn.', 3500);
   else if (o.type === 'waiting') renderWaiting(o);
-  else if (o.type === 'waiting_clear') clearWaitingCard();
+  else if (o.type === 'waiting_clear') { clearWaitingCard(); document.querySelectorAll('.askUserCard[data-sent] .askUserHint').forEach((h) => { h.textContent = 'Answered ✓'; }); }
   else if (o.type === 'done') finishTurn(o);
   else if (o.type === 'presence') { cur.viewers = o.viewers || []; cur.typing = o.typing || []; renderPresence(); }
   else if (o.type === 'team_chat') {
@@ -3940,8 +3962,9 @@ function renderWaiting(o) {
     q.textContent = '⏸ Claude is waiting for your input' + (o.waitingFor ? ` (${o.waitingFor})` : '') + '.';
     card.appendChild(q);
     const hint = document.createElement('div'); hint.className = 'waitHint';
+    const askPending = [...document.querySelectorAll('.askUserCard')].some((c) => !c.dataset.sent && c.querySelector('.askUserOpt:not(.askUserOther)'));
     hint.textContent = o.answerable
-      ? 'Type a reply below to continue — for a yes/no or numbered menu, type the option number (e.g. 1).'
+      ? (askPending ? 'Tap your answer(s) on the question card above.' : 'Type a reply below to continue — for a yes/no or numbered menu, type the option number (e.g. 1).')
       : 'Open this chat on desktop to answer.';
     card.appendChild(hint);
   }
