@@ -24,6 +24,7 @@ import { buildChildEnv } from './child-env.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
+import { answerAskQuestions } from './ask-answers.mjs';
 import { applySettingsAction } from './dialog-settings.mjs';
 import { CodexExecEngine } from './codex-exec-engine.mjs';
 import { ClaudeExecEngine } from './claude-exec-engine.mjs';
@@ -5267,6 +5268,21 @@ async function answerWaiting(extKey, sel) {
         },
         sendKey: key => rcEngine.answerWaiting(s.sessionId, {key}),
       }, sel.dialog);
+      return;
+    }
+    if (Array.isArray(sel?.ask)) {
+      // Tapped on the in-chat AskUserQuestion card: drive each question (+ the review screen).
+      s.waitingAction = true;
+      try {
+        await answerAskQuestions({
+          readPrompt: async () => promptFromBuffer(await rcEngine.captureScreen(s.sessionId, { fresh: true })),
+          choose: (index) => rcEngine.answerWaiting(s.sessionId, { index }),
+          isWaiting: async () => rcEngine.isWaiting(s.sessionId),
+          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        }, sel.ask);
+      } finally { s.waitingAction = false; }
+      s.waitingActive = false; s.waitingPayload = null; s.waitingSettled = false; s.waitingTries = 0;
+      bcast(s, { type: 'waiting_clear', sessionId: s.sessionId });
       return;
     }
     const ok = await rcEngine.answerWaiting(s.sessionId, sel);

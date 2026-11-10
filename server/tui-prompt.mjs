@@ -83,6 +83,9 @@ export function screenFromBuffer(buf) {
 const OPT_RE = /^\s*[❯>›▶]?\s*(\d+)\.\s+(.*\S)\s*$/;
 const ASK_FOOTER = /Enter to select|↑\/↓ to navigate|to navigate/i;
 const PLAN_RE = /Would you like to proceed\?|Ready to code\?|Here is Claude'?s plan/i;
+// Multi-question AskUserQuestion ends on a review screen ("Ready to submit your answers?" →
+// 1. Submit answers / 2. Cancel) that shows no "Enter to select" footer.
+const REVIEW_RE = /Ready to submit your answers\?/i;
 const FREETEXT_RE = /^(type something|tell claude what to change|other|none of (the|these)|let me type|write my own)/i;
 
 const RULE_RE = /^[\s─╌╭╮╰╯│┃▔▁━]+$/;
@@ -139,7 +142,7 @@ export function parsePrompt(lines) {
 
   const all = lines.join('\n');
   const isPlan = PLAN_RE.test(all);
-  const isAsk = ASK_FOOTER.test(all);
+  const isAsk = ASK_FOOTER.test(all) || REVIEW_RE.test(all);
   if (!isPlan && !isAsk) {
     // permission / generic selection: only trust it if a cancel/select hint is present
     if (!/esc to (cancel|interrupt|reject)|to (confirm|select|reject|allow)/i.test(all)) return null;
@@ -151,10 +154,10 @@ export function parsePrompt(lines) {
     const t = lines[i].replace(/[─╌╭╮╰╯│┃▔▁]+/g, '').trim();
     if (t && !/^[•·*]/.test(t) && t.length > 3) { title = t; break; }
   }
-  const kind = isPlan ? 'plan' : 'question';
+  const kind = isPlan ? 'plan' : REVIEW_RE.test(all) ? 'review' : 'question';
   // header (AskUserQuestion shows "☐ <header>" above the question)
   let header = '';
-  const hm = all.match(/[☐☑▢]\s*([^\n]{1,60})/);
+  const hm = all.match(/[☐☑☒▢]\s*([^\n]{1,60}?)(?=\s{2,}|\n|$)/);
   if (hm) header = hm[1].trim();
 
   return { kind, header, title, options: opts };
