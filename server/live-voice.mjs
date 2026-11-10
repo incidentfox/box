@@ -26,6 +26,9 @@ export function liveVoiceConfig(cfg) {
     backendModel: cfg('VOICE_LIVE_BACKEND_MODEL', 'gpt-6-luna'),
     backendReasoning: cfg('VOICE_LIVE_BACKEND_REASONING', 'low'),
     ackDelayMs: Math.max(0, Math.min(5000, num(cfg('VOICE_LIVE_ACK_DELAY_MS'), 600))),
+    // The Voice-screen client answers every function call of a backend turn and continues only
+    // after that turn's response.completed (public/live-voice.js), so parallel calls are safe.
+    parallelTools: !/^(0|false|no|off)$/i.test(String(cfg('VOICE_LIVE_PARALLEL_TOOLS', '1') || '1')),
   };
 }
 
@@ -126,11 +129,13 @@ Backend tools:
 - Agent fleet: list, check, read the output or history of, message, start, and archive Claude/Codex sessions; delegate Linear tickets to agents; watch sessions for completion.
 - Linear: the board, ticket details, create and update tickets, open needs-Jimmy decisions.
 - Research: web search for current facts; big research questions go to a background agent.
-- Company brain, the drive briefing, notes, Slack, email to Jimmy's own inbox, his calendar.
+- Company brain (search, read, and save durable facts), the drive briefing, notes, Slack, reading and searching his Gmail (work and personal), email to Jimmy's own inbox, his calendar (read, and add events after he confirms).
+- Resolving open needs-Jimmy decisions once he decides.
 - think_hard: careful analysis for strategy, pricing, and prioritization.
 Generate <|SpawnThinking|> when:
-- He asks about the current state of anything (agents, tickets, PRs, Slack, calendar, the brain, the briefing).
-- He asks for an action: start or message an agent, file or update a ticket, take a note, send an email, research something.
+- He asks about the current state of anything (agents, tickets, PRs, Slack, email, calendar, the brain, the briefing).
+- He asks for an action: start or message an agent, file or update a ticket, take a note, save something to the brain, send an email, add a calendar event, record a decision, research something.
+- He asks about his email or inbox.
 - The question needs facts, numbers, or careful reasoning beyond a simple reply.
 - A correction changes work already requested.
 Do not generate <|SpawnThinking|> when:
@@ -151,7 +156,7 @@ export function liveBackendInstructions(persona = '', snapshot = '', context = '
     .filter((l) => !/wait_for_user|Self-echo|microphone loopback|deep_research/i.test(l))
     .map((l) => l.replace(/,?\s*web_search\b/g, ''))
     .join('\n');
-  return `You are the backend for a live voice conversation. A separate voice model talks with Jimmy and hands you requests; it speaks whatever text you return (paraphrasing it). So: do the work with your tools, then return a SHORT, speakable result — the concrete facts, outcome, and next step in plain sentences, no markdown, no URLs, no long lists. Never claim an action happened unless its tool call succeeded. If the request is ambiguous, return the single clarifying question to ask.
+  return `You are the backend for a live voice conversation. A separate voice model talks with Jimmy and hands you requests; it speaks whatever text you return (paraphrasing it). So: do the work with your tools, then return a SHORT, speakable result — the concrete facts, outcome, and next step in plain sentences, no markdown, no URLs, no long lists. Never claim an action happened unless its tool call succeeded. If the request is ambiguous, return the single clarifying question to ask. When a tool returns needs_confirmation, return its read_back as the question; call it again with confirmed:true only when the request you receive says Jimmy said yes to those exact details. Independent reads (say, both inboxes plus the calendar) can run in parallel.
 
 ${kept}${context ? `\n\n${String(context).trim()}` : ''}${snapshot ? `\n\nCURRENT CONTEXT SNAPSHOT:\n${snapshot}` : ''}`;
 }
@@ -182,7 +187,7 @@ export function buildLiveSession({ scope = 'thread', config, instructions, input
         instructions: backendInstructions,
         tools,
         tool_choice: 'auto',
-        parallel_tool_calls: false,
+        parallel_tool_calls: config.parallelTools !== false,
         ...(config.backendReasoning && config.backendReasoning !== 'none' ? { reasoning: { effort: config.backendReasoning } } : {}),
       },
     };

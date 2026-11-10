@@ -90,7 +90,10 @@ const cfgOf = (env) => (k, d = '') => (env[k] == null || env[k] === '' ? d : env
   assert.equal(global.delegation.type, 'responses');
   assert.equal(global.delegation.responses.model, 'gpt-6-luna');
   assert.deepEqual(global.delegation.responses.reasoning, { effort: 'low' });
-  assert.equal(global.delegation.responses.parallel_tool_calls, false);
+  assert.equal(global.delegation.responses.parallel_tool_calls, true);
+  const serial = buildLiveSession({ scope: 'global', config: liveVoiceConfig(cfgOf({ VOICE_LIVE_PARALLEL_TOOLS: '0' })), instructions: 'i' });
+  assert.equal(serial.delegation.responses.parallel_tool_calls, false);
+  assert.equal(liveVoiceConfig(cfgOf({ VOICE_LIVE_PARALLEL_TOOLS: '' })).parallelTools, true);
   assert.equal(global.input, undefined);
   const noReason = buildLiveSession({ scope: 'global', config: { ...config, backendReasoning: 'none' }, instructions: 'i' });
   assert.equal(noReason.delegation.responses.reasoning, undefined);

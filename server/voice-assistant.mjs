@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync,
-  realpathSync, readdirSync, statSync, unlinkSync, writeFileSync,
+  realpathSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -34,6 +34,7 @@ import { renderSlackContext, slackConfigured, slackRecent, slackSearch } from '.
 import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { createJimmyContext } from './jimmy-context.mjs';
+import { BRAIN_ENTITY_TYPES, brainQueueEntry, describePacificRange, needsJimmyId, normalizeGoogleAccount, parseGmailList, resolveEventTimes, screenBrainFact, senderName } from './voice-extra-tools.mjs';
 import { buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
@@ -2131,7 +2132,7 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'needs_jimmy',
-      description: 'Open needs-Jimmy items — decisions only he can make. Read these out when he asks "what needs me".',
+      description: 'Open needs-Jimmy items — decisions only he can make. Read these out when he asks "what needs me". Each has an id (INC-…) you pass to needs_jimmy_resolve once he decides.',
       parameters: { type: 'object', properties: {} },
       handler: async () => {
         const n = await selfFetch('/api/needs-attention');
@@ -2389,6 +2390,144 @@ export function registerVoiceAssistant(app, ctx) {
       },
     },
     {
+      name: 'brain_save',
+      description: 'Save ONE durable company fact to the company brain (shared with the whole agent fleet and pushed to GitHub): a decision, a deal/customer/person fact, a resolved blocker, a priority. Use when Jimmy says "remember that", "save that to the brain", or states a durable business decision. Not for passing thoughts (take_note) or to-dos (linear_create). Never include patient-identifying info, credentials, or anything about his visa/immigration, personal legal, or medical matters — the tool refuses those; tell him why. Preamble: "Saving that to the brain."',
+      parameters: { type: 'object', properties: {
+        fact: { type: 'string', description: 'The fact as one or two self-contained sentences, with names, numbers, and dates (absolute, not "tomorrow").' },
+        entity: { type: 'string', description: 'Optional: who or what it is about, e.g. "Spectrum Medical Evaluators" or "Ali Omid".' },
+        entity_type: { type: 'string', enum: BRAIN_ENTITY_TYPES, description: 'Optional: the kind of entity.' },
+      }, required: ['fact'] },
+      handler: async ({ fact, entity = '', entity_type = '' } = {}) => {
+        const screen = screenBrainFact(`${entity ? `${entity}: ` : ''}${fact}`, { redact: redactSecrets });
+        if (!screen.ok) return { saved: false, refused: true, reason: screen.reason };
+        const entry = brainQueueEntry({ fact, entity, entityType: entity_type });
+        if (DRYRUN) return { saved: true, dry_run: true, entry };
+        // The sanctioned write path: drop it in the brain queue; the brain-sync loop drains it
+        // single-threaded into learnings/agent-session-log.md, commits and pushes (no git race).
+        const qdir = cfg('VOICE_BRAIN_QUEUE_DIR') || join(HOME, '.factory', 'brain-queue');
+        try {
+          mkdirSync(qdir, { recursive: true });
+          const base = join(qdir, `voice-${Date.now()}-${process.pid}-${randomBytes(3).toString('hex')}`);
+          writeFileSync(`${base}.tmp`, entry);
+          renameSync(`${base}.tmp`, `${base}.md`); // the drainer only globs *.md — never sees a half-written file
+          return { saved: true, queued: true, note: 'queued for the brain; it is committed and pushed within about a minute' };
+        } catch (e) { return { saved: false, error: short(String(e.message || e), 200) }; }
+      },
+    },
+    {
+      name: 'gmail_search',
+      description: 'Search Jimmy\'s Gmail (read-only) — account "work" (jimmy@incidentfox.ai), "personal" (his Gmail), or "both" (default). query is Gmail search syntax, e.g. "in:inbox", "is:unread newer_than:2d", "from:spectrum", "subject:invoice". Returns sender, subject, date, snippet, and an id for gmail_read. For "latest email" use query "in:inbox" and max 1–3. Summarize; never read raw addresses aloud. Preamble: "Checking your email."',
+      parameters: { type: 'object', properties: {
+        query: { type: 'string', description: 'Gmail search query; default "in:inbox"' },
+        account: { type: 'string', enum: ['work', 'personal', 'both'] },
+        max: { type: 'number', description: 'Messages per account, default 5, max 10' },
+      } },
+      handler: async ({ query = 'in:inbox', account = 'both', max = 5 } = {}) => {
+        const g = join(HOME, '.local', 'bin', 'google');
+        const acct = normalizeGoogleAccount(account, 'both');
+        const n = Math.max(1, Math.min(10, Number(max) || 5));
+        const q = String(query || 'in:inbox').slice(0, 300);
+        const accts = acct === 'both' ? ['work', 'me'] : [acct];
+        const results = await Promise.all(accts.map(async (a) => {
+          const r = await run(g, [a, 'gmail', 'list', q, String(n)], { timeoutMs: 25000 });
+          const label = a === 'me' ? 'personal' : 'work';
+          if (r.code !== 0) return { account: label, error: short(redactSecrets(r.out).text, 200) };
+          const rows = parseGmailList(r.out, n);
+          // Snippets: one metadata call per message, in parallel; best-effort.
+          await Promise.all(rows.map(async (m) => {
+            const meta = await run(g, [a, 'api', 'GET', `/gmail/v1/users/me/messages/${m.id}?format=minimal`], { timeoutMs: 15000 });
+            try { const j = JSON.parse(meta.out); m.snippet = j.snippet || ''; m.unread = (j.labelIds || []).includes('UNREAD'); } catch {}
+          }));
+          return {
+            account: label,
+            messages: rows.map((m) => {
+              const who = senderName(m.from);
+              return {
+                id: m.id, from: short(redactSecrets(who.name).text, 80), from_email: short(who.email, 80),
+                subject: short(redactSecrets(m.subject).text, 160), date: m.date,
+                ...(m.snippet ? { snippet: short(redactSecrets(m.snippet.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&')).text, 220) } : {}),
+                ...(m.unread ? { unread: true } : {}),
+              };
+            }),
+          };
+        }));
+        return { query: q, results };
+      },
+    },
+    {
+      name: 'gmail_read',
+      description: 'Read one Gmail message (read-only) by the id from gmail_search, from the same account. Returns headers and the plain-text body (secrets redacted, trimmed). Give him the gist in a sentence or two; offer to email_jimmy a summary for anything long. Preamble: "Opening that email."',
+      parameters: { type: 'object', properties: {
+        id: { type: 'string', description: 'Message id from gmail_search' },
+        account: { type: 'string', enum: ['work', 'personal'] },
+      }, required: ['id', 'account'] },
+      handler: async ({ id, account = 'work' } = {}) => {
+        const mid = String(id || '').trim();
+        if (!/^[0-9a-f]{8,32}$/i.test(mid)) return { error: 'that does not look like a Gmail message id — use one from gmail_search' };
+        const a = normalizeGoogleAccount(account, 'work');
+        if (a === 'both') return { error: 'say which account: work or personal' };
+        const r = await run(join(HOME, '.local', 'bin', 'google'), [a, 'gmail', 'get', mid], { timeoutMs: 25000 });
+        if (r.code !== 0) return { error: short(redactSecrets(r.out).text, 200) };
+        const red = redactSecrets(r.out);
+        const text = red.text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+        return { id: mid, account: a === 'me' ? 'personal' : 'work', content: clip(text, 4000), truncated: text.length > 4000, secrets_redacted: red.redactions };
+      },
+    },
+    {
+      name: 'calendar_add',
+      description: 'Create an event on Jimmy\'s calendar. Times are PACIFIC wall time like "2026-11-12T15:00" (work out the absolute date from today; the snapshot has the current Pacific date and time). TWO STEPS, always: first call WITHOUT confirmed — it returns a read_back; say it to him ("Add lunch with Ali, Thursday November 12, noon to one Pacific, on your work calendar?") and wait for a clear verbal yes. Only then call again with the same details and confirmed:true. If he changes anything, read back again. Default account is work (jimmy@incidentfox.ai). Preamble: "Adding that to your calendar."',
+      parameters: { type: 'object', properties: {
+        summary: { type: 'string', description: 'Event title' },
+        start: { type: 'string', description: 'Start, Pacific wall time, YYYY-MM-DDTHH:MM' },
+        end: { type: 'string', description: 'Optional end, Pacific wall time, YYYY-MM-DDTHH:MM' },
+        duration_minutes: { type: 'number', description: 'Used when end is omitted; default 30' },
+        account: { type: 'string', enum: ['work', 'personal'] },
+        confirmed: { type: 'boolean', description: 'true ONLY after you read the details back and Jimmy said yes' },
+      }, required: ['summary', 'start'] },
+      handler: async ({ summary, start, end, duration_minutes, account = 'work', confirmed = false } = {}) => {
+        const title = short(String(summary || '').replace(/\s+/g, ' '), 200);
+        if (!title) return { error: 'the event needs a title' };
+        const times = resolveEventTimes({ start, end, duration_minutes });
+        if (times.error) return { error: times.error };
+        const a = normalizeGoogleAccount(account, 'work') === 'me' ? 'me' : 'work';
+        const label = a === 'me' ? 'personal' : 'work';
+        const read_back = `Add "${title}", ${describePacificRange(times.start, times.end)}, on your ${label} calendar?`;
+        if (confirmed !== true) return { created: false, needs_confirmation: true, read_back, start: times.start, end: times.end, account: label, next: 'Read this back, get a clear yes, then call calendar_add again with confirmed:true.' };
+        if (DRYRUN) return { created: true, dry_run: true, summary: title, start: times.start, end: times.end, account: label };
+        const r = await run(join(HOME, '.local', 'bin', 'google'), [a, 'cal', 'add', title, times.start, times.end], { timeoutMs: 25000 });
+        let ev = null; try { ev = JSON.parse(r.out); } catch {}
+        if (r.code !== 0 || !ev || !ev.id) return { created: false, error: short(redactSecrets(r.out).text, 200) };
+        return { created: true, summary: title, when: describePacificRange(times.start, times.end), account: label, event_id: ev.id };
+      },
+    },
+    {
+      name: 'needs_jimmy_resolve',
+      description: 'Close an open needs-Jimmy item once Jimmy has made the decision out loud: marks it Done in Linear and records his decision as a comment. id comes from needs_jimmy (call it first if you don\'t have the id). decision = what he decided, in his words, specific enough for the agent that raised it to act on. If it\'s unclear which item he means, ask. Don\'t resolve something he only discussed without deciding. Preamble: "Recording that decision."',
+      parameters: { type: 'object', properties: {
+        id: { type: 'string', description: 'The needs-Jimmy issue id, e.g. INC-2410' },
+        decision: { type: 'string', description: 'His decision, one to three sentences' },
+      }, required: ['id', 'decision'] },
+      handler: async ({ id, decision } = {}) => {
+        const inc = needsJimmyId(id);
+        if (!inc) return { error: 'need the item id, like INC twenty-four ten — call needs_jimmy to list them' };
+        const note = String(decision || '').replace(/\s+/g, ' ').trim();
+        if (note.length < 3) return { error: 'say what he decided' };
+        const red = redactSecrets(note);
+        if (red.redactions) return { error: 'the decision text contains what looks like a secret — rephrase without it' };
+        // Only items that are actually open needs-Jimmy decisions — never an arbitrary ticket.
+        let open;
+        try { open = ((await selfFetch('/api/needs-attention')).items || []); }
+        catch (e) { return { error: `could not load needs-Jimmy items: ${short(String(e.message || e), 120)}` }; }
+        const item = open.find((i) => i && i.identifier === inc);
+        if (!item) return { resolved: false, error: `${inc} is not an open needs-Jimmy item`, open: open.slice(0, 8).map((i) => ({ id: i.identifier, title: short(i.title, 90) })) };
+        if (DRYRUN) return { resolved: true, dry_run: true, id: inc, title: short(item.title, 120), decision: short(note, 300) };
+        const script = join(HOME, 'development', 'software-factory', 'harness', 'needs-jimmy.mjs');
+        const r = await run('node', [script, '--resolve', inc, '--note', `${note} (decided by voice)`], { timeoutMs: 30000 });
+        if (r.code !== 0 || !/resolved/i.test(r.out)) return { resolved: false, error: short(redactSecrets(r.out).text, 200) };
+        return { resolved: true, id: inc, title: short(item.title, 120) };
+      },
+    },
+    {
       name: 'think_hard',
       description: 'Deep reasoning on a hard question — strategy, pricing, prioritization, tradeoffs, planning — via Claude (the heavyweight thinker; takes 15–60 seconds, worth it). Preamble: "Give me a moment to really think that through." Then DISCUSS the analysis conversationally in your own words, a few sentences at a time — never read it verbatim.',
       parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question, sharply stated' }, context: { type: 'string', description: 'Relevant facts/numbers from this conversation worth passing along' } }, required: ['question'] },
@@ -2448,8 +2587,12 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF = spell the letters · Jopari
 - Call read tools silently; the UI already shows an activity chip. Never say "checking", "one sec", or another tool preamble before a quick read.
 - For action tools, report the concrete result AFTER the tool succeeds. Do not speak both a before-action preamble and an after-action confirmation for the same action.
 - Narrate before a tool only when it will take noticeable time (deep research, a new background agent, think_hard), using at most five words. Never repeat a preamble after an interruption.
-- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, linear_issue, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, check_tasks, web_search): be proactive, do not ask permission. If Jimmy named one topic, use a targeted tool; never answer it with a broad board/overview dump. For a specific Linear ticket or PR, call linear_issue so you read the actual PR purpose/body/files instead of guessing from its title.
+- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, linear_issue, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, gmail_search, gmail_read, check_tasks, web_search): be proactive, do not ask permission. If Jimmy named one topic, use a targeted tool; never answer it with a broad board/overview dump. For a specific Linear ticket or PR, call linear_issue so you read the actual PR purpose/body/files instead of guessing from its title.
 - Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): do not repeat back or ask for confirmation when the intended safe next step is clear.
+- calendar_add is the exception: ALWAYS read the event back (title, day, time, account) and get a clear verbal yes before calling it with confirmed:true.
+- brain_save: when he says "remember that" about a durable business fact or decision, save it to the company brain (take_note is for passing thoughts). It refuses PHI, secrets, and his personal visa/legal/medical matters — say so plainly if it does.
+- needs_jimmy_resolve: when he decides an open needs-Jimmy item out loud, resolve it with his decision in his words; confirm in one sentence which item you closed.
+- Email is read-only (gmail_search, gmail_read) except email_jimmy to his own inbox. Never send email to anyone else.
 - Session cleanup: when Jimmy asks to archive, clean up, or hide sessions, call archive_session. It only archives idle or finished sessions and refuses working, live, or needs-input sessions; tell him plainly which sessions were archived and which were left alone. Do not use send_to_session on an archived session unless he explicitly asks to resume that archived chat.
 - Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
