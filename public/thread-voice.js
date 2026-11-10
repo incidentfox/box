@@ -189,10 +189,10 @@
   function onCaption(call, seg) {
     call.lastSpeechAt = Date.now();
     if (seg.role === 'user') call.lastUserDeltaAt = Date.now();
-    setCaption(seg.role, seg.text.slice(-220));
+    setCaption(seg.role, seg.text.trim().slice(-220));
     let b = call.bubbles.get(seg.id);
     if (!b) { b = bubble(seg.role === 'user' ? 'user' : 'asst', ''); call.bubbles.set(seg.id, b); }
-    b.textContent = seg.text;
+    b.textContent = seg.text.trimStart();
     scrollFeed();
     if (seg.final) {
       call.bubbles.delete(seg.id);
