@@ -7,7 +7,7 @@ import vm from 'node:vm';
 const src = readFileSync(new URL('./live-voice.js', import.meta.url), 'utf8');
 const window = {};
 vm.runInNewContext(src, { window, crypto: globalThis.crypto, setTimeout, clearTimeout, console });
-const { createCallGate } = window.LiveVoice;
+const { createCallGate, toolOutcome, toolDoneLabel } = window.LiveVoice;
 assert.equal(typeof createCallGate, 'function');
 
 function harness() {
@@ -76,3 +76,29 @@ function harness() {
 }
 
 console.log('live-voice call gate: ok');
+
+// Tool outcomes: a tool that failed INSIDE its result must not show green (the calendar
+// tool reports each account separately — one revoked token used to look like success).
+{
+  const o = (x) => JSON.parse(JSON.stringify(toolOutcome(typeof x === 'string' ? x : JSON.stringify(x)))); // vm realm → plain
+  assert.deepEqual(o({ error: 'nope' }), { outcome: 'fail', failedParts: [] });
+  assert.deepEqual(o({ personal: { error: 'Token refresh failed' }, work: 'Fri 10:00 Spectrum sync' }), { outcome: 'warn', failedParts: ['personal'] });
+  assert.deepEqual(o({ personal: { error: 'x' }, work: { error: 'y' } }), { outcome: 'fail', failedParts: ['personal', 'work'] });
+  // the pre-fix server shape: stderr returned as if it were the events
+  assert.equal(o({ personal: 'Token refresh failed: {"error":"invalid_grant"}', work: 'Fri 10:00' }).outcome, 'warn');
+  assert.equal(o({ query: 'error logs', results: [] }).outcome, 'ok', 'a field that merely mentions "error" is fine');
+  assert.equal(o({ saved: true, entry: 'x' }).outcome, 'ok');
+  assert.equal(o('plain text output').outcome, 'ok');
+  assert.equal(o({ events: [{ title: 'error budget review' }] }).outcome, 'ok');
+  assert.equal(toolDoneLabel('calendar'), 'Checked calendar');
+  assert.equal(toolDoneLabel('no_such_tool'), 'no_such_tool');
+}
+// runBoxTool carries the outcome through.
+{
+  const fakeApi = (out) => async () => ({ json: async () => ({ output: out }) });
+  const r = await window.LiveVoice.runBoxTool(fakeApi(JSON.stringify({ personal: { error: 'x' }, work: 'ok' })), { name: 'calendar', args: '{}' });
+  assert.equal(r.outcome, 'warn'); assert.equal(r.failed, false); assert.deepEqual([...r.failedParts], ['personal']);
+  const f = await window.LiveVoice.runBoxTool(async () => { throw new Error('offline'); }, { name: 'calendar', args: '{}' });
+  assert.equal(f.outcome, 'fail'); assert.equal(f.failed, true);
+}
+console.log('live-voice tool outcomes: ok');

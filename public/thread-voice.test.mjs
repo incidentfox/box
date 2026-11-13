@@ -51,7 +51,15 @@ const ctx = {
   console, setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {}, JSON, Date, Math, String, Number, Map, Set,
   cur: { key: 'k1', id: 'sess-1', agent: 'claude', title: 'Voice work', cwd: '/repo', mode: 'normal' },
   $: (id) => byId[id] || null,
-  api: async (path, init) => { apiCalls.push({ path, body: init && init.body ? JSON.parse(init.body) : null }); return { ok: true, json: async () => ({ output: JSON.stringify({ events: [{ when: 'tomorrow 10am', title: 'Spectrum sync' }] }) }) }; },
+  api: async (path, init) => {
+    const b = init && init.body ? JSON.parse(init.body) : null;
+    apiCalls.push({ path, body: b });
+    // calendar: the personal account's token is revoked → a partial failure inside the result
+    const output = b && b.name === 'calendar'
+      ? JSON.stringify({ personal: { error: 'Token refresh failed: invalid_grant' }, work: 'tomorrow 10am Spectrum sync' })
+      : JSON.stringify({ events: [] });
+    return { ok: true, json: async () => ({ output }) };
+  },
   toast: (m) => toasts.push(m),
   enqueueText: (text, opts) => sent.push({ text, opts }),
   paintIcons: () => {},
@@ -71,11 +79,14 @@ ctx.window.RTCPeerConnection = function () {};
 // The real shared helpers from live-voice.js (runBoxTool / toolLabel), with our fake engine.
 vm.createContext(ctx);
 vm.runInContext(readFileSync(new URL('./live-voice.js', import.meta.url), 'utf8'), ctx);
+// The shared voice kit (orb / captions / pills); its canvas + animation paths no-op on the fake DOM.
+vm.runInContext(readFileSync(new URL('./voice-ui.js', import.meta.url), 'utf8'), ctx);
+assert.ok(ctx.VoiceUI, 'voice kit loaded');
 ctx.window.LiveVoice.create = fakeEngine;
 vm.runInContext(src, ctx);
 const TV = ctx.ThreadVoice;
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-const feedText = () => byId.tvFeed.childNodes.map((n) => [n.className, ...n.classList._s].join(' ') + ':' + (n._name ? n._name.textContent : n.textContent)).join(' | ');
+const feedText = () => byId.tvFeed.childNodes.map((n) => [n.className, ...n.classList._s].join(' ') + ':' + (n._name ? n._name.textContent : n.textContent) + (n._meta && n._meta.textContent ? ` [${n._meta.textContent}]` : '')).join(' | ');
 
 // ---- start: full-screen view opens, session is thread scope ----
 await TV.start();
@@ -97,7 +108,14 @@ assert.ok(toolReq, 'box tool hit /api/voice/tool');
 assert.equal(toolReq.body.name, 'calendar');
 assert.equal(toolReq.body.vsid, 'v1');
 assert.match(calOut, /Spectrum sync/);
-assert.match(feedText(), /voToolChip ok:Checking calendar…/);
+// a partial failure (one account errored) resolves amber with what failed — never green
+assert.match(feedText(), /voToolChip vPill [^|]*\bdone\b[^|]*\bwarn\b[^|]*:Checked calendar \[personal failed\]/);
+assert.ok(!/voToolChip[^|]*\bok\b[^|]*:Checked calendar/.test(feedText()), 'not green');
+// a tool that failed outright
+ctx.api = async () => ({ ok: true, json: async () => ({ output: JSON.stringify({ error: 'gmail unreachable' }) }) });
+await engine.call('gmail_search', { query: 'spectrum' });
+assert.match(feedText(), /\bfail\b[^|]*:Checking email failed/);
+ctx.api = async (path, init) => { apiCalls.push({ path, body: init && init.body ? JSON.parse(init.body) : null }); return { ok: true, json: async () => ({ output: '{"ok":true}' }) }; };
 assert.equal(sent.length, 0, 'a lookup does not touch the thread');
 
 // ---- 2) ask_thread_agent → a 🎙 message in the thread; answers immediately ----
@@ -107,9 +125,16 @@ assert.equal(out1.status, 'sent');
 assert.equal(sent.length, 0, 'waits for Jimmy to stop talking');
 await wait(1600);
 assert.equal(sent.length, 1);
+// hero captions: the newest spoken line is the big one, the line before it echoes
+{
+  const lines = byId.tvFeed.childNodes.filter((n) => /\bvLine\b/.test(n.className));
+  const now = lines.filter((n) => n.classList._s.has('now'));
+  assert.equal(now.length, 1, 'exactly one hero line');
+  assert.equal(now[0].textContent, 'Have the agent run the voice unit tests');
+}
 assert.match(sent[0].text, /^Run the unit tests for the voice module and tell me if they pass\.\n\n\(Sent by voice/);
 assert.equal(sent[0].opts.displayText, '🎙 Run the unit tests for the voice module and tell me if they pass.');
-assert.match(feedText(), /voToolChip:Sent to Claude Code/);
+assert.match(feedText(), /voToolChip vPill run:Sent to Claude Code/);
 
 // the thread runs the turn; the final message after the last tool is what gets spoken
 TV.onChatEvent({ type: 'turn_start', text: sent[0].opts.displayText });
@@ -123,7 +148,7 @@ assert.ok(reply, 'reply spoken');
 assert.equal(reply.id, null, 'session-wide commentary (the backend turn is long finished)');
 assert.match(reply.text, /All 42 tests pass\. See server\/live-voice\.test\.mjs and \(link\)/);
 assert.ok(!/Let me run them/.test(reply.text), 'pre-tool chatter is not spoken');
-assert.match(feedText(), /voToolChip ok:Claude Code · Bash/);
+assert.match(feedText(), /\bok\b[^|]*:Claude Code replied/, 'the agent pill resolves when the reply lands');
 
 // ---- 3) agent asks a question mid-turn → spoken right away ----
 JSON.parse(await engine.call('ask_thread_agent', { request: 'Yes, open a PR with that fix.' }));

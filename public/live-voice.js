@@ -64,6 +64,35 @@
     calendar_add: 'Adding to calendar…', needs_jimmy_resolve: 'Recording decision…',
   };
   const toolLabel = (name) => TOOL_LABELS[name] || String(name || 'tool');
+  // Past-tense label once a tool finished (the pill resolves to this).
+  const TOOL_DONE = {
+    get_overview: 'Checked the box', list_sessions: 'Listed sessions', check_session: 'Checked session',
+    send_to_session: 'Messaged agent', start_agent: 'Started agent', delegate_ticket: 'Delegated ticket',
+    linear_board: 'Read the board', linear_create: 'Created issue', linear_update: 'Updated issue', linear_issue: 'Read issue details',
+    needs_jimmy: 'Checked decisions', web_search: 'Searched the web', deep_research: 'Launched research', check_tasks: 'Checked tasks',
+    brain_search: 'Searched the brain', brain_read: 'Read the brain', get_briefing: 'Opened briefing', take_note: 'Noted',
+    read_notes: 'Read notes', email_jimmy: 'Sent email', calendar: 'Checked calendar', think_hard: 'Thought it through',
+    voice_memory: 'Updated memory', file_access: 'Checked file access', brain_save: 'Saved to the brain', gmail_search: 'Checked email',
+    gmail_read: 'Opened email', calendar_add: 'Calendar updated', needs_jimmy_resolve: 'Recorded decision',
+  };
+  const toolDoneLabel = (name) => TOOL_DONE[name] || toolLabel(name).replace(/…$/, '');
+
+  // How a tool call really went, from its output: 'ok' | 'warn' (some parts failed) | 'fail'.
+  // A top-level {"error"} is a failure; a multi-part result (calendar: personal + work) whose
+  // parts carry their own {"error"} — or an error string like "Token refresh failed" — is a
+  // partial failure, or a failure when every part failed. `failedParts` names them.
+  const ERRORISH = /^(token refresh failed|error:|failed:|invalid_grant)|^\{?\s*"error"\s*:/i;
+  function toolOutcome(output) {
+    let j;
+    try { j = typeof output === 'string' ? JSON.parse(output) : output; } catch { return { outcome: /^\s*\{?\s*"?error/i.test(String(output)) ? 'fail' : 'ok', failedParts: [] }; }
+    if (!j || typeof j !== 'object' || Array.isArray(j)) return { outcome: 'ok', failedParts: [] };
+    if (j.error != null && j.error !== false && j.error !== '') return { outcome: 'fail', failedParts: [] };
+    const parts = Object.entries(j).filter(([, v]) => v != null && (typeof v === 'object' || typeof v === 'string'));
+    const bad = parts.filter(([, v]) => (typeof v === 'string' ? ERRORISH.test(v.trim()) : !Array.isArray(v) && v.error != null && v.error !== false && v.error !== '')).map(([k]) => k);
+    if (!bad.length) return { outcome: 'ok', failedParts: [] };
+    const multi = parts.filter(([, v]) => typeof v === 'object' || typeof v === 'string').length;
+    return { outcome: bad.length >= multi ? 'fail' : 'warn', failedParts: bad };
+  }
 
   // Run one box voice tool server-side (POST /api/voice/tool). Never throws: a transport
   // failure becomes an {"error"} output the model can say out loud.
@@ -77,7 +106,8 @@
     } catch (e) {
       output = JSON.stringify({ error: 'box unreachable: ' + String((e && e.message) || e).slice(0, 120) });
     }
-    return { output, failed: /"error"/.test(output.slice(0, 60)), ms: Date.now() - t0 };
+    const { outcome, failedParts } = toolOutcome(output);
+    return { output, outcome, failedParts, failed: outcome === 'fail', ms: Date.now() - t0 };
   }
 
   function create(opts) {
@@ -296,5 +326,5 @@
     };
   }
 
-  window.LiveVoice = { create, createCallGate, runBoxTool, toolLabel, TOOL_LABELS };
+  window.LiveVoice = { create, createCallGate, runBoxTool, toolLabel, toolDoneLabel, toolOutcome, TOOL_LABELS };
 })();

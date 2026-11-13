@@ -53,40 +53,49 @@
   const extendsRequest = (prev, next) => overlap(prev, next) >= 0.6;
 
   /* ---------- UI ---------- */
+  // Visual pieces come from public/voice-ui.js (shared with the Voice screen): the living orb,
+  // hero captions, tool pills, haptics/cues and the bar ⇄ full-screen morph.
+  const UI = () => window.VoiceUI;
+  let bigOrb = null, miniOrb = null, caps = null;
+  const I = (name) => (UI() && UI().ICON[name]) || '';
+
   function ensureUi() {
     if ($('tvBar')) return;
-    // Minimized: a bar above the composer. Tapping it re-opens the full view.
+    // Minimized: a bar above the composer — mini live orb, status, caption ticker. Tap re-opens.
     const bar = document.createElement('div');
     bar.id = 'tvBar'; bar.className = 'tvBar hidden';
     bar.innerHTML = `
       <button id="tvExpand" class="tvExpand" type="button" aria-label="Open the voice view">
-        <span class="tvOrb" id="tvOrb"><span></span></span>
+        <span class="tvOrbBox"><canvas id="tvOrb" class="tvOrb" aria-hidden="true"></canvas></span>
         <span class="tvMain">
           <span class="tvStatus" id="tvStatus">Connecting…</span>
           <span class="tvCaption" id="tvCaption"></span>
         </span>
-        <span class="tvExpandIc" data-icon="chevron-up"></span>
+        <span class="tvExpandIc">${I('up')}</span>
       </button>
-      <button id="tvMute" class="iconbtn" title="mute" aria-label="Mute" data-icon="mic"></button>
-      <button id="tvEnd" class="tvEndBtn" title="end voice">End</button>`;
+      <button id="tvMute" class="tvMiniBtn" type="button" title="mute" aria-label="Mute" aria-pressed="false">${I('mic')}</button>
+      <button id="tvEnd" class="tvEndBtn" type="button" title="end voice" aria-label="End voice">End</button>`;
     const wrap = $('inputWrap');
     wrap.parentNode.insertBefore(bar, wrap);
     // Expanded: full screen over the chat.
     const full = document.createElement('div');
-    full.id = 'tvFull'; full.className = 'tvFull hidden';
+    full.id = 'tvFull'; full.className = 'tvFull vSurface hidden';
     full.setAttribute('role', 'dialog'); full.setAttribute('aria-label', 'Voice mode');
     full.innerHTML = `
-      <header class="tvFullBar">
-        <button id="tvMin" class="iconbtn ghost" title="back to chat" aria-label="Minimize voice" data-icon="chevron-down"></button>
-        <div class="tvFullHead"><strong id="tvTitle" class="tvTitle"></strong><span id="tvFullStatus" class="tvFullStatus">Connecting…</span></div>
-        <span id="tvClock" class="voClock tvClock"></span>
+      <header id="tvHead" class="tvFullBar">
+        <button id="tvMin" class="vIconBtn" type="button" title="back to chat" aria-label="Minimize voice">${I('down')}</button>
+        <div class="tvFullHead"><strong id="tvTitle" class="tvTitle"></strong><span class="tvSub"><span class="vLiveDot" id="tvLiveDot"></span><span id="tvClock" class="tvClock">0:00</span></span></div>
+        <span class="vIconBtn vSpacer" aria-hidden="true"></span>
       </header>
-      <div class="tvStage"><div id="tvBigWrap" class="tvBigWrap"><span id="tvBigOrb" class="voOrb connecting"></span></div></div>
-      <div id="tvFeed" class="tvFeed" aria-live="polite"></div>
-      <div class="voDock tvDock">
-        <button id="tvFMute" class="voCtl" title="mute" aria-label="Mute"><span data-icon="mic"></span></button>
-        <button id="tvFChat" class="voCtl" title="back to chat" aria-label="Back to chat"><span data-icon="chat"></span></button>
-        <button id="tvFEnd" class="voCtl voEndBtn" title="end voice" aria-label="End voice"><span data-icon="close"></span></button>
+      <div class="vStage">
+        <div id="tvBigWrap" class="vOrbWrap"><canvas id="tvBigOrb" class="vOrb" aria-hidden="true"></canvas></div>
+        <div id="tvFullStatus" class="vState" aria-live="polite">Connecting…</div>
+      </div>
+      <div id="tvCapsWrap" class="vCapsWrap"><div id="tvFeed" class="tvFeed vCaps" aria-live="polite"></div><button id="tvJump" class="vJump" type="button">${I('down')}<span>Latest</span></button></div>
+      <div id="tvDock" class="vDock">
+        <button id="tvFMute" class="vCtl" type="button" title="mute" aria-label="Mute" aria-pressed="false">${I('mic')}</button>
+        <button id="tvFChat" class="vCtl" type="button" title="back to chat" aria-label="Back to chat">${I('chat')}</button>
+        <button id="tvFEnd" class="vCtl vEnd" type="button" title="end voice" aria-label="End voice">${I('end')}</button>
       </div>`;
     document.body.appendChild(full);
     $('tvExpand').onclick = () => expand();
@@ -96,26 +105,60 @@
     $('tvFEnd').onclick = () => stop('ended');
     $('tvMute').onclick = toggleMute;
     $('tvFMute').onclick = toggleMute;
-    paintIcons(bar); paintIcons(full);
+    if (UI()) {
+      bigOrb = UI().createOrb($('tvBigOrb'));
+      miniOrb = UI().createOrb($('tvOrb'), { mini: true });
+      bigOrb.onMode = () => paintStatus();
+      bigOrb.setActive(false); miniOrb.setActive(false);
+      caps = UI().createCaptions($('tvFeed'), $('tvJump'), { hint: 'Just talk. Ask about your calendar, email or the board, or have the agent in this chat do the work.' });
+    }
   }
+  function orbs(fn) { for (const o of [bigOrb, miniOrb]) if (o) fn(o); }
   function render() {
     const on = !!tv, big = !!(tv && tv.expanded);
     $('tvBar').classList.toggle('hidden', !on || big);
     $('tvFull').classList.toggle('hidden', !big);
     document.body.classList.toggle('tvFullOpen', big);
     const b = $('threadVoiceBtn'); if (b) b.classList.toggle('active', on);
+    // Only the visible orb animates (the other one would burn frames behind the chat).
+    if (bigOrb) bigOrb.setActive(big);
+    if (miniOrb) miniOrb.setActive(on && !big);
   }
-  function expand() {
+  const fadeParts = () => ['tvHead', 'tvCapsWrap', 'tvDock', 'tvFullStatus'].map((id) => $(id)).filter(Boolean);
+  function expand({ from } = {}) {
     if (!tv || tv.expanded) return;
+    const call = tv;
+    const barShown = !$('tvBar').classList.contains('hidden');
+    const source = from || (barShown ? $('tvBar') : null);
+    const orbSource = barShown ? $('tvOrb') : from;
     tv.expanded = true;
+    $('tvFull').classList.remove('tvClosing');
     render(); scrollFeed();
+    if (UI() && source && typeof $('tvFull').animate === 'function') {
+      // From the bar: keep it showing underneath until the view has grown over it.
+      if (barShown) { $('tvBar').classList.remove('hidden'); if (miniOrb) miniOrb.setActive(true); }
+      UI().morph({ surface: $('tvFull'), from: source, fromRadius: barShown ? 22 : 999, orb: $('tvBigWrap'), orbFrom: orbSource, fade: fadeParts(), open: true, crossfade: barShown })
+        .then(() => { if (tv === call && call.expanded) render(); });
+    }
     // Back (gesture or button) while expanded minimizes instead of leaving the chat.
     try { history.pushState({ ...(history.state || {}), tvFull: 1 }, '', location.href); tv.histPushed = true; } catch {}
   }
   function minimize({ fromHistory = false } = {}) {
     if (!tv || !tv.expanded) return;
+    const call = tv;
     tv.expanded = false;
-    render();
+    const full = $('tvFull');
+    // Show the bar underneath first so the morph can land exactly on it.
+    $('tvBar').classList.remove('hidden');
+    if (miniOrb) miniOrb.setActive(true);
+    const canMorph = UI() && typeof full.animate === 'function';
+    if (canMorph) {
+      full.classList.add('tvClosing');
+      UI().morph({ surface: full, from: $('tvBar'), fromRadius: 22, orb: $('tvBigWrap'), orbFrom: $('tvOrb'), fade: fadeParts(), open: false, duration: 380, crossfade: true })
+        .then(() => { full.classList.remove('tvClosing'); if (tv === call && !call.expanded) render(); });
+      document.body.classList.remove('tvFullOpen');
+      if (bigOrb) bigOrb.setActive(true); // keep it alive while it flies into the bar
+    } else render();
     dropHistoryEntry(fromHistory);
   }
   function dropHistoryEntry(fromHistory) {
@@ -134,69 +177,107 @@
   function toggleMute() {
     if (!tv) return;
     tv.engine.setMuted(!tv.engine.muted);
-    for (const id of ['tvMute', 'tvFMute']) { const b = $(id); if (b) b.classList.toggle('active', tv.engine.muted); }
-    paintStatus();
+    const m = tv.engine.muted;
+    for (const id of ['tvMute', 'tvFMute']) {
+      const b = $(id); if (!b) continue;
+      b.classList.toggle('active', m);
+      b.setAttribute('aria-pressed', m ? 'true' : 'false');
+      b.setAttribute('aria-label', m ? 'Unmute' : 'Mute');
+      if (I('mic')) b.innerHTML = I(m ? 'mic-off' : 'mic');
+    }
+    if (UI()) UI().haptic('tap');
+    syncOrbs(); paintStatus();
   }
-  function setStatus(text) {
-    for (const id of ['tvStatus', 'tvFullStatus']) { const el = $(id); if (el) el.textContent = text; }
+  // `short` is for the minimized bar, where the full line would truncate on a phone.
+  function setStatus(text, short) {
+    const put = (id, t) => { const el = $(id); if (el && el.textContent !== t) el.textContent = t; };
+    put('tvFullStatus', text); put('tvStatus', short || text);
   }
+  // Minimized ticker: the tail of the latest line, crossfading when the speaker changes.
   function setCaption(role, text) {
     const el = $('tvCaption'); if (!el) return;
-    el.textContent = text ? `${role === 'user' ? 'You' : 'Voice'}: ${text}` : '';
-    el.className = 'tvCaption ' + (role || '');
+    let t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (t.length > 64) { t = t.slice(-64); const sp = t.indexOf(' '); t = '…' + (sp > 0 && sp < 18 ? t.slice(sp + 1) : t); }
+    const val = t ? `${role === 'user' ? 'You' : 'Voice'}: ${t}` : '';
+    if (el.textContent === val) return;
+    el.textContent = val;
+    const cls = 'tvCaption ' + (role || '');
+    if (el.className !== cls) {
+      el.className = cls;
+      if (UI() && t) UI().enter(el, { duration: 220, y: 4 });
+    }
   }
+  function workingItems(call) { return call.awaiting.filter((a) => !a.done && !a.superseded); }
   function paintStatus() {
     if (!tv) return;
-    const st = tv.engine.state;
-    if (st === 'connecting' || st === 'idle') return setStatus(tv.reconnects ? 'Reconnecting…' : 'Connecting…');
+    const call = tv, st = call.engine.state;
+    syncOrbs();
+    if (call.failed) return setStatus("Couldn't connect");
+    if (st === 'connecting' || st === 'idle') return setStatus(call.reconnects ? 'Reconnecting…' : 'Connecting…');
     if (st !== 'live') return;
-    if (tv.engine.muted) return setStatus('Muted');
-    const working = tv.awaiting.filter((a) => !a.done && !a.superseded);
-    if (working.length) return setStatus(working.some((a) => a.started) ? `${tv.agentName} working${tv.lastTool ? ` · ${tv.lastTool}` : ''}…` : 'Sent to the agent…');
-    if (tv.backend.size) return setStatus('Working…');
+    if (call.engine.muted) return setStatus('Muted');
+    const working = workingItems(call);
+    const mode = bigOrb && call.expanded ? bigOrb.mode : miniOrb ? miniOrb.mode : '';
+    if (mode === 'speaking' && !working.length) return setStatus('Speaking');
+    if (working.length) {
+      if (!working.some((a) => a.started)) return setStatus('Sent to the agent…');
+      return setStatus(`${call.agentName} working${call.lastTool ? ` · ${call.lastTool}` : ''}…`, `${call.agentName}${call.lastTool ? ` · ${call.lastTool}` : ' working'}…`);
+    }
+    if (call.backend.size) return setStatus('Thinking…');
     setStatus('Listening');
   }
+  // Hand the call's state to both orbs; they derive speaking / hearing from the live levels.
+  function syncOrbs() {
+    if (!tv) return;
+    const call = tv, st = call.engine.state;
+    const phase = call.failed ? 'error' : st === 'live' ? (call.engine.muted ? 'muted' : 'live') : (st === 'connecting' || st === 'idle') ? (call.reconnects ? 'reconnecting' : 'connecting') : 'idle';
+    const working = workingItems(call).length > 0;
+    const s = { phase, thinking: call.backend.size > 0, working };
+    orbs((o) => o.set(s));
+    const bar = $('tvBar'); if (bar) bar.classList.toggle('working', working);
+    const dot = $('tvLiveDot'); if (dot) dot.className = 'vLiveDot ' + phase;
+  }
 
-  // Feed (full view): caption bubbles, tool chips, notices — the Voice screen's components.
-  function scrollFeed() { const f = $('tvFeed'); if (f) f.scrollTop = f.scrollHeight; }
+  // Feed (full view): hero captions + tool pills + notices — the Voice screen's components.
+  function scrollFeed() { if (caps) caps.scroll(true); else { const f = $('tvFeed'); if (f) f.scrollTop = f.scrollHeight; } }
   function feedAdd(node) {
     const f = $('tvFeed'); if (!f) return node;
+    if (caps) return caps.add(node);
     f.appendChild(node);
     while (f.childNodes.length > FEED_MAX) f.removeChild(f.firstChild);
-    scrollFeed();
     return node;
   }
   function bubble(cls, text) {
+    if (caps) return caps.line(cls, text);
     const d = document.createElement('div');
     d.className = 'voBub ' + cls; d.textContent = text || '';
     return feedAdd(d);
   }
-  function chip(label) {
+  function chip(label, tool) {
+    if (UI()) return feedAdd(UI().pill(label, tool));
     const d = document.createElement('div'); d.className = 'voToolChip';
-    const spin = document.createElement('span'); spin.className = 'voSpin';
     const name = document.createElement('span'); name.className = 'voToolName'; name.textContent = label;
-    d.appendChild(spin); d.appendChild(name);
-    d._spin = spin; d._name = name;
+    d.appendChild(name); d._name = name;
     return feedAdd(d);
   }
-  function finishChip(c, failed) {
+  function finishChip(c, outcome, o) {
     if (!c || c._done) return;
+    if (UI()) return UI().finishPill(c, outcome, o);
     c._done = true;
-    c.classList.add(failed ? 'fail' : 'ok');
-    try { c._spin.remove(); } catch {}
+    c.classList.add(outcome === 'fail' || outcome === true ? 'fail' : outcome === 'warn' ? 'warn' : 'ok');
   }
-  function resetFeed() { const f = $('tvFeed'); if (f) f.innerHTML = ''; }
+  function resetFeed() { if (caps) caps.clear(); else { const f = $('tvFeed'); if (f) f.innerHTML = ''; } }
   function onCaption(call, seg) {
     call.lastSpeechAt = Date.now();
     if (seg.role === 'user') call.lastUserDeltaAt = Date.now();
-    setCaption(seg.role, seg.text.trim().slice(-220));
+    setCaption(seg.role, seg.text.trim());
     let b = call.bubbles.get(seg.id);
     if (!b) { b = bubble(seg.role === 'user' ? 'user' : 'asst', ''); call.bubbles.set(seg.id, b); }
     b.textContent = seg.text.trimStart();
-    scrollFeed();
+    if (caps) caps.refresh(); else scrollFeed();
     if (seg.final) {
       call.bubbles.delete(seg.id);
-      if (!seg.text.trim()) { try { b.remove(); } catch {} }
+      if (!seg.text.trim()) { if (caps) caps.forget(b); else { try { b.remove(); } catch {} } }
       if (call.vsid && seg.text.trim()) api('/api/voice/event', { method: 'POST', body: JSON.stringify({ vsid: call.vsid, events: [{ ts: Date.now(), kind: seg.role === 'user' ? 'user' : 'assistant', text: seg.text }] }) }).catch(() => {});
     }
   }
@@ -207,25 +288,14 @@
     // Voice is bound to ONE thread: leaving it ends the call.
     if (cur.key !== call.key) { stop('left'); toast('Voice ended — you left that chat'); return; }
     const live = call.engine.state === 'live';
-    const out = live ? call.engine.outputLevel() : 0, inp = live ? call.engine.inputLevel() : 0;
-    const working = call.awaiting.some((a) => !a.done && !a.superseded);
     const now = Date.now();
-    for (const [id, at] of call.backend) if (now - at > 90000) call.backend.delete(id); // lost terminal event
-    const orb = $('tvOrb');
-    if (orb) {
-      orb.style.setProperty('--lvl', Math.max(out, inp).toFixed(3));
-      orb.classList.toggle('speaking', out > 0.04);
-      orb.classList.toggle('hearing', out <= 0.04 && inp > 0.05);
-      orb.classList.toggle('working', working);
-    }
-    const big = $('tvBigOrb');
-    if (big && call.expanded) {
-      const mode = !live ? 'connecting' : out > 0.04 ? 'speaking' : call.backend.size ? 'thinking' : 'listening';
-      if (big.className !== 'voOrb ' + mode) big.className = 'voOrb ' + mode;
-      big.style.setProperty('--lvl', (1 + Math.max(out, inp) * 0.22).toFixed(3));
-      const wrap = $('tvBigWrap'); if (wrap) wrap.classList.toggle('working', working);
+    // The orbs animate themselves; this loop only does bookkeeping a few times a second.
+    if (now - (call.lastTickAt || 0) > 250) {
+      call.lastTickAt = now;
+      for (const [id, at] of call.backend) if (now - at > 90000) call.backend.delete(id); // lost terminal event
+      paintStatus();
       const clock = $('tvClock');
-      if (clock) {
+      if (clock && call.expanded) {
         const s = Math.floor((now - call.startedAt) / 1000);
         const txt = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
         if (clock.textContent !== txt) clock.textContent = txt;
@@ -241,11 +311,17 @@
     let args = fc.arguments;
     if (typeof args === 'string') { try { args = JSON.parse(args || '{}'); } catch { args = {}; } }
     if (fc.name === 'ask_thread_agent') return JSON.stringify(askThreadAgent(call, args || {}));
-    const c = chip(window.LiveVoice.toolLabel(fc.name));
+    const LV = window.LiveVoice;
+    const c = chip(LV.toolLabel(fc.name), fc.name);
     paintStatus();
-    const { output, failed } = await window.LiveVoice.runBoxTool(api, { name: fc.name, args: fc.arguments, call_id: fc.call_id, vsid: call.vsid });
-    finishChip(c, failed);
-    return output;
+    const r = await LV.runBoxTool(api, { name: fc.name, args: fc.arguments, call_id: fc.call_id, vsid: call.vsid });
+    const outcome = r.outcome || (r.failed ? 'fail' : 'ok');
+    const parts = (r.failedParts || []).join(' + ');
+    finishChip(c, outcome, {
+      label: outcome === 'fail' ? (LV.toolLabel(fc.name).replace(/…$/, '') + ' failed') : LV.toolDoneLabel ? LV.toolDoneLabel(fc.name) : undefined,
+      meta: outcome === 'warn' && parts ? `${parts} failed` : undefined, ms: r.ms,
+    });
+    return r.output;
   }
 
   // ask_thread_agent → a 🎙 message in this thread. Answers at once (the agent takes minutes);
@@ -284,10 +360,10 @@
     let body = pending.text;
     if (pending.replaces) {
       pending.replaces.superseded = true;
-      finishChip(pending.replaces.chip, false);
+      finishChip(pending.replaces.chip, 'ok', { label: 'Replaced by the full request', meta: ' ' });
       body += '\n\n(My previous voice message was cut off mid-sentence — this is the full request; it replaces that one.)';
     }
-    const item = { text: pending.text, sentAt: Date.now(), started: false, done: false, superseded: false, nudges: 0, chunks: [''], chip: chip(`Sent to ${call.agentName}`) };
+    const item = { text: pending.text, sentAt: Date.now(), started: false, done: false, superseded: false, nudges: 0, chunks: [''], chip: chip(`Sent to ${call.agentName}`, 'agent') };
     call.lastSent = { text: pending.text, at: Date.now(), item };
     call.awaiting.push(item);
     enqueueText(`${body}\n\n${VOICE_HINT}`, { displayText: `🎙 ${pending.text}` });
@@ -297,8 +373,9 @@
   function finishItem(item, reason) {
     if (!item || item.done) return;
     item.done = true;
-    finishChip(item.chip, reason === 'error');
+    finishChip(item.chip, reason === 'error' ? 'fail' : 'ok', { label: reason === 'error' ? `${tv.agentName} hit an error` : `${tv.agentName} replied` });
     if (item.superseded) { paintStatus(); return; } // the full re-sent request speaks instead
+    if (UI()) UI().haptic(reason === 'error' ? 'error' : 'done'); // no chime mid-call: the mic is open
     const chunks = item.chunks.map((c) => c.trim()).filter(Boolean);
     let final = chunks.length ? chunks[chunks.length - 1] : '';
     if (final.length < 60 && chunks.length > 1) final = chunks.slice(-2).join('\n\n');
@@ -365,7 +442,7 @@
         break;
       case 'blocked': {
         const it = tv.awaiting.filter((a) => !a.done).pop();
-        if (it) { it.done = true; finishChip(it.chip, true); tv.engine.commentary(null, 'That was not sent: this chat is open live on another device. Jimmy needs to close it there or tap Take over here.'); }
+        if (it) { it.done = true; finishChip(it.chip, 'fail', { label: 'Not sent — chat open on another device' }); tv.engine.commentary(null, 'That was not sent: this chat is open live on another device. Jimmy needs to close it there or tap Take over here.'); }
         break;
       }
       case 'done':
@@ -374,7 +451,7 @@
         tv.turn = null;
         if (turn.items.length) {
           const last = turn.items[turn.items.length - 1];
-          turn.items.slice(0, -1).forEach((it) => { it.done = true; finishChip(it.chip, false); });
+          turn.items.slice(0, -1).forEach((it) => { it.done = true; finishChip(it.chip, 'ok', { label: `${tv.agentName} replied` }); });
           last.chunks = turn.chunks;
           finishItem(last, last.error ? 'error' : 'done');
         } else if (turn.typed) {
@@ -450,6 +527,9 @@
     if (!cur || cur.mode === 'bash') { toast('Voice works in a normal chat'); return; }
     if (!window.LiveVoice || !window.RTCPeerConnection) { toast('This browser cannot do live voice'); return; }
     ensureUi();
+    // Inside the tap (iOS only unlocks audio on a gesture), and before the mic opens so the
+    // model never hears the chime.
+    if (UI()) { UI().primeAudio(); UI().cue('start'); }
     const call = {
       key: cur.key, title: cur.title || 'Chat', agentName: agentLabel(cur.agent), awaiting: [], lastUserDeltaAt: 0,
       lastSpeechAt: Date.now(), lastSent: null, pendingSend: null, reconnects: 0, turn: null, lastTool: '', vsid: null,
@@ -458,15 +538,30 @@
     tv = call;
     resetFeed(); setCaption('', '');
     $('tvTitle').textContent = call.title;
-    for (const id of ['tvMute', 'tvFMute']) { const b = $(id); if (b) b.classList.remove('active'); }
+    for (const id of ['tvMute', 'tvFMute']) {
+      const b = $(id); if (!b) continue;
+      b.classList.remove('active'); b.setAttribute('aria-pressed', 'false'); b.setAttribute('aria-label', 'Mute');
+      if (I('mic')) b.innerHTML = I('mic');
+    }
     call.engine = makeEngine(call);
-    expand();
-    setStatus('Connecting…');
+    // Levels for the orbs come from whichever engine is current (reconnects swap it).
+    orbs((o) => { o.levels = () => (tv === call && call.engine.state === 'live' ? { inp: call.engine.inputLevel(), out: call.engine.outputLevel() } : { inp: 0, out: 0 }); });
+    const clock = $('tvClock'); if (clock) clock.textContent = '0:00';
+    // Entrance: the view grows out of the composer's voice button.
+    expand({ from: $('threadVoiceBtn') });
+    setStatus('Connecting…'); syncOrbs();
     call.raf = requestAnimationFrame(animate);
     call.pollIv = setInterval(() => pollUpdates(call), 5000);
     try { call.wake = await navigator.wakeLock.request('screen'); } catch {}
     await connect(call);
   }
+  // iOS drops the screen wake lock whenever the app is backgrounded; take it back on return.
+  try {
+    document.addEventListener('visibilitychange', async () => {
+      if (!tv || document.visibilityState !== 'visible') return;
+      try { tv.wake = await navigator.wakeLock.request('screen'); } catch {}
+    });
+  } catch {}
   async function connect(call) {
     try {
       const info = await call.engine.start({ scope: 'thread', sessionId: cur.id || '', agent: cur.agent || 'claude', title: cur.title || '', cwd: cur.cwd || '', vsid: call.vsid || undefined });
@@ -478,16 +573,24 @@
       call.engine.commentary(null, call.reconnects
         ? `The voice connection was restored. Do not greet again; say "I'm back" and keep listening.${pending ? ' The thread\'s agent is still working on the last request.' : ''}`
         : `Greet Jimmy in a few words — say you are on this chat and ready${agentBusy(call) ? ', and that the agent is still finishing an earlier turn, so new requests will queue behind it' : ''} — then pause and listen.`);
-      if (call.reconnects) bubble('notice', 'Reconnected.');
+      if (call.reconnects) { bubble('notice', 'Reconnected.'); if (UI()) UI().haptic('tap'); }
+      else if (UI()) UI().haptic('start');
       paintStatus();
     } catch (e) {
-      if (tv === call) { toast(String((e && e.message) || e).slice(0, 140)); cleanup('failed'); }
+      if (tv !== call) return;
+      toast(String((e && e.message) || e).slice(0, 140));
+      // Let the orb show the failure for a beat before the view closes itself.
+      call.failed = true; paintStatus();
+      if (UI()) UI().haptic('error');
+      if (UI() && call.expanded && typeof $('tvFull').animate === 'function') setTimeout(() => { if (tv === call) cleanup('failed'); }, 1400);
+      else cleanup('failed');
     }
   }
   function stop(reason) {
     if (!tv) return;
     tv.stopping = true;
     try { tv.engine.close(); } catch {}
+    if (UI() && reason === 'ended') { UI().haptic('end'); UI().cue('end'); } // mic already released
     cleanup(reason);
   }
   function cleanup(reason) {
@@ -500,6 +603,15 @@
     if (reason === 'left') call.histPushed = false;
     else dropHistoryEntry(false);
     tv = null;
+    // Graceful exit: whichever surface is showing eases out before it hides.
+    const full = $('tvFull'), bar = $('tvBar');
+    const leaving = UI() && !full.classList.contains('hidden') ? full : UI() && !bar.classList.contains('hidden') ? bar : null;
+    if (leaving && typeof leaving.animate === 'function') {
+      document.body.classList.remove('tvFullOpen');
+      const b = $('threadVoiceBtn'); if (b) b.classList.remove('active');
+      UI().exit(leaving, leaving === full ? { duration: 280, scale: 0.97 } : { duration: 200, scale: 0.98, y: 8 }).then(() => { if (!tv) render(); });
+      return;
+    }
     render();
   }
 
