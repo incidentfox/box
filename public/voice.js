@@ -518,7 +518,7 @@ async function voStart() {
 function voLiveCaption(seg) {
   let b = voLiveBubbles.get(seg.id);
   if (!b) { b = voBubble(seg.role === 'user' ? 'user' : 'asst', ''); voLiveBubbles.set(seg.id, b); }
-  b.textContent = seg.text;
+  b.textContent = seg.text.trimStart(); // GPT-Live deltas lead with a space; pre-wrap would indent it
   voScroll();
   if (seg.final) {
     voLiveBubbles.delete(seg.id);
