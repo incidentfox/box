@@ -1349,41 +1349,10 @@ textarea.acctInput { resize: vertical; }
 .voStatus.live { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
 .voStatus.live.muted { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 .voStatus.connecting, .voStatus.reconnecting { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); animation: voBlink 1.2s ease-in-out infinite; }
-@keyframes voBlink { 50% { opacity: .45; } }
 .voClock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; margin-left: 8px; }
 .voCost { color: var(--muted); font-size: 12px; }
 .voBanner { padding: 8px 14px; text-align: center; font-size: 13px; background: color-mix(in srgb, var(--accent) 10%, var(--bg)); color: var(--accent); border-bottom: 1px solid var(--line); }
-.voFeed { flex: 1; overflow-y: auto; padding: 14px 14px calc(20px + var(--safe-b)); display: flex; flex-direction: column; gap: 10px; -webkit-overflow-scrolling: touch; }
-
-
-.voHint { margin: auto; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.6; padding: 30px 20px; }
-.voBub { max-width: 86%; padding: 10px 14px; border-radius: 16px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
-.voBub.user { align-self: flex-end; background: var(--user-bub); color: var(--ink); border-bottom-right-radius: 5px; }
-.voBub.asst { align-self: flex-start; background: var(--card); border: 1px solid var(--line); color: var(--ink); border-bottom-left-radius: 5px; }
-.voBub.notice { align-self: center; background: transparent; color: var(--muted); font-size: 12.5px; padding: 2px 8px; }
-.voToolChip { align-self: flex-start; display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); background: var(--subtle); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; }
-.voToolChip.ok { color: var(--green); }
-.voToolChip.fail { color: #c0392b; }
-.voSpin { width: 11px; height: 11px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: voSpin .8s linear infinite; }
-@keyframes voSpin { to { transform: rotate(360deg); } }
-.voDock { display: flex; align-items: center; justify-content: center; gap: 34px; padding: 14px 0 calc(18px + var(--safe-b)); border-top: 1px solid var(--line); background: var(--bg); }
-.voCtl { width: 62px; height: 62px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); color: var(--ink); display: flex; align-items: center; justify-content: center; font-size: 20px; }
-.voCtl:active { transform: scale(.94); }
-.voCtl.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-.voCtl svg { width: 24px; height: 24px; }
-.voEndBtn:not(:disabled) { background: #d64541; border-color: #d64541; color: #fff; }
-.voEndBtn:disabled { opacity: .35; }
-.voOrbBtn { position: relative; width: 132px; height: 132px; border-radius: 50%; border: none; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
-.voOrb { --lvl: 1; width: 104px; height: 104px; border-radius: 50%; background: radial-gradient(circle at 32% 30%, color-mix(in srgb, var(--accent) 82%, #fff), var(--accent)); box-shadow: 0 4px 22px color-mix(in srgb, var(--accent) 40%, transparent); transition: transform .12s ease, box-shadow .3s ease, background .3s ease; transform: scale(var(--lvl)); }
-.voOrb.off, .voOrb.ended { background: radial-gradient(circle at 32% 30%, #b9b3ac, #8a8580); box-shadow: none; }
-.voOrb.connecting, .voOrb.reconnecting { animation: voPulse 1.1s ease-in-out infinite; }
-.voOrb.listening { animation: voBreathe 3.2s ease-in-out infinite; }
-.voOrb.thinking { background: radial-gradient(circle at 32% 30%, #e8c66a, #d9a63f); box-shadow: 0 4px 22px rgba(217,166,63,.4); animation: voPulse 1s ease-in-out infinite; }
-.voOrb.speaking { background: radial-gradient(circle at 32% 30%, color-mix(in srgb, var(--green) 78%, #fff), var(--green)); box-shadow: 0 4px 26px color-mix(in srgb, var(--green) 45%, transparent); }
-@keyframes voPulse { 50% { transform: scale(calc(var(--lvl) * .92)); opacity: .8; } }
-@keyframes voBreathe { 50% { transform: scale(calc(var(--lvl) * 1.05)); } }
-.voOrbLabel { position: absolute; bottom: -4px; left: 0; right: 0; text-align: center; font-size: 13px; color: var(--muted); pointer-events: none; }
-.voOrbBtn.clickable .voOrbLabel { color: var(--ink); font-weight: 600; }
+/* (the Voice screen body — stage, captions, pills, dock — uses the shared voice kit at the end of this file) */
 
 /* ---------- team / shared sessions ---------- */
 
@@ -1501,43 +1470,175 @@ body.guestMode .sSelect, body.guestMode .sMore { display: none; }
 .waitTerminal summary { cursor: pointer; padding: 5px 0; }
 .waitTerminal .waitDialog { margin-top: 8px; color: var(--ink); }
 
-/* in-thread voice mode (thread-voice.js): minimized bar above the composer… */
-.tvBar { display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 6px 8px 6px 6px; margin-bottom: 8px; box-shadow: 0 4px 18px var(--shadow, rgba(0,0,0,.06)); }
-.tvBar.hidden { display: none; }
-.tvExpand { flex: 1; min-width: 0; display: flex; align-items: center; gap: 11px; background: transparent; border: 0; padding: 2px 4px; color: inherit; text-align: left; font: inherit; cursor: pointer; border-radius: 16px; }
-.tvExpand:active { background: var(--subtle); }
-.tvExpandIc { flex: none; color: var(--muted); display: flex; }
-.tvExpandIc svg { width: 18px; height: 18px; }
-.tvOrb { --lvl: 0; position: relative; display: block; width: 34px; height: 34px; flex: none; border-radius: 50%; background: radial-gradient(circle at 35% 35%, color-mix(in srgb, var(--accent) 70%, #fff), var(--accent)); transform: scale(calc(0.86 + var(--lvl) * 0.5)); transition: transform .08s linear, filter .2s; }
-.tvOrb span { position: absolute; inset: -5px; border-radius: 50%; border: 2px solid var(--accent); opacity: 0; }
-.tvOrb.working span { animation: tvRing 1.4s ease-out infinite; }
-.tvOrb.hearing { filter: hue-rotate(-25deg) saturate(1.2); }
-@keyframes tvRing { 0% { transform: scale(.9); opacity: .55; } 100% { transform: scale(1.35); opacity: 0; } }
-.tvMain { flex: 1; min-width: 0; display: block; }
-.tvStatus { display: block; font-size: 13px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tvCaption { display: block; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 1.3em; }
-.tvBar .iconbtn.active { color: #e0392b; }
-.tvEndBtn { flex: none; padding: 8px 14px; border-radius: 16px; font-size: 14px; font-weight: 600; background: #e0392b; color: #fff; }
-/* …and the full-screen view (ChatGPT-style), reusing the Voice screen's orb, bubbles, chips, dock. */
-.tvFull { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); padding-top: var(--safe-t); }
+/* ===== voice kit (public/voice-ui.js): the shared look of the Voice screen and in-thread voice =====
+   A living canvas orb, hero captions (the newest line big, earlier turns receding), animated tool
+   pills, a round-button dock, and the minimized bar. Tokens first; dark mode overrides below. */
+:root {
+  --v-user: #2f66d0;
+  --v-ctl: color-mix(in srgb, var(--ink) 6.5%, var(--bg));
+  --v-ctl-press: color-mix(in srgb, var(--ink) 12%, var(--bg));
+  --v-end: #e5484d;
+  --v-ok: #2f9e55;
+  --v-warn: #c7860c;
+  --v-fail: #d93d42;
+  --v-orb: min(46vw, 25vh, 196px);       /* visible orb diameter (the canvas is 1/0.6 of it: room for the halo) */
+  --v-ease: cubic-bezier(.2,.85,.25,1);
+}
+html[data-theme="dark"] {
+  --v-user: #8fb6ff;
+  --v-ctl: color-mix(in srgb, var(--ink) 9%, var(--bg));
+  --v-ctl-press: color-mix(in srgb, var(--ink) 16%, var(--bg));
+  --v-end: #f0524f;
+  --v-ok: #3fbf6a;
+  --v-warn: #f2b33d;
+  --v-fail: #ff6b6b;
+}
+
+/* --- stage: orb + one-line state label --- */
+.vStage { flex: none; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0; position: relative; z-index: 0; }
+.vOrbWrap { display: block; width: calc(var(--v-orb) / .6); height: calc(var(--v-orb) / .6); margin: calc(var(--v-orb) * -.22) 0 calc(var(--v-orb) * -.3); pointer-events: none; will-change: transform; }
+.vOrb { display: block; width: 100%; height: 100%; }
+.vOrbBtn { border: 0; background: none; padding: 0; color: inherit; border-radius: 50%; cursor: pointer; display: block; }
+.vOrbBtn .vOrbWrap { pointer-events: none; }
+.vState { position: relative; z-index: 1; min-height: 22px; margin-bottom: 2px; max-width: min(86vw, 520px); padding: 0 12px; font-size: 15.5px; font-weight: 560; letter-spacing: -.01em; color: var(--muted); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color .3s; }
+.vState.cta { color: var(--ink); }
+
+/* --- captions --- */
+.vCapsWrap { position: relative; flex: 1; min-height: 0; display: flex; width: 100%; max-width: 680px; margin: 0 auto; }
+.vCaps { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 14px; padding: 34px 24px 18px; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, transparent 18px, rgba(0,0,0,.4) 46px, #000 104px); mask-image: linear-gradient(to bottom, transparent 0, transparent 18px, rgba(0,0,0,.4) 46px, #000 104px); }
+.vCaps::-webkit-scrollbar { display: none; }
+.vCaps > :first-child { margin-top: auto; }
+.vCaps .voBub { align-self: stretch; max-width: 100%; margin: 0; padding: 0; background: none; border: 0; border-radius: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 16px; line-height: 1.4; font-weight: 450; letter-spacing: -.012em; color: var(--ink); opacity: .42;
+  -webkit-user-select: text; user-select: text;
+  transition: font-size .42s var(--v-ease), line-height .42s var(--v-ease), opacity .42s ease, color .3s ease; }
+.vCaps .voBub.user { color: var(--v-user); }
+.vCaps .voBub.user::before { content: 'You'; display: block; margin-bottom: 1px; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; opacity: .8; }
+.vCaps .voBub.prev { font-size: 18px; opacity: .66; }
+.vCaps .voBub.now { font-size: 27px; line-height: 1.27; font-weight: 580; letter-spacing: -.022em; opacity: 1; }
+.vCaps .voBub.now.long { font-size: 22px; line-height: 1.32; }
+.vCaps .voBub.notice { align-self: center; text-align: center; font-size: 12.5px; line-height: 1.4; color: var(--muted); opacity: 1; padding: 2px 10px; }
+.vCaps .voBub:empty { display: none; }
+.vCaps .voHint { margin: auto 0; align-self: center; max-width: 300px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.55; padding: 8px 6px; animation: vPillIn .6s var(--v-ease) .35s both; }
+
+/* --- "Latest" pill when scrolled back --- */
+.vJump { position: absolute; left: 50%; bottom: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 4px; height: 36px; padding: 0 15px 0 11px; border: 0; border-radius: 999px;
+  background: var(--ink); color: var(--bg); font: inherit; font-size: 13px; font-weight: 650; box-shadow: 0 8px 24px var(--shadow);
+  opacity: 0; transform: translate(-50%, 14px) scale(.96); pointer-events: none; transition: opacity .25s ease, transform .3s var(--v-ease); }
+.vJump.show { opacity: 1; transform: translate(-50%, 0) scale(1); pointer-events: auto; }
+.vJump svg { width: 16px; height: 16px; }
+
+/* --- tool pills --- */
+.voToolChip, .vPill { align-self: flex-start; display: inline-flex; align-items: center; gap: 9px; max-width: 100%; min-height: 34px; padding: 4px 14px 4px 5px; border-radius: 999px;
+  background: color-mix(in srgb, var(--card) 82%, transparent); border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  font-size: 13.5px; font-weight: 520; color: var(--ink); letter-spacing: -.005em; animation: vPillIn .45s var(--v-ease) both; }
+.voToolName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vPillBadge { position: relative; flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--muted); transition: background .3s ease, color .3s ease; }
+.vPillIc { display: grid; place-items: center; }
+.vPillIc svg { width: 14px; height: 14px; display: block; }
+.vPill .voSpin { position: absolute; inset: -3px; width: auto; height: auto; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 35%, transparent); animation: voSpin .85s linear infinite; }
+@keyframes voSpin { to { transform: rotate(360deg); } }
+.vPill.run .voToolName { color: transparent; background: linear-gradient(100deg, var(--muted) 0%, var(--muted) 38%, var(--ink) 50%, var(--muted) 62%, var(--muted) 100%) 0 0 / 260% 100%; -webkit-background-clip: text; background-clip: text; animation: vShimmer 1.9s linear infinite; }
+@keyframes vShimmer { from { background-position: 100% 0; } to { background-position: -160% 0; } }
+.vPill.done .vPillBadge { color: #fff; animation: vPop .5s cubic-bezier(.3,1.7,.5,1); }
+.vPill.ok .vPillBadge { background: var(--v-ok); }
+.vPill.warn .vPillBadge { background: var(--v-warn); }
+.vPill.fail .vPillBadge { background: var(--v-fail); }
+.vPill.done .voToolName { color: color-mix(in srgb, var(--ink) 78%, var(--bg)); }
+.vPill.fail { border-color: color-mix(in srgb, var(--v-fail) 40%, var(--line)); }
+.vPill.warn { border-color: color-mix(in srgb, var(--v-warn) 40%, var(--line)); }
+.vPillMeta { flex: none; font-size: 12px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.vPillMeta:empty { display: none; }
+.vPill.warn .vPillMeta { color: var(--v-warn); }
+@keyframes vPillIn { from { opacity: 0; transform: translateY(8px) scale(.94); } }
+@keyframes vPop { 0% { transform: scale(.55); } 100% { transform: scale(1); } }
+
+/* --- dock: round controls --- */
+.vDock { flex: none; display: flex; align-items: center; justify-content: center; gap: 32px; padding: 12px 0 calc(16px + var(--safe-b)); }
+.vCtl { width: 64px; height: 64px; flex: none; border: 0; border-radius: 50%; background: var(--v-ctl); color: var(--ink); display: grid; place-items: center; cursor: pointer;
+  transition: transform .18s var(--v-ease), background .2s ease, color .2s ease, opacity .2s ease; }
+.vCtl svg { width: 26px; height: 26px; }
+.vCtl:active { transform: scale(.9); background: var(--v-ctl-press); }
+.vCtl.active { background: var(--ink); color: var(--bg); }
+.vCtl.vEnd { background: var(--v-end); color: #fff; }
+.vCtl.vEnd:active { background: color-mix(in srgb, var(--v-end) 85%, #000); }
+.vCtl:disabled { opacity: .3; pointer-events: none; }
+
+.vGo { height: 58px; display: inline-flex; align-items: center; gap: 10px; padding: 0 28px 0 22px; border: 0; border-radius: 29px; background: var(--ink); color: var(--bg);
+  font: inherit; font-size: 16.5px; font-weight: 650; letter-spacing: -.01em; cursor: pointer; box-shadow: 0 8px 26px var(--shadow); transition: transform .18s var(--v-ease); }
+.vGo svg { width: 22px; height: 22px; }
+.vGo:active { transform: scale(.95); }
+
+/* --- full-screen thread voice --- */
+.tvFull { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); color: var(--ink);
+  padding: var(--safe-t) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px); }
 .tvFull.hidden { display: none; }
+.tvFull.tvClosing { pointer-events: none; }
 body.tvFullOpen { overflow: hidden; }
-.tvFullBar { display: flex; align-items: center; gap: 6px; padding: 8px 12px 6px 6px; min-height: 52px; }
-.tvFullBar .iconbtn svg { width: 24px; height: 24px; }
-.tvFullHead { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; text-align: center; }
-.tvTitle { max-width: 100%; font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tvFullStatus { max-width: 100%; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tvClock { flex: none; min-width: 40px; text-align: right; margin-left: 0; }
-.tvStage { flex: none; display: flex; align-items: center; justify-content: center; height: min(34vh, 260px); min-height: 150px; }
-.tvBigWrap { position: relative; display: flex; align-items: center; justify-content: center; }
-.tvBigWrap .voOrb { width: min(42vw, 168px); height: min(42vw, 168px); }
-.tvBigWrap::after { content: ''; position: absolute; inset: -14px; border-radius: 50%; border: 2px solid var(--accent); opacity: 0; pointer-events: none; }
-.tvBigWrap.working::after { animation: tvRing 1.8s ease-out infinite; }
-.tvFeed { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 8px 16px 16px; width: 100%; max-width: 680px; margin: 0 auto; box-sizing: border-box; -webkit-overflow-scrolling: touch; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px); mask-image: linear-gradient(to bottom, transparent 0, #000 28px); }
-.tvFeed > :first-child { margin-top: auto; }
-.tvFeed .voToolChip { max-width: 100%; box-sizing: border-box; }
-.tvFeed .voToolName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tvDock { gap: 28px; }
-@media (max-width: 360px) { .tvDock { gap: 20px; } .tvDock .voCtl { width: 56px; height: 56px; } .tvExpandIc { display: none; } }
-@media (max-height: 560px) { .tvStage { height: 130px; min-height: 0; } .tvBigWrap .voOrb { width: 96px; height: 96px; } }
+.tvFullBar { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: 4px; padding: 6px 8px; min-height: 56px; }
+.vIconBtn { flex: none; width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent; color: var(--ink); display: grid; place-items: center; cursor: pointer; transition: background .2s; }
+.vIconBtn svg { width: 24px; height: 24px; }
+.vIconBtn:active { background: var(--v-ctl); }
+.vIconBtn.vSpacer { visibility: hidden; }
+.tvFullHead { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; }
+.tvTitle { max-width: 100%; font-size: 15px; font-weight: 650; letter-spacing: -.012em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvSub { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tvClock { min-width: 0; text-align: left; }
+.vLiveDot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: background .3s, box-shadow .3s; }
+.vLiveDot.live { background: #30c45a; box-shadow: 0 0 0 3px color-mix(in srgb, #30c45a 22%, transparent); }
+.vLiveDot.connecting, .vLiveDot.reconnecting { background: #f0a040; animation: voBlink 1.1s ease-in-out infinite; }
+.vLiveDot.error { background: var(--v-fail); }
+@keyframes voBlink { 50% { opacity: .35; } }
+
+/* --- minimized bar above the composer --- */
+.tvBar { position: relative; display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 4px 5px 4px 3px; border-radius: 27px; overflow: hidden;
+  background: color-mix(in srgb, var(--card) 88%, transparent); -webkit-backdrop-filter: blur(18px) saturate(1.5); backdrop-filter: blur(18px) saturate(1.5);
+  border: 1px solid var(--line); box-shadow: 0 6px 26px var(--shadow, rgba(0,0,0,.08)); }
+.tvBar.hidden { display: none; }
+.tvBar::after { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px; opacity: 0; transition: opacity .4s;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent) no-repeat; background-size: 38% 100%; }
+.tvBar.working::after { opacity: .9; animation: vSweep 1.7s ease-in-out infinite; }
+@keyframes vSweep { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+.tvExpand { flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 0; background: transparent; border: 0; border-radius: 22px; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.tvExpand:active { background: var(--v-ctl); }
+.tvOrbBox { flex: none; width: 46px; height: 46px; display: grid; place-items: center; }
+.tvOrb { display: block; width: 46px; height: 46px; }
+.tvMain { flex: 1; min-width: 0; display: block; }
+.tvStatus { display: block; font-size: 13.5px; font-weight: 650; letter-spacing: -.01em; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvCaption { display: block; min-height: 1.3em; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tvCaption.user { color: var(--v-user); }
+.tvExpandIc { flex: none; display: grid; place-items: center; color: var(--muted); }
+.tvExpandIc svg { width: 18px; height: 18px; }
+.tvMiniBtn { flex: none; width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--v-ctl); color: var(--ink); display: grid; place-items: center; cursor: pointer; transition: transform .15s, background .2s, color .2s; }
+.tvMiniBtn svg { width: 20px; height: 20px; }
+.tvMiniBtn:active { transform: scale(.92); }
+.tvMiniBtn.active { background: var(--ink); color: var(--bg); }
+.tvEndBtn { flex: none; height: 44px; padding: 0 17px; border: 0; border-radius: 22px; background: var(--v-end); color: #fff; font: inherit; font-size: 14.5px; font-weight: 650; cursor: pointer; transition: transform .15s; }
+.tvEndBtn:active { transform: scale(.95); }
 #threadVoiceBtn.active { color: var(--accent); }
+
+/* --- Voice screen (voice.js) on the same kit --- */
+#voice { background: var(--bg); }
+#voice .vStage { padding-top: 6px; }
+#voice .vCapsWrap { max-width: 720px; }
+
+@media (max-width: 360px) {
+  :root { --v-orb: min(44vw, 23vh, 150px); }
+  .vDock { gap: 22px; }
+  .vCtl { width: 58px; height: 58px; }
+  .vCaps { padding-inline: 18px; }
+  .vCaps .voBub.now { font-size: 23px; }
+  .vCaps .voBub.now.long { font-size: 19.5px; }
+  .tvExpandIc { display: none; }
+  .tvEndBtn { padding: 0 14px; }
+}
+@media (max-height: 600px) {
+  :root { --v-orb: min(40vw, 21vh, 140px); }
+  .vDock { padding-top: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vPill, .voToolChip, .vPill .voSpin, .vPill.run .voToolName, .vPill.done .vPillBadge, .tvBar.working::after, .vLiveDot { animation: none !important; }
+  .vPill.run .voToolName { color: var(--muted); background: none; }
+  .vCaps .voBub, .vJump { transition: none; }
+}

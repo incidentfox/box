@@ -224,16 +224,23 @@ function voBuild() {
     <span id="voClock" class="voClock"></span>
   </header>
   <div id="voBanner" class="voBanner hidden"></div>
-  <div id="voFeed" class="voFeed">
-    <div class="voHint">Talk to your box like a colleague on a call.<br>
-    It sees your agents, the board, research, the brain — and it can start work while you drive.</div>
+  <div class="vStage">
+    <button id="voMain" class="vOrbBtn" type="button" aria-label="Start voice"><span class="vOrbWrap"><canvas id="voOrb" class="vOrb" aria-hidden="true"></canvas></span></button>
+    <div id="voOrbLabel" class="vState cta" aria-live="polite">Tap to start</div>
   </div>
-  <div class="voDock">
-    <button id="voMute" class="voCtl" title="mute"><span data-icon="mic"></span></button>
-    <button id="voMain" class="voOrbBtn"><span id="voOrb" class="voOrb"></span><span id="voOrbLabel" class="voOrbLabel">Start</span></button>
-    <button id="voEnd" class="voCtl voEndBtn" title="end" disabled><span data-icon="close"></span></button>
+  <div class="vCapsWrap"><div id="voFeed" class="vCaps"></div><button id="voJump" class="vJump" type="button">${VoiceUI.ICON.down}<span>Latest</span></button></div>
+  <div class="vDock">
+    <button id="voGo" class="vGo" type="button">${VoiceUI.ICON.mic}<span>Start talking</span></button>
+    <button id="voMute" class="vCtl hidden" type="button" title="mute" aria-label="Mute" aria-pressed="false">${VoiceUI.ICON.mic}</button>
+    <button id="voEnd" class="vCtl vEnd voEndBtn hidden" type="button" title="end" aria-label="End voice" disabled>${VoiceUI.ICON.end}</button>
   </div>`;
   paintIcons(root);
+  voOrbUi = VoiceUI.createOrb($('voOrb'));
+  voOrbUi.levels = voOrbLevels;
+  voOrbUi.onMode = voPaintOrbLabel;
+  voCaps = VoiceUI.createCaptions($('voFeed'), $('voJump'), { hint: 'Talk to your box like a colleague on a call. It sees your agents, the board, research and the brain, and it can start work while you drive.' });
+  voCaps.clear(); // shows the hint
+  $('voGo').onclick = () => { if (voState === 'off' || voState === 'ended') voStart(); };
   $('voBack').onclick = () => {
     if (voState === 'off' || voState === 'ended') voStopLivekitMicWarmup();
     history.back();
@@ -273,20 +280,63 @@ function openVoice() {
 
 /* ---------- UI helpers ---------- */
 
+// The orb (public/voice-ui.js) derives listening / hearing / speaking from the live levels;
+// voOrbMode only adds hints the levels can't show (backend thinking, TTS that has no analyser).
+let voOrbUi = null, voCaps = null, voOrbThinking = false, voOrbHint = '', voOutLevel = 0;
+function voOrbLevels() {
+  if (voLive && voLive.state === 'live') return { inp: voLive.inputLevel(), out: voLive.outputLevel() };
+  if (voAnalyser) {
+    try {
+      const data = voAnalyser._buf || (voAnalyser._buf = new Uint8Array(voAnalyser.frequencyBinCount));
+      voAnalyser.getByteFrequencyData(data);
+      let sum = 0; for (let i = 0; i < data.length; i++) sum += data[i];
+      voOutLevel = Math.min(1, (sum / data.length) / 90);
+    } catch { voOutLevel = 0; }
+  }
+  return { inp: 0, out: voOutLevel };
+}
+function voSyncOrb() {
+  if (!voOrbUi) return;
+  const phase = voState === 'live' ? (voMuted ? 'muted' : 'live') : voState === 'connecting' ? 'connecting' : voState === 'reconnecting' ? 'reconnecting' : 'idle';
+  voOrbUi.set({ phase, thinking: voState === 'live' && voOrbThinking, hint: voOrbHint });
+}
+function voPaintOrbLabel() {
+  const el = $('voOrbLabel'); if (!el) return;
+  const st = voState;
+  let txt;
+  if (st === 'off') txt = 'Tap to start';
+  else if (st === 'ended') txt = 'Tap to start again';
+  else if (st === 'connecting') txt = 'Connecting…';
+  else if (st === 'reconnecting') txt = 'Reconnecting…';
+  else if (voMuted) txt = 'Muted';
+  else if (voMode === 'adapter' && voOrbUi && voOrbUi.mode === 'listening') txt = 'Tap the orb to end your turn';
+  else txt = (voOrbUi && VoiceUI.MODE_LABEL[voOrbUi.mode]) || 'Listening';
+  if (el.textContent !== txt) el.textContent = txt;
+  el.classList.toggle('cta', st === 'off' || st === 'ended');
+}
 function voSetState(st) {
+  const prev = voState;
   voState = st;
   const pill = $('voStatus');
   pill.textContent = st === 'live' ? (voMuted ? 'muted' : 'live') : st;
   pill.className = 'voStatus ' + st + (voMuted && st === 'live' ? ' muted' : '');
-  const orb = $('voOrb');
-  orb.className = 'voOrb ' + (st === 'live' ? 'listening' : st);
-  $('voOrbLabel').textContent = st === 'off' ? 'Start' : st === 'ended' ? 'Restart' : st === 'connecting' ? '…' : st === 'reconnecting' ? '…' : (st === 'live' && voMode === 'adapter' ? 'End turn' : '');
+  if (st !== 'live') { voOrbThinking = false; voOrbHint = ''; }
+  const idle = st === 'off' || st === 'ended';
   $('voEnd').disabled = !(st === 'live' || st === 'connecting' || st === 'reconnecting');
-  $('voMain').classList.toggle('clickable', st === 'off' || st === 'ended');
+  $('voMain').classList.toggle('clickable', idle);
+  $('voMain').setAttribute('aria-label', idle ? 'Start voice' : voMode === 'adapter' ? 'End your turn' : 'Voice');
+  $('voGo').classList.toggle('hidden', !idle);
+  $('voMute').classList.toggle('hidden', idle);
+  $('voEnd').classList.toggle('hidden', idle);
+  if (prev !== st && idle !== (prev === 'off' || prev === 'ended')) VoiceUI.enter($('voEnd').parentNode, { duration: 260, y: 8 });
+  if (prev !== 'live' && st === 'live' && prev === 'connecting') VoiceUI.haptic('start');
+  voSyncOrb(); voPaintOrbLabel();
 }
 function voOrbMode(mode) { // listening | thinking | speaking (only while live)
   if (voState !== 'live') return;
-  $('voOrb').className = 'voOrb ' + mode;
+  voOrbThinking = mode === 'thinking';
+  voOrbHint = mode === 'speaking' ? 'speaking' : '';
+  voSyncOrb();
 }
 function voBanner(msg) {
   const b = $('voBanner');
@@ -294,20 +344,18 @@ function voBanner(msg) {
   b.textContent = msg; b.classList.remove('hidden');
 }
 function voFeedEl() { return $('voFeed'); }
-function voScroll() { const f = voFeedEl(); f.scrollTop = f.scrollHeight; }
-function voBubble(cls, text) {
-  const d = document.createElement('div');
-  d.className = 'voBub ' + cls;
-  d.textContent = text || '';
-  voFeedEl().appendChild(d); voScroll();
-  return d;
-}
-function voChip(label) {
-  const d = document.createElement('div');
-  d.className = 'voToolChip';
-  d.innerHTML = `<span class="voSpin"></span><span class="voToolName">${esc(label)}</span>`;
-  voFeedEl().appendChild(d); voScroll();
-  return d;
+// Captions re-pick the hero line on every update (callers mutate bubble text, then scroll).
+function voScroll() { if (voCaps) voCaps.refresh(); }
+function voBubble(cls, text) { return voCaps.line(cls, text || ''); }
+function voChip(label, tool) { return voCaps.pill(label, tool); }
+// Resolve a tool pill from runBoxTool's result (or a plain failed flag).
+function voFinishChip(chip, r, name) {
+  const outcome = typeof r === 'boolean' ? (r ? 'fail' : 'ok') : (r.outcome || (r.failed ? 'fail' : 'ok'));
+  const parts = (r && r.failedParts || []).join(' + ');
+  VoiceUI.finishPill(chip, outcome, {
+    label: name ? (outcome === 'fail' ? LiveVoice.toolLabel(name).replace(/…$/, '') + ' failed' : LiveVoice.toolDoneLabel(name)) : undefined,
+    meta: outcome === 'warn' && parts ? `${parts} failed` : undefined, ms: r && r.ms,
+  });
 }
 function voNotice(text) { voBubble('notice', text); }
 
@@ -430,7 +478,8 @@ async function voStart() {
   voStopStats(); voResponseDiag = null; voLastAudioTranscriptAt = 0;
   voResetAudioGate(); voRecentAsst = []; voIncidents = { selfInterrupt: 0, misattribution: 0 }; voDropCurrentResponse = false;
   voStartedAt = Date.now();
-  voFeedEl().innerHTML = '';
+  voCaps.clear();
+  VoiceUI.primeAudio(); VoiceUI.cue('start'); // in the tap (iOS audio unlock), before the mic opens
   try {
     const r = await api('/api/voice/status');
     const st = await r.json();
@@ -483,22 +532,14 @@ function voLiveCaption(seg) {
   }
 }
 async function voLiveTool({ name, arguments: args, call_id }) {
-  const chip = voChip(VO_TOOL_LABELS[name] || name);
-  const { output, failed, ms } = await LiveVoice.runBoxTool(api, { name, args, call_id, vsid: voVsid });
-  voDiag('live', 'tool_done', { name, failed, ms, outputChars: output.length });
-  chip.classList.add(failed ? 'fail' : 'ok');
-  const spin = chip.querySelector('.voSpin'); if (spin) spin.remove();
-  return output;
+  const chip = voChip(VO_TOOL_LABELS[name] || name, name);
+  const r = await LiveVoice.runBoxTool(api, { name, args, call_id, vsid: voVsid });
+  voDiag('live', 'tool_done', { name, failed: r.failed, outcome: r.outcome, ms: r.ms, outputChars: r.output.length });
+  voFinishChip(chip, r, name);
+  return r.output;
 }
-function voLiveAnimate() {
-  if (!voLive || voMode !== 'live') return;
-  if (voState === 'live') {
-    const out = voLive.outputLevel();
-    const orb = $('voOrb');
-    if (!orb.classList.contains('thinking') || out > 0.04) voOrbMode(out > 0.04 ? 'speaking' : 'listening');
-  }
-  voLiveRaf = requestAnimationFrame(voLiveAnimate);
-}
+// The orb reads GPT-Live's levels itself (voOrbLevels); nothing to drive per frame here.
+function voLiveAnimate() { voLiveRaf = 0; }
 async function voStartLive(isReconnect) {
   voSetState(isReconnect ? 'reconnecting' : 'connecting');
   const engine = LiveVoice.create({
@@ -942,12 +983,12 @@ async function voAdapterSubmit(blob) {
       voScroll();
     }
     if (j.text) { voAsstText = j.text; voBubble('asst', j.text); voRememberAsst(j.text); }
-    chip.classList.add('ok'); chip.querySelector('.voSpin').remove();
+    voFinishChip(chip, false);
     voDiag('adapter', 'turn_done', { ms: Date.now() - started, stt: j.stt_model || '', agent: j.agent || '', pending: !!j.pending });
     if (j.audio) await voAdapterPlay(j.audio, j.mime || 'audio/mpeg');
     else if (j.text) await voAdapterBrowserSpeak(j.text);
   } catch (e) {
-    chip.classList.add('fail'); chip.querySelector('.voSpin').remove();
+    voFinishChip(chip, true);
     voNotice('Adapter error: ' + String((e && e.message) || e).slice(0, 180));
     voDiag('adapter', 'turn_failed', { message: String((e && e.message) || e).slice(0, 180) });
   } finally { voAdapterBusy = false; if (!voAdapterSpeaking) voOrbMode('listening'); }
@@ -962,12 +1003,12 @@ async function voAdapterSubmitText(transcript) {
     const j = await r.json(); if (!r.ok && r.status !== 202) throw new Error(j.error || `adapter HTTP ${r.status}`);
     if (voAdapterUserBubble) voAdapterUserBubble.textContent = j.transcript || text;
     if (j.text) { voAsstText = j.text; voBubble('asst', j.text); voRememberAsst(j.text); }
-    chip.classList.add('ok'); chip.querySelector('.voSpin').remove();
+    voFinishChip(chip, false);
     voDiag('adapter', 'stream_turn_done', { ms: Date.now() - started, agent: j.agent || '', pending: !!j.pending });
     if (j.audio) await voAdapterPlay(j.audio, j.mime || 'audio/mpeg');
     else if (j.text) await voAdapterBrowserSpeak(j.text);
   } catch (e) {
-    chip.classList.add('fail'); chip.querySelector('.voSpin').remove();
+    voFinishChip(chip, true);
     voNotice('Adapter error: ' + String((e && e.message) || e).slice(0, 180));
   } finally { voAdapterBusy = false; if (!voAdapterSpeaking) { voOrbMode('listening'); voAdapterStartStreamingStt().catch(() => {}); } }
 }
@@ -1109,6 +1150,7 @@ function voScheduleReconnect(why) {
 }
 
 function voEnd(finalState) {
+  const wasOn = voState === 'live' || voState === 'connecting' || voState === 'reconnecting';
   voSetState(finalState || 'ended');
   voBanner('');
   for (const t of [voReconnectT, voRotateT]) if (t) clearTimeout(t);
@@ -1144,6 +1186,8 @@ function voEnd(finalState) {
   if (voMicStream) { voMicStream.getTracks().forEach((t) => t.stop()); voMicStream = null; }
   if (voWakeLock) { try { voWakeLock.release(); } catch {} voWakeLock = null; }
   if (voOrbRaf) cancelAnimationFrame(voOrbRaf);
+  voAnalyser = null; voOutLevel = 0;
+  if (wasOn) { VoiceUI.haptic('end'); VoiceUI.cue('end'); } // after the mic is released
   if (voStartedAt) voNotice('Call ended.');
 }
 
@@ -1151,7 +1195,12 @@ function voToggleMute() {
   voMuted = !voMuted;
   if (voLive) voLive.setMuted(voMuted);
   voApplyMic();   // compose with the half-duplex gate
-  $('voMute').classList.toggle('active', voMuted);
+  const mb = $('voMute');
+  mb.classList.toggle('active', voMuted);
+  mb.setAttribute('aria-pressed', voMuted ? 'true' : 'false');
+  mb.setAttribute('aria-label', voMuted ? 'Unmute' : 'Mute');
+  mb.innerHTML = VoiceUI.ICON[voMuted ? 'mic-off' : 'mic'];
+  VoiceUI.haptic('tap');
   voSetState(voState);
 }
 
@@ -1405,12 +1454,12 @@ async function voRunTool(item) {
     voOrbMode('listening');
     return;
   }
-  const chip = voChip(VO_TOOL_LABELS[item.name] || item.name);
+  const chip = voChip(VO_TOOL_LABELS[item.name] || item.name, item.name);
   voDiag('pipeline', 'tool_start', { name: item.name });
-  const { output, failed, ms } = await LiveVoice.runBoxTool(api, { name: item.name, args: item.arguments, call_id: item.call_id, vsid: voVsid });
-  voDiag('pipeline', 'tool_done', { name: item.name, failed, ms, outputChars: output.length });
-  chip.classList.add(failed ? 'fail' : 'ok');
-  chip.querySelector('.voSpin').remove();
+  const r = await LiveVoice.runBoxTool(api, { name: item.name, args: item.arguments, call_id: item.call_id, vsid: voVsid });
+  const { output, failed, ms } = r;
+  voDiag('pipeline', 'tool_done', { name: item.name, failed, outcome: r.outcome, ms, outputChars: output.length });
+  voFinishChip(chip, r, item.name);
   voSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: item.call_id, output } });
   voSend({ type: 'response.create' });
 }
@@ -1518,19 +1567,7 @@ function voAttachAnalyser(stream) {
     const src = ac.createMediaStreamSource(stream);
     voAnalyser = ac.createAnalyser();
     voAnalyser.fftSize = 256;
-    src.connect(voAnalyser);
-    const data = new Uint8Array(voAnalyser.frequencyBinCount);
-    const orb = $('voOrb');
-    const loop = () => {
-      voOrbRaf = requestAnimationFrame(loop);
-      if (!voAnalyser) return;
-      voAnalyser.getByteFrequencyData(data);
-      let sum = 0; for (let i = 0; i < data.length; i++) sum += data[i];
-      const level = Math.min(1, (sum / data.length) / 90);
-      orb.style.setProperty('--lvl', (1 + level * 0.35).toFixed(3));
-    };
-    if (voOrbRaf) cancelAnimationFrame(voOrbRaf);
-    loop();
+    src.connect(voAnalyser); // read by the orb each frame (voOrbLevels)
   } catch {}
 }
 

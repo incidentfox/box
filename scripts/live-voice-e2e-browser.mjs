@@ -113,7 +113,8 @@ if (SCENARIO === 'global') {
   step('session is gpt-live-1', /gpt-live-1/.test(notice), notice.slice(0, 120));
   const gotUser = await page.waitForSelector('.voBub.user', { timeout: 45000 }).then(() => true).catch(() => false);
   step('user speech transcribed', gotUser, gotUser ? (await page.$eval('.voBub.user', (e) => e.textContent)).slice(0, 90) : '');
-  const chip = await page.waitForSelector('.voToolChip.ok, .voToolChip.fail', { timeout: 60000 }).then(() => true).catch(() => false);
+  // A finished pill is ok / warn (part of the result failed, e.g. one calendar account) / fail.
+  const chip = await page.waitForSelector('.voToolChip.ok, .voToolChip.warn, .voToolChip.fail', { timeout: 60000 }).then(() => true).catch(() => false);
   const chips = await page.$$eval('.voToolChip', (els) => els.map((e) => e.className + ':' + e.textContent.trim()));
   step('backend ran a box tool', chip, chips.join(' | '));
   let asst = '', stable = 0; const t0 = Date.now();
@@ -135,7 +136,7 @@ if (SCENARIO === 'global') {
   const live = await page.waitForFunction(() => { const s = document.getElementById('tvFullStatus'); return s && /Listening|Sent|working/i.test(s.textContent); }, { timeout: 30000 }).then(() => true).catch(() => false);
   step('GPT-Live connected in the thread', live, await page.$eval('#tvFullStatus', (e) => e.textContent).catch(() => '?'));
   // 1) the quick lookup runs as a direct box tool (chip in the full view), not via the thread
-  const direct = await page.waitForFunction(() => [...document.querySelectorAll('#tvFeed .voToolChip.ok')].some((c) => /calendar|email/i.test(c.textContent)), { timeout: 60000 }).then(() => true).catch(() => false);
+  const direct = await page.waitForFunction(() => [...document.querySelectorAll('#tvFeed .voToolChip.ok, #tvFeed .voToolChip.warn')].some((c) => /calendar|email/i.test(c.textContent)), { timeout: 60000 }).then(() => true).catch(() => false);
   const chipsNow = await page.$$eval('#tvFeed .voToolChip', (els) => els.map((e) => e.className.replace('voToolChip', '').trim() + ':' + e.textContent.trim()));
   step('direct read-only tool ran (calendar/email)', direct, chipsNow.join(' | '));
   // 2) the work request goes to the thread's agent via ask_thread_agent

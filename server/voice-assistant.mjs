@@ -2386,7 +2386,10 @@ export function registerVoiceAssistant(app, ctx) {
           run(g, ['me', 'cal', 'list', '10'], { timeoutMs: 20000 }),
           run(g, ['work', 'cal', 'list', '10'], { timeoutMs: 20000 }),
         ]);
-        return { personal: short(me.out, 1400), work: short(work.out, 1400) };
+        // A failed account is a real {error} (not its stderr as if it were events), so the
+        // voice can say which calendar it couldn't read and the UI marks the call partial.
+        const part = (r) => (r.code === 0 ? short(r.out, 1400) : { error: short(redactSecrets(r.out).text, 200) || 'calendar unavailable' });
+        return { personal: part(me), work: part(work) };
       },
     },
     {
