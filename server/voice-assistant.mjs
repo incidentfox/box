@@ -2584,6 +2584,39 @@ export function registerVoiceAssistant(app, ctx) {
       },
     },
     {
+      name: 'thread_status',
+      description: "INSTANT read-only status of THIS chat thread (only during in-thread voice): whether its agent is working or idle, what it is doing now and for how long, the requests queued behind it, and its recent conversation. Use for \"what's it doing / is it done / what's queued / what did it say / what did I ask earlier\". Never ask the thread's agent for its own status — that would just queue behind its work.",
+      parameters: {
+        type: 'object',
+        properties: { turns: { type: 'number', description: 'How many recent messages to include (default 6, max 20).' } },
+      },
+      handler: async ({ turns = 6 } = {}, { vsid = '' } = {}) => {
+        const thread = vsid ? LIVE_THREADS.get(vsid) : null;
+        if (!thread || !thread.sessionId) return { error: 'thread_status only works during voice inside a chat thread; use check_session or read_session_history for other sessions' };
+        const n = Math.max(1, Math.min(20, Number(turns) || 6));
+        let state = null;
+        try { state = rt(thread.sessionId); } catch {}
+        const queue = state && Array.isArray(state.queue) ? state.queue : [];
+        const textOf = (m) => short(redactSecrets(String((m && (m.displayText || m.text)) || '')).text.replace(/\s+/g, ' '), 160);
+        const busy = !!(state && (state.running || state.inflight));
+        let recent = [];
+        try {
+          recent = (loadSessionTurns(thread.sessionId, thread.agent).turns || []).slice(-n)
+            .map((t) => ({ role: t.role === 'assistant' ? codingAgentLabel(thread.agent) : ownerName, text: short(redactSecrets(String(t.text || '')).text, 600) }));
+        } catch {}
+        return {
+          thread: thread.title || 'this chat', agent: codingAgentLabel(thread.agent),
+          state: busy ? 'working' : queue.length ? 'queued' : 'idle',
+          ...(busy && state.inflight ? { working_on: textOf(state.inflight) } : {}),
+          ...(busy && state.activityLabel ? { current_step: short(state.activityLabel, 120) } : {}),
+          ...(busy && state.lastActivityAt ? { last_activity: ago(state.lastActivityAt) } : {}),
+          queued_count: queue.length,
+          queued: queue.slice(0, 8).map(textOf),
+          recent,
+        };
+      },
+    },
+    {
       name: 'quick_lookup',
       description: 'Fast READ-ONLY answer about code or repo state: what a file or function does, where something is implemented, what changed in recent commits or the working tree, a PR\'s status/checks/diff, CI runs. A small sandboxed model reads the repo (Read/Grep/Glob + read-only git/gh) and answers in about 5–20 seconds without touching any chat thread. Use it instead of messaging or starting an agent when the question only needs looking something up. It cannot change files, run builds or tests, or see email/Linear/the brain (use those tools). If it takes longer it returns status "running" and its answer is announced in this call later — say you\'re still looking and carry on.',
       parameters: {
@@ -3197,7 +3230,7 @@ ${voiceAutonomyPolicy()}
         const { input, omitted } = liveInputFromTurns(turns, { redact: (t) => redactSecrets(t).text });
         session = buildLiveSession({
           config: LIVE, input,
-          instructions: liveThreadInstructions({ ownerName, title, agent, cwd, omitted, hasHistory: input.length > 0, context }),
+          instructions: liveThreadInstructions({ ownerName, title, agent, cwd, omitted, hasHistory: input.length > 0, context, agents: CODING_ONLY.map((x) => x.label) }),
           backendInstructions: liveBackendInstructions(staticPersona(), snapshot, context, { thread: { ownerName, title, agent, cwd } }),
           tools: liveBackendTools(toolSchemas, { extra: [ASK_THREAD_AGENT_TOOL] }),
         });
@@ -3213,9 +3246,9 @@ ${voiceAutonomyPolicy()}
         }
         session = buildLiveSession({
           config: LIVE, input,
-          instructions: liveGlobalInstructions({ ownerName, snapshot: short(snapshot, 4000), context }),
+          instructions: liveGlobalInstructions({ ownerName, snapshot: short(snapshot, 4000), context, agents: CODING_ONLY.map((x) => x.label) }),
           backendInstructions: liveBackendInstructions(staticPersona(), snapshot, context),
-          tools: liveBackendTools(toolSchemas),
+          tools: liveBackendTools(toolSchemas.filter((t) => t.name !== 'thread_status')),
         });
         meta = { scope, reconnect: !!reconnectVsid, historyMessages: input.length, contextChars: context.length };
       }

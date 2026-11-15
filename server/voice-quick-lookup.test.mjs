@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  QUICK_ALLOWED_BASH, QUICK_DENIED_READS, createQuickLookupRunner, parseQuickResult, quickLookupArgs,
+  QUICK_ALLOWED_BASH, QUICK_DENIED_READS, codexLookupArgs, createQuickLookupRunner, quickLookupEngines, parseQuickResult, quickLookupArgs,
   quickLookupConfig, quickLookupPrompt,
 } from './voice-quick-lookup.mjs';
 
@@ -112,6 +112,34 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert.match((await runner.lookup({ question: 'q', cwd: '/r' })).error, /spawn ENOENT/);
   const off = createQuickLookupRunner({ config: { enabled: false }, run: async () => ({}) });
   assert.match((await off.lookup({ question: 'q' })).error, /turned off/);
+}
+
+// engines: claude by default; codex only when opted in AND installed; codex runs read-only + ephemeral
+{
+  assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({}))), ['claude']);
+  const both = quickLookupConfig(cfgOf({ VOICE_QUICK_ENGINES: 'codex,claude,bogus' }));
+  assert.deepEqual(quickLookupEngines(both), ['codex', 'claude']);
+  assert.deepEqual(quickLookupEngines(both, { hasBin: (b) => b === 'claude' }), ['claude']);
+  const a = codexLookupArgs({ prompt: 'q?', outFile: '/tmp/x.txt' });
+  assert.equal(a[0], 'exec');
+  assert.equal(a[a.indexOf('--sandbox') + 1], 'read-only');
+  assert.ok(a.includes('--ephemeral') && !a.some((x) => /bypass|danger|full-auto|workspace-write/.test(x)));
+  assert.equal(a[a.indexOf('-o') + 1], '/tmp/x.txt');
+  assert.match(a[a.length - 1], /READ-ONLY[\s\S]*Question: q\?$/);
+  const calls = [];
+  const runner = createQuickLookupRunner({
+    config: { enabled: true, model: 'haiku', waitMs: 1000, timeoutMs: 5000, maxConcurrent: 2, codexModel: '' },
+    engines: ['claude', 'codex'],
+    run: async (cmd, args, opts) => { calls.push({ cmd, opts }); return { code: 0, out: '' }; },
+    tmpFile: (id) => `/tmp/${id}.txt`, readText: () => 'Codex says hi', codexEnv: () => ({ PATH: '/bin' }),
+  });
+  const r = await runner.lookup({ question: 'q', cwd: '/r', id: 'c1', engine: 'codex' });
+  assert.equal(r.answer, 'Codex says hi');
+  assert.equal(calls[0].cmd, 'codex');
+  assert.deepEqual(calls[0].opts.env, { PATH: '/bin' });
+  assert.match((await runner.lookup({ question: 'q', cwd: '/r', engine: 'gemini' })).error, /not available/);
+  const only = createQuickLookupRunner({ config: { enabled: true, model: 'haiku', waitMs: 1000, timeoutMs: 5000, maxConcurrent: 2 }, run: async () => ({ code: 0, out: '{}' }) });
+  assert.match((await only.lookup({ question: 'q', cwd: '/r', engine: 'codex' })).error, /available: claude/);
 }
 
 console.log('voice-quick-lookup tests ok');

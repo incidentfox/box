@@ -56,6 +56,7 @@ const ctx = {
   findSessionFile: () => null, tailInfo: () => ({}),
   enqueue: (key, item) => { enqueued.push({ key, ...item }); runtime.set(key, { polls: 0 }); },
   rt: (key) => {
+    if (key === 'thread-1') return { running: true, inflight: { text: 'Fix the fax router retry logic' }, queue: [{ displayText: '🎙 what is the status token ghp_ABCDEFabcdef0123456789ABCDEFabcdef01' }, { text: 'and run the tests' }], activityLabel: 'Running npm test', lastActivityAt: Date.now() - 90000, sessionId: 'thread-1', agent: 'claude' };
     const r = runtime.get(key) || { polls: 99 };
     r.polls++;
     return { running: r.polls <= 1, queue: [], sessionId: null, agent: 'claude' };
@@ -96,6 +97,25 @@ try {
   const backendTools = sentSession.delegation.responses.tools.map((t) => t.name || t.type);
   assert.ok(backendTools.includes('quick_lookup') && backendTools.includes('start_agent') && backendTools.includes('ask_thread_agent'));
   assert.match(sentSession.delegation.responses.instructions, /call quick_lookup/);
+
+  // 0) thread_status: instant running/queued state of THIS thread, no hand-off, secrets scrubbed
+  {
+    const st = await tool('thread_status', {}, vsid);
+    assert.equal(st.state, 'working');
+    assert.equal(st.agent, 'Claude Code');
+    assert.match(st.working_on, /fax router/);
+    assert.equal(st.current_step, 'Running npm test');
+    assert.equal(st.queued_count, 2);
+    assert.ok(!JSON.stringify(st).includes('ghp_ABCDEF'), 'queued text must be scrubbed');
+    assert.ok(Array.isArray(st.recent));
+    assert.equal(enqueued.length, 0, 'status never enqueues anything');
+    assert.match((await tool('thread_status', {}, 'not-a-thread-call')).error, /only works during voice inside a chat thread/);
+    // the Voice screen (global scope) does not get the thread-only tool
+    sentSession = null;
+    await app.call('POST', '/api/voice/live/session', { scope: 'global', sdp: 'v=0 offer' });
+    assert.ok(!sentSession.delegation.responses.tools.some((t) => t.name === 'thread_status'));
+    assert.match(sentSession.instructions, /Backend tools/);
+  }
 
   // 1) inline quick lookup: thread directory by default, sandbox flags, answer scrubbed
   {
