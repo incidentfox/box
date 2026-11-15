@@ -43,6 +43,9 @@ const reply = () => console.log(JSON.stringify({ type: 'result', result: 'Answer
 if (/slow/.test(prompt)) setTimeout(reply, 3000); else reply();
 `);
 chmodSync(join(BIN, 'claude'), 0o755);
+// start_agent only offers agents whose CLI is installed; CI has neither, so stub codex too.
+writeFileSync(join(BIN, 'codex'), '#!/bin/sh\nexit 0\n');
+chmodSync(join(BIN, 'codex'), 0o755);
 
 // Fake chat runtime for start_agent: each enqueued key runs for ~2 polls, then goes idle.
 const enqueued = [];
