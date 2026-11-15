@@ -35,7 +35,7 @@ import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { createJimmyContext } from './jimmy-context.mjs';
 import { BRAIN_ENTITY_TYPES, brainQueueEntry, describePacificRange, needsJimmyId, normalizeGoogleAccount, parseGmailList, resolveEventTimes, screenBrainFact, senderName } from './voice-extra-tools.mjs';
-import { createQuickLookupRunner, quickLookupConfig, quickLookupEngines } from './voice-quick-lookup.mjs';
+import { QUICK_SPEEDS, createQuickLookupRunner, quickLookupConfig, quickLookupEngines, quickLookupModel } from './voice-quick-lookup.mjs';
 import { buildOwnerCodexEnv, buildOwnerCodexScript } from './codex-exec-engine.mjs';
 import { DEFAULT_CODING_AGENT, availableCodingAgents, codingAgent, codingAgentLabel, codingAgentRoster, codingAgentSchema, resolveCodingAgent } from './coding-agents.mjs';
 import { ASK_THREAD_AGENT_TOOL, buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
@@ -1597,9 +1597,10 @@ export function registerVoiceAssistant(app, ctx) {
   };
   const VOICE_AGENTS = availableCodingAgents({ cfg, hasBin: binOnPath, macAvailable });
   const CODING_ONLY = VOICE_AGENTS.filter((a) => a.kind === 'coding');
-  // quick_lookup runner (server/voice-quick-lookup.mjs): sandboxed read-only fast model.
+  // quick_lookup runner (server/voice-quick-lookup.mjs): one-shot helper, fast or thorough per question.
   const QUICK = quickLookupConfig(cfg);
   const QUICK_ENGINES = quickLookupEngines(QUICK, { hasBin: binOnPath });
+  const quickModelsLabel = (tier) => QUICK_ENGINES.map((e) => quickLookupModel(QUICK, e, tier).model).join(' / ');
   const QUICK_JOB_TASKS = new Map(); // runner job id → TASKS entry, for lookups that went background
   const quickLookup = createQuickLookupRunner({
     run, config: QUICK, engines: QUICK_ENGINES,
@@ -2622,23 +2623,24 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'quick_lookup',
-      description: 'Fast READ-ONLY answer about code or repo state: what a file or function does, where something is implemented, what changed in recent commits or the working tree, a PR\'s status/checks/diff, CI runs. A small sandboxed model reads the repo (Read/Grep/Glob + read-only git/gh) and answers in about 5–20 seconds without touching any chat thread. Use it instead of messaging or starting an agent when the question only needs looking something up. It cannot change files, run builds or tests, or see email/Linear/the brain (use those tools). If it takes longer it returns status "running" and its answer is announced in this call later — say you\'re still looking and carry on.',
+      description: 'Quick answer to a question that only needs looking something up — code or repo state (what a file or function does, where something lives, recent commits, the working tree), a PR\'s status/checks/diff, CI runs, or anything a helper can check with the box\'s CLIs and the network. A one-shot helper agent answers without touching any chat thread or queueing behind its agent. Pick the speed per question: "fast" (about 5–15 seconds) for a single fact or a plain lookup; "thorough" (a stronger model, about 20–60 seconds) when it must dig through several files, compare things, or explain why. It does not make changes — work goes to start_agent. If it takes longer it returns status "running" and its answer is announced in this call later — say you\'re still looking and carry on.',
       parameters: {
         type: 'object',
         properties: {
           question: { type: 'string', description: 'The question, complete and self-contained, e.g. "What did the last three commits change in the voice module?"' },
           project: { type: 'string', description: 'Repo/dir name (mindbill, box-selfhost, qme-companion…) or absolute path. In a chat thread, omit it to use the thread\'s own directory.' },
           context: { type: 'string', description: 'Optional: facts from the conversation that orient the lookup (names, ticket, what the agent just said).' },
-          ...(QUICK_ENGINES.length > 1 ? { engine: { type: 'string', enum: QUICK_ENGINES, description: `Which read-only lookup model answers (default ${QUICK_ENGINES[0]}). Use another only if Jimmy asks for it.` } } : {}),
+          speed: { type: 'string', enum: [...QUICK_SPEEDS], description: `fast = ${quickModelsLabel('fast')}: single facts, plain lookups (default). thorough = ${quickModelsLabel('thorough')}: digging across files, comparisons, "why" questions.` },
+          ...(QUICK_ENGINES.length > 1 ? { engine: { type: 'string', enum: QUICK_ENGINES, description: `Which helper answers (default ${QUICK_ENGINES[0]}). Use another if Jimmy asks for it or the first one failed.` } } : {}),
         },
-        required: ['question'],
+        required: ['question', 'speed'],
       },
-      handler: async ({ question, project = '', context = '', engine = '' }, { vsid = '' } = {}) => {
+      handler: async ({ question, project = '', context = '', engine = '', speed = 'fast' }, { vsid = '' } = {}) => {
         const thread = vsid ? LIVE_THREADS.get(vsid) : null;
         const cwd = !project && thread && thread.cwd && existsSync(thread.cwd) ? thread.cwd : resolveProjectDir(project);
         const jobId = 'qlk-' + randomBytes(3).toString('hex');
         if (DRYRUN) return { answer: `(dry run) would look up: ${short(question, 120)}`, project_dir: cwd, dry_run: true };
-        const r = await quickLookup.lookup({ question, context, cwd, id: jobId, engine });
+        const r = await quickLookup.lookup({ question, context, cwd, id: jobId, engine, speed });
         if (r.status === 'running') {
           const t = newTask('lookup', short(question, 80), { what: `the lookup on ${short(question, 60)}`, cwd, ...(vsid ? { vsid } : {}) });
           QUICK_JOB_TASKS.set(jobId, t);
@@ -2718,7 +2720,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF = spell the letters · Jopari
 - Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
 - BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Pick the agent by fit — ${codingAgentRoster(VOICE_AGENTS)} — default ${DEFAULT_CODING_AGENT}; if Jimmy names an agent, use it. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
-- quick_lookup: for questions about code or repo state (what something does, where it lives, what changed, a PR's checks or status, CI) that only need LOOKING UP, call quick_lookup — a fast read-only model answers in seconds without tying up any agent. Use start_agent only when the work needs changes, runs, tests, or a long investigation. Several lookups and agents can run at once.
+- quick_lookup: for questions about code or repo state (what something does, where it lives, what changed, a PR's checks or status, CI) that only need LOOKING UP, call quick_lookup — a one-shot helper answers without tying up any agent. Pick speed per question: fast for a single fact, thorough when it has to dig, compare, or explain why. Use start_agent only when the work needs changes, runs, tests, or a long investigation. Several lookups and agents can run at once.
 - Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND, and so does a quick_lookup that returned status "running". Work started in THIS call reports back on its own as a [TASK UPDATE] when it finishes; other progress/completion events stay silent, and an explicit watcher or urgent failure is also spoken as [TASK UPDATE]. If one arrives, give one self-contained sentence with purpose + impact + next step, then return to the active topic without asking a generic follow-up question.
 - Watchers — when Jimmy says "tell me when that finishes / when the PR is ready / if it needs me", call watch_session. It registers a server-side watcher; status changes arrive later as [TASK UPDATE] system messages through the normal notification queue.
 - Full lists & long outputs — when check_session flags output_truncated, it has already fetched the complete output and included full_summary. Use that summary immediately; do not announce truncation or ask Jimmy whether to fetch more. If his question needs exact wording or every item, call read_session_output mode:full immediately and page through next_page as needed. Never read a long artifact aloud. To put the WHOLE thing in Jimmy's inbox, call request_full_artifact (it emails him the complete artifact with the PR link).

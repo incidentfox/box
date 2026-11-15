@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  QUICK_ALLOWED_BASH, QUICK_DENIED_READS, codexLookupArgs, createQuickLookupRunner, quickLookupEngines, parseQuickResult, quickLookupArgs,
+  QUICK_ALLOWED_BASH, QUICK_DENIED_READS, QUICK_SPEEDS, codexLookupArgs, quickLookupModel, createQuickLookupRunner, quickLookupEngines, parseQuickResult, quickLookupArgs,
   quickLookupConfig, quickLookupPrompt,
 } from './voice-quick-lookup.mjs';
 
@@ -19,10 +19,10 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert.equal(quickLookupConfig(cfgOf({ VOICE_QUICK_MODEL: 'sonnet' })).model, 'sonnet');
 }
 
-// CLI args: sandboxed read-only — restricted, no MCP, no persisted session, dontAsk,
+// CLI args (VOICE_QUICK_SANDBOX=1 mode): sandboxed read-only — restricted, no MCP, no persisted session, dontAsk,
 // only read tools, read-only Bash prefixes, secrets files denied, prompt after `--`
 {
-  const a = quickLookupArgs({ model: 'haiku', prompt: '--looks-like-a-flag what changed?' });
+  const a = quickLookupArgs({ model: 'haiku', prompt: '--looks-like-a-flag what changed?', sandboxed: true });
   for (const f of ['-p', '--restricted', '--strict-mcp-config', '--no-session-persistence']) assert.ok(a.includes(f), f);
   assert.equal(a[a.indexOf('--permission-mode') + 1], 'dontAsk');
   assert.equal(a[a.indexOf('--tools') + 1], 'Read,Grep,Glob,Bash');
@@ -38,6 +38,30 @@ const tick = () => new Promise((r) => setImmediate(r));
   const denied = a.filter((x) => x.startsWith('Read('));
   assert.equal(denied.length, QUICK_DENIED_READS.length);
   assert.ok(denied.includes('Read(./.env)') && denied.includes('Read(./**/.env.*)'));
+}
+
+// default: full access (box settings, network, all tools), still no saved session
+{
+  assert.equal(quickLookupConfig(cfgOf({})).sandbox, false);
+  assert.equal(quickLookupConfig(cfgOf({ VOICE_QUICK_SANDBOX: '1' })).sandbox, true);
+  const a = quickLookupArgs({ model: 'sonnet', prompt: 'is CI green?', sandboxed: false });
+  assert.equal(a[a.indexOf('--permission-mode') + 1], 'bypassPermissions');
+  assert.equal(a[a.indexOf('--model') + 1], 'sonnet');
+  assert.ok(a.includes('--no-session-persistence'));
+  for (const f of ['--restricted', '--tools', '--allowedTools', '--disallowedTools', '--strict-mcp-config']) assert.ok(!a.includes(f), f);
+  assert.match(a[a.indexOf('--append-system-prompt') + 1], /network/);
+  assert.deepEqual(a.slice(-2), ['--', 'is CI green?']);
+}
+
+// speed tiers: per engine, configurable, unknown speed = fast
+{
+  const c = quickLookupConfig(cfgOf({ VOICE_QUICK_THOROUGH_MODEL: 'opus' }));
+  assert.deepEqual(quickLookupModel(c, 'claude', 'fast'), { model: 'haiku', effort: 'low', speed: 'fast' });
+  assert.deepEqual(quickLookupModel(c, 'claude', 'thorough'), { model: 'opus', effort: 'low', speed: 'thorough' });
+  assert.deepEqual(quickLookupModel(c, 'codex', 'fast'), { model: 'gpt-6-luna', effort: 'low', speed: 'fast' });
+  assert.deepEqual(quickLookupModel(c, 'codex', 'thorough'), { model: 'gpt-6-sol', effort: 'medium', speed: 'thorough' });
+  assert.equal(quickLookupModel(c, 'claude', 'warp').speed, 'fast');
+  assert.deepEqual([...QUICK_SPEEDS], ['fast', 'thorough']);
 }
 
 // prompt: context appended and clipped
@@ -67,7 +91,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   });
   const r = await runner.lookup({ question: 'what?', cwd: '/repo', id: 'j1' });
   assert.equal(r.answer, 'key [redacted] here');
-  assert.match(r.engine, /read-only/);
+  assert.equal(r.engine, 'claude (haiku, fast)');
   assert.equal(calls[0].cmd, 'claude');
   assert.equal(calls[0].opts.cwd, '/repo');
   assert.equal(runner.active, 0);
@@ -114,7 +138,7 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert.match((await off.lookup({ question: 'q' })).error, /turned off/);
 }
 
-// engines: claude first (default), codex offered when installed; codex runs read-only + ephemeral
+// engines: claude first (default), codex offered when installed; codex runs ephemeral
 {
   assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({}))), ['claude', 'codex']);
   assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({})), { hasBin: (b) => b === 'claude' }), ['claude']);
@@ -124,10 +148,15 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert.deepEqual(quickLookupEngines(both, { hasBin: (b) => b === 'claude' }), ['claude']);
   const a = codexLookupArgs({ prompt: 'q?', outFile: '/tmp/x.txt' });
   assert.equal(a[0], 'exec');
-  assert.equal(a[a.indexOf('--sandbox') + 1], 'read-only');
-  assert.ok(a.includes('--ephemeral') && !a.some((x) => /bypass|danger|full-auto|workspace-write/.test(x)));
+  assert.ok(a.includes('--dangerously-bypass-approvals-and-sandbox') && !a.includes('--sandbox'));
+  assert.ok(a.includes('--ephemeral'));
+  assert.match(a[a.length - 1], /network[\s\S]*Question: q\?$/);
+  const ro = codexLookupArgs({ prompt: 'q', outFile: '/x', sandboxed: true, effort: 'medium' });
+  assert.equal(ro[ro.indexOf('--sandbox') + 1], 'read-only');
+  assert.ok(!ro.some((x) => /bypass|danger/.test(x)));
+  assert.ok(ro.includes('model_reasoning_effort="medium"'));
+  assert.ok(codexLookupArgs({ prompt: 'q', outFile: '/x', effort: '"; rm' }).includes('model_reasoning_effort="low"'));
   assert.equal(a[a.indexOf('-o') + 1], '/tmp/x.txt');
-  assert.match(a[a.length - 1], /READ-ONLY[\s\S]*Question: q\?$/);
   const calls = [];
   const runner = createQuickLookupRunner({
     config: { enabled: true, model: 'haiku', waitMs: 1000, timeoutMs: 5000, maxConcurrent: 2, codexModel: '' },
@@ -138,6 +167,21 @@ const tick = () => new Promise((r) => setImmediate(r));
   const r = await runner.lookup({ question: 'q', cwd: '/r', id: 'c1', engine: 'codex' });
   assert.equal(r.answer, 'Codex says hi');
   assert.equal(calls[0].cmd, 'codex');
+  // thorough on codex → the stronger model + medium effort
+  const t = await runner.lookup({ question: 'why?', cwd: '/r', id: 'c2', engine: 'codex', speed: 'thorough' });
+  assert.match(t.engine, /thorough/);
+  const seen = [];
+  const full = createQuickLookupRunner({
+    config: { ...quickLookupConfig(cfgOf({})), waitMs: 1000 }, engines: ['claude', 'codex'],
+    run: async (cmd, args) => { seen.push(args); return { code: 0, out: JSON.stringify({ result: 'ok' }) }; },
+    tmpFile: (id) => `/tmp/${id}.txt`, readText: () => 'ok',
+  });
+  await full.lookup({ question: 'why?', cwd: '/r', id: 'f1', engine: 'codex', speed: 'thorough' });
+  assert.equal(seen[0][seen[0].indexOf('-m') + 1], 'gpt-6-sol');
+  assert.ok(seen[0].includes('model_reasoning_effort="medium"') && seen[0].includes('--dangerously-bypass-approvals-and-sandbox'));
+  await full.lookup({ question: 'what?', cwd: '/r', id: 'f2', speed: 'thorough' });
+  assert.equal(seen[1][seen[1].indexOf('--model') + 1], 'sonnet');
+  assert.equal(seen[1][seen[1].indexOf('--permission-mode') + 1], 'bypassPermissions');
   assert.deepEqual(calls[0].opts.env, { PATH: '/bin' });
   assert.match((await runner.lookup({ question: 'q', cwd: '/r', engine: 'gemini' })).error, /not available/);
   // custom launcher (the box wraps codex in a login shell)

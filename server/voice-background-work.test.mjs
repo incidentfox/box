@@ -122,18 +122,24 @@ try {
 
   // 1) inline quick lookup: thread directory by default, sandbox flags, answer scrubbed
   {
-    const r = await tool('quick_lookup', { question: 'What did the last commit change?' }, vsid);
+    const r = await tool('quick_lookup', { question: 'What did the last commit change?', speed: 'fast' }, vsid);
     assert.match(r.answer, /^Answer for: What did the last commit change\?/);
     assert.ok(!r.answer.includes('sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX'), 'secrets must be scrubbed');
     assert.equal(r.project_dir, THREAD_CWD);
     const c = claudeCalls()[0];
     assert.equal(c.cwd, THREAD_CWD);
-    for (const f of ['--restricted', '--no-session-persistence', '--strict-mcp-config']) assert.ok(c.argv.includes(f));
-    assert.equal(c.argv[c.argv.indexOf('--permission-mode') + 1], 'dontAsk');
+    // full access by default (Jimmy, 2026-11-15), no saved session, fast tier = haiku
+    assert.ok(c.argv.includes('--no-session-persistence') && !c.argv.includes('--restricted'));
+    assert.equal(c.argv[c.argv.indexOf('--permission-mode') + 1], 'bypassPermissions');
+    assert.equal(c.argv[c.argv.indexOf('--model') + 1], 'haiku');
+    const qt = sentSession.delegation.responses.tools.find((t) => t.name === 'quick_lookup');
+    assert.deepEqual(qt.parameters.properties.speed.enum, ['fast', 'thorough']);
+    assert.ok(qt.parameters.required.includes('speed'));
     // an explicit project wins over the thread default
-    const r2 = await tool('quick_lookup', { question: 'Where is the fax router?', project: 'mindbill' }, vsid);
+    const r2 = await tool('quick_lookup', { question: 'Where is the fax router?', project: 'mindbill', speed: 'thorough' }, vsid);
     assert.equal(r2.project_dir, OTHER);
     assert.equal(claudeCalls()[1].cwd, OTHER);
+    assert.equal(claudeCalls()[1].argv[claudeCalls()[1].argv.indexOf('--model') + 1], 'sonnet');
   }
 
   // 2) slow lookup: returns at the inline wait, then the answer is announced to THIS call only

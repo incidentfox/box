@@ -1,23 +1,21 @@
-// quick_lookup — a fast, sandboxed, READ-ONLY helper agent for the voice assistant.
+// quick_lookup — a fast, look-up-only helper agent for the voice assistant.
 //
 // Why: in thread voice, every question about the thread's work used to go to the thread's
 // own Claude Code/Codex agent — a full turn that takes minutes and queues behind whatever
 // it is already doing. Most of those questions ("what changed in the last commit?", "is the
 // PR green?", "where is the retry logic?") are lookups a small model answers in seconds.
 //
-// How: a one-shot `claude -p` on a fast model (default haiku) in the project directory,
-// boxed in by the CLI itself rather than by prompt wording:
-//   --restricted            ignores user/project settings (so the box's bypassPermissions
-//                           default and its hooks don't apply), confines file tools to the
-//                           working directory, refuses bypassPermissions
-//   --tools …               only Read/Grep/Glob/Bash exist
-//   --permission-mode dontAsk + --allowedTools   Bash runs ONLY the read-only git/gh
-//                           prefixes below (compound commands are denied); anything else is
-//                           denied without a prompt
-//   --disallowedTools Read(.env…)  secrets files inside the repo stay unreadable
-//   --strict-mcp-config     no MCP servers
-//   --no-session-persistence  no transcript lands in ~/.claude/projects, so the box feed
-//                           doesn't fill with lookup chats
+// How: a one-shot `claude -p` or `codex exec` in the project directory. By default it runs
+// with full access (Jimmy's call, 2026-11-15) — box settings, network, gh/curl/APIs, the
+// box's CLIs — exactly like his own chats, with no saved session (so the box feed doesn't
+// fill with lookup chats). The prompt keeps it to looking things up; real work goes to an
+// agent. VOICE_QUICK_SANDBOX=1 restores the locked-down mode:
+//   claude: --restricted (ignores settings/hooks, refuses bypassPermissions), only
+//           Read/Grep/Glob/Bash, Bash limited to the read-only git/gh prefixes below,
+//           .env/keys unreadable, no MCP;   codex: --sandbox read-only (needs the bwrap
+//           AppArmor userns profile on Ubuntu 24.04 — /etc/apparmor.d/bwrap on the box).
+// Speed is chosen per question: 'fast' (haiku / gpt-6-luna low effort) for plain lookups,
+// 'thorough' (sonnet / gpt-6-sol) when it has to dig or reason across several things.
 // Output is secret-scrubbed by the caller before it reaches the voice model.
 //
 // The runner waits a short while for the answer (most come back in 5–20s). If a lookup
@@ -36,6 +34,11 @@ export const QUICK_DENIED_READS = Object.freeze([
 
 export const QUICK_FRAMING = 'You answer quick lookup questions for a live VOICE conversation with Jimmy (the founder). You are READ-ONLY: never try to change files, run builds/tests, or take actions — if the question needs that, say in one sentence that it needs a working agent. Look things up with your tools (Read/Grep/Glob, read-only git and gh), then answer in at most four short plain sentences that will be spoken aloud: the concrete facts and numbers, no markdown, no code blocks, no URLs, no long file paths (name things by what they are). If you could not find it, say so plainly instead of guessing. Never reveal secret values.';
 
+// Full-access framing: may use anything that reads (files, git, gh, network, the box's CLIs).
+export const QUICK_OPEN_FRAMING = 'You answer quick lookup questions for a live VOICE conversation with Jimmy (the founder). Look things up with whatever you need — files, git, gh, the network and APIs, the box\'s command-line tools. This is a lookup, not a work session: do not change files, push, merge, deploy, or send anything; if the question needs that, say in one sentence that it needs a working agent. Answer in at most four short plain sentences that will be spoken aloud: the concrete facts and numbers, no markdown, no code blocks, no URLs, no long file paths (name things by what they are). If you could not find it, say so plainly instead of guessing. Never reveal secret values.';
+
+export const QUICK_SPEEDS = Object.freeze(['fast', 'thorough']);
+
 export function quickLookupConfig(cfg) {
   const num = (k, d, lo, hi) => {
     const raw = cfg(k, '');
@@ -48,12 +51,18 @@ export function quickLookupConfig(cfg) {
     waitMs: num('VOICE_QUICK_WAIT_MS', 22000, 2000, 60000),     // how long the tool call waits inline
     timeoutMs: num('VOICE_QUICK_TIMEOUT_MS', 150000, 20000, 600000), // hard kill
     maxConcurrent: num('VOICE_QUICK_MAX_CONCURRENT', 3, 1, 8),
-    // Lookup engines, in preference order (first = default). Codex's read-only sandbox needs
-    // bubblewrap user namespaces; on Ubuntu 24.04 that takes a per-binary AppArmor userns
-    // profile for /usr/bin/bwrap (installed on the box as /etc/apparmor.d/bwrap). Without it
-    // Codex can't run even read-only git — set VOICE_QUICK_ENGINES=claude on such hosts.
+    // Lookup engines, in preference order (first = default).
     engines: String(cfg('VOICE_QUICK_ENGINES', 'claude,codex') || 'claude,codex').split(',').map((s) => s.trim().toLowerCase()).filter((e) => e === 'claude' || e === 'codex'),
     codexModel: cfg('VOICE_QUICK_CODEX_MODEL', 'gpt-6-luna') || 'gpt-6-luna',
+    // Per-question speed tiers: model (+ Codex reasoning effort) for each engine.
+    models: {
+      claude: { fast: { model: cfg('VOICE_QUICK_MODEL', 'haiku') || 'haiku' }, thorough: { model: cfg('VOICE_QUICK_THOROUGH_MODEL', 'sonnet') || 'sonnet' } },
+      codex: {
+        fast: { model: cfg('VOICE_QUICK_CODEX_MODEL', 'gpt-6-luna') || 'gpt-6-luna', effort: 'low' },
+        thorough: { model: cfg('VOICE_QUICK_CODEX_THOROUGH_MODEL', 'gpt-6-sol') || 'gpt-6-sol', effort: 'medium' },
+      },
+    },
+    sandbox: /^(1|true|yes|on)$/i.test(String(cfg('VOICE_QUICK_SANDBOX', '') || '')),
   };
 }
 
@@ -63,16 +72,16 @@ export function quickLookupEngines(config, { hasBin = () => true } = {}) {
   return [...new Set(list)];
 }
 
-// Codex engine: `codex exec` in its read-only sandbox, ephemeral (no saved session), the
-// final message written to outFile. Same framing as the Claude engine.
-export function codexLookupArgs({ model = '', prompt = '', outFile } = {}) {
+// Codex engine: `codex exec`, ephemeral (no saved session), the final message written to
+// outFile. Full access unless sandboxed (then its read-only sandbox).
+export function codexLookupArgs({ model = '', prompt = '', outFile, sandboxed = false, effort = 'low' } = {}) {
   return [
     'exec', '--ephemeral', '--skip-git-repo-check',
-    '--sandbox', 'read-only',
-    '-c', 'model_reasoning_effort="low"',
+    ...(sandboxed ? ['--sandbox', 'read-only'] : ['--dangerously-bypass-approvals-and-sandbox']),
+    '-c', `model_reasoning_effort="${/^(minimal|low|medium|high)$/.test(effort) ? effort : 'low'}"`,
     ...(model ? ['-m', model] : []),
     '-o', outFile,
-    '--', `${QUICK_FRAMING}\n\nQuestion: ${prompt}`,
+    '--', `${sandboxed ? QUICK_FRAMING : QUICK_OPEN_FRAMING}\n\nQuestion: ${prompt}`,
   ];
 }
 
@@ -82,7 +91,16 @@ export function quickLookupPrompt(question, context = '') {
   return c ? `${q}\n\nContext from the conversation (for orientation; verify against the repo):\n${c.slice(0, 3000)}` : q;
 }
 
-export function quickLookupArgs({ model = 'haiku', prompt = '' } = {}) {
+export function quickLookupArgs({ model = 'haiku', prompt = '', sandboxed = true } = {}) {
+  if (!sandboxed) {
+    return [
+      '-p', '--model', model,
+      '--permission-mode', 'bypassPermissions', '--no-session-persistence',
+      '--append-system-prompt', QUICK_OPEN_FRAMING,
+      '--output-format', 'json',
+      '--', prompt,
+    ];
+  }
   return [
     '-p', '--model', model,
     '--restricted', '--strict-mcp-config', '--no-session-persistence',
@@ -94,6 +112,14 @@ export function quickLookupArgs({ model = 'haiku', prompt = '' } = {}) {
     '--output-format', 'json',
     '--', prompt,
   ];
+}
+
+// Model (+ effort) for an engine at a speed tier; falls back to the legacy single-model config.
+export function quickLookupModel(config, engine, speed = 'fast') {
+  const tier = speed === 'thorough' ? 'thorough' : 'fast';
+  const m = config.models && config.models[engine] && config.models[engine][tier];
+  if (m && m.model) return { model: m.model, effort: m.effort || 'low', speed: tier };
+  return { model: engine === 'codex' ? config.codexModel || '' : config.model || 'haiku', effort: 'low', speed: tier };
 }
 
 // `claude -p --output-format json` → { answer, costUsd, turns, denied } or { error }.
@@ -137,12 +163,12 @@ export function createQuickLookupRunner({ run, config, redact = (s) => s, onBack
     if (job.engine === 'codex') {
       if (!tmpFile || !readText) return { error: 'codex lookup is not wired on this box' };
       const outFile = tmpFile(job.id);
-      const launch = codexCommand(codexLookupArgs({ model: config.codexModel, prompt: job.prompt, outFile }));
+      const launch = codexCommand(codexLookupArgs({ model: job.model.model, effort: job.model.effort, prompt: job.prompt, outFile, sandboxed: !!config.sandbox }));
       const r = await run(launch.cmd, launch.args, { cwd: job.cwd, timeoutMs: config.timeoutMs, env: codexEnv ? codexEnv() : undefined });
       const answer = String(readText(outFile) || '').trim();
       parsed = answer && r.code === 0 ? { answer, costUsd: 0, turns: 0, denied: 0 } : { error: `codex lookup failed: ${String(r.out || '').split('\n').filter((l) => /error/i.test(l)).slice(-1)[0] || `exit ${r.code}`}`.slice(0, 220) };
     } else {
-      const r = await run('claude', quickLookupArgs({ model: config.model, prompt: job.prompt }), { cwd: job.cwd, timeoutMs: config.timeoutMs });
+      const r = await run('claude', quickLookupArgs({ model: job.model.model, prompt: job.prompt, sandboxed: !!config.sandbox }), { cwd: job.cwd, timeoutMs: config.timeoutMs });
       parsed = parseQuickResult(r);
     }
     if (parsed.answer) parsed.answer = redact(parsed.answer);
@@ -151,19 +177,19 @@ export function createQuickLookupRunner({ run, config, redact = (s) => s, onBack
   }
 
   // → { answer, ms, engine } | { status:'running', id } | { error }
-  async function lookup({ question, context = '', cwd, id, engine = '' }) {
+  async function lookup({ question, context = '', cwd, id, engine = '', speed = 'fast' }) {
     if (!config.enabled) return { error: 'quick lookup is turned off on this box' };
     const eng = engine ? String(engine).toLowerCase() : engines[0] || 'claude';
     if (!engines.includes(eng)) return { error: `${eng} lookups are not available here; available: ${engines.join(', ')}` };
     if (!String(question || '').trim()) return { error: 'what should I look up?' };
     if (active.size >= config.maxConcurrent) return { error: `${active.size} lookups are already running; wait for one to finish` };
-    const job = { id, engine: eng, question: String(question).trim(), prompt: quickLookupPrompt(question, context), cwd, startedAt: now(), inline: true };
+    const job = { id, engine: eng, model: quickLookupModel(config, eng, speed), question: String(question).trim(), prompt: quickLookupPrompt(question, context), cwd, startedAt: now(), inline: true };
     active.add(job);
     const p = execute(job)
       .catch((e) => ({ error: `lookup failed: ${String((e && e.message) || e).slice(0, 160)}` }))
       .finally(() => { active.delete(job); });
     const raced = await Promise.race([p, wait(config.waitMs).then(() => null)]);
-    if (raced) return { ...raced, ms: now() - job.startedAt, engine: eng === 'codex' ? `codex (${config.codexModel || 'default model'}, read-only sandbox)` : `claude (${config.model}, read-only)` };
+    if (raced) return { ...raced, ms: now() - job.startedAt, engine: `${eng} (${job.model.model || 'default model'}, ${job.model.speed}${config.sandbox ? ', read-only sandbox' : ''})` };
     // Outlived the inline wait: hand back now, announce the answer when it lands.
     job.inline = false;
     p.then((result) => { try { onBackgroundDone(job, { ...result, ms: now() - job.startedAt }); } catch {} });
