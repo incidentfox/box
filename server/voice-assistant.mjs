@@ -36,6 +36,7 @@ import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from 
 import { createJimmyContext } from './jimmy-context.mjs';
 import { BRAIN_ENTITY_TYPES, brainQueueEntry, describePacificRange, needsJimmyId, normalizeGoogleAccount, parseGmailList, resolveEventTimes, screenBrainFact, senderName } from './voice-extra-tools.mjs';
 import { createQuickLookupRunner, quickLookupConfig, quickLookupEngines } from './voice-quick-lookup.mjs';
+import { buildOwnerCodexEnv, buildOwnerCodexScript } from './codex-exec-engine.mjs';
 import { DEFAULT_CODING_AGENT, availableCodingAgents, codingAgent, codingAgentLabel, codingAgentRoster, codingAgentSchema, resolveCodingAgent } from './coding-agents.mjs';
 import { ASK_THREAD_AGENT_TOOL, buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
@@ -1604,9 +1605,11 @@ export function registerVoiceAssistant(app, ctx) {
     run, config: QUICK, engines: QUICK_ENGINES,
     tmpFile: (id) => join(VOICE_DIR, 'lookups', `${String(id).replace(/[^\w-]/g, '')}.txt`),
     readText: (f) => { try { const t = readFileSync(f, 'utf8'); try { unlinkSync(f); } catch {} return t; } catch { return ''; } },
-    // Metered API key (Jimmy OK'd, 2026-11-15): the box's ChatGPT Codex login rejects the
-    // configured models. Falls back to the CLI login when no key is set.
-    codexEnv: () => { const e = { ...childEnv() }; if (OPENAI_KEY) e.CODEX_API_KEY = OPENAI_KEY; delete e.OPENAI_API_KEY; return e; },
+    // Launched exactly like owner Codex chats: a login shell (so the current CLI on the
+    // user's PATH, not an older system copy) with API keys stripped, so lookups use the
+    // stored `codex login` (flat-rate ChatGPT) instead of metered API billing.
+    codexEnv: () => buildOwnerCodexEnv(childEnv()),
+    codexCommand: (args) => ({ cmd: 'bash', args: ['-lc', buildOwnerCodexScript(process.env.CODEX_ENV_FILE || ''), 'codex-lookup', ...args] }),
     redact: (t) => redactSecrets(t).text,
     onBackgroundDone: (job, result) => {
       const t = QUICK_JOB_TASKS.get(job.id);

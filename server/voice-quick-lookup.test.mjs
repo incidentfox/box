@@ -140,6 +140,15 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert.equal(calls[0].cmd, 'codex');
   assert.deepEqual(calls[0].opts.env, { PATH: '/bin' });
   assert.match((await runner.lookup({ question: 'q', cwd: '/r', engine: 'gemini' })).error, /not available/);
+  // custom launcher (the box wraps codex in a login shell)
+  const wrapped = createQuickLookupRunner({
+    config: { enabled: true, model: 'haiku', waitMs: 1000, timeoutMs: 5000, maxConcurrent: 2, codexModel: '' },
+    engines: ['codex'], run: async (cmd, args) => { calls.push({ cmd, args }); return { code: 0, out: '' }; },
+    tmpFile: (id) => `/tmp/${id}.txt`, readText: () => 'ok', codexCommand: (args) => ({ cmd: 'bash', args: ['-lc', 'exec codex "$@"', 'x', ...args] }),
+  });
+  assert.equal((await wrapped.lookup({ question: 'q', cwd: '/r', id: 'w1' })).answer, 'ok');
+  assert.equal(calls.at(-1).cmd, 'bash');
+  assert.equal(calls.at(-1).args[3], 'exec');
   const only = createQuickLookupRunner({ config: { enabled: true, model: 'haiku', waitMs: 1000, timeoutMs: 5000, maxConcurrent: 2 }, run: async () => ({ code: 0, out: '{}' }) });
   assert.match((await only.lookup({ question: 'q', cwd: '/r', engine: 'codex' })).error, /available: claude/);
 }

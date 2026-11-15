@@ -127,7 +127,8 @@ export function parseQuickResult({ code, out } = {}) {
 //   run(cmd, args, {cwd, timeoutMs}) → Promise<{code, out}>
 //   onBackgroundDone(job, result) — called when a lookup outlived the inline wait
 //   tmpFile(id) / readText(path) / codexEnv() — only needed for the codex engine
-export function createQuickLookupRunner({ run, config, redact = (s) => s, onBackgroundDone = () => {}, now = () => Date.now(), sleep, tmpFile, readText, codexEnv, engines = ['claude'] } = {}) {
+//   codexCommand(args) → {cmd, args} — how to launch codex (default: `codex` on PATH)
+export function createQuickLookupRunner({ run, config, redact = (s) => s, onBackgroundDone = () => {}, now = () => Date.now(), sleep, tmpFile, readText, codexEnv, codexCommand = (args) => ({ cmd: 'codex', args }), engines = ['claude'] } = {}) {
   const wait = sleep || ((ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref && t.unref(); }));
   const active = new Set();
 
@@ -136,7 +137,8 @@ export function createQuickLookupRunner({ run, config, redact = (s) => s, onBack
     if (job.engine === 'codex') {
       if (!tmpFile || !readText) return { error: 'codex lookup is not wired on this box' };
       const outFile = tmpFile(job.id);
-      const r = await run('codex', codexLookupArgs({ model: config.codexModel, prompt: job.prompt, outFile }), { cwd: job.cwd, timeoutMs: config.timeoutMs, env: codexEnv ? codexEnv() : undefined });
+      const launch = codexCommand(codexLookupArgs({ model: config.codexModel, prompt: job.prompt, outFile }));
+      const r = await run(launch.cmd, launch.args, { cwd: job.cwd, timeoutMs: config.timeoutMs, env: codexEnv ? codexEnv() : undefined });
       const answer = String(readText(outFile) || '').trim();
       parsed = answer && r.code === 0 ? { answer, costUsd: 0, turns: 0, denied: 0 } : { error: `codex lookup failed: ${String(r.out || '').split('\n').filter((l) => /error/i.test(l)).slice(-1)[0] || `exit ${r.code}`}`.slice(0, 220) };
     } else {
