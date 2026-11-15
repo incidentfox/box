@@ -247,3 +247,12 @@ function fakeDoc(state) {
   eng.close();
 }
 console.log('live-voice background lifecycle: ok');
+
+// Client agent labels stay in sync with the server registry (server/coding-agents.mjs).
+{
+  const { CODING_AGENTS } = await import('../server/coding-agents.mjs');
+  for (const a of CODING_AGENTS) assert.equal(window.LiveVoice.agentLabel(a.id), a.label, a.id);
+  assert.equal(window.LiveVoice.agentLabel(''), 'Claude Code');
+  assert.equal(window.LiveVoice.agentLabel('newbot'), 'newbot');
+  console.log('live-voice agent labels: ok');
+}

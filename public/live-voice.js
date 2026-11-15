@@ -66,6 +66,9 @@
     quick_lookup: 'Looking it up…', ask_thread_agent: 'Handing to the agent…',
   };
   const toolLabel = (name) => TOOL_LABELS[name] || String(name || 'tool');
+  // Coding-agent display names — mirrors server/coding-agents.mjs (kept in sync by public/live-voice.test.mjs).
+  const AGENT_LABELS = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', agy: 'Antigravity', deepseek: 'DeepSeek', experiential: 'Experiential', mac: 'Computer Use' };
+  const agentLabel = (id) => AGENT_LABELS[String(id || 'claude').toLowerCase()] || String(id);
   // Past-tense label once a tool finished (the pill resolves to this).
   const TOOL_DONE = {
     get_overview: 'Checked the box', list_sessions: 'Listed sessions', check_session: 'Checked session',
@@ -452,7 +455,7 @@
   }
 
   window.LiveVoice = {
-    create, createCallGate, runBoxTool, toolLabel, toolDoneLabel, toolOutcome, TOOL_LABELS,
+    create, createCallGate, runBoxTool, toolLabel, toolDoneLabel, toolOutcome, TOOL_LABELS, agentLabel, AGENT_LABELS,
     lostReason, closeAction, whenVisible, setAudioSession, isIosStandalone, IOS_BACKGROUND_NOTICE, HIDDEN_GRACE_MS,
   };
 })();

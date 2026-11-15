@@ -41,7 +41,7 @@
     return t;
   }
   const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const agentLabel = (a) => (a === 'codex' ? 'Codex' : a === 'claude' || !a ? 'Claude Code' : String(a));
+  const agentLabel = (a) => (window.LiveVoice && window.LiveVoice.agentLabel ? window.LiveVoice.agentLabel(a) : String(a || 'coding agent'));
   // Share of a's meaningful words that also appear in b.
   function overlap(a, b) {
     const toks = (s) => norm(s).replace(/[^\w\s']/g, ' ').split(/\s+/).filter((w) => w.length > 2);
