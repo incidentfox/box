@@ -35,6 +35,8 @@ import { createLocalFileResolver } from './local-file-resolver.mjs';
 import { WATCH_TRIGGERS, classifyWatchTransition, normalizeWatchTriggers } from './session-watcher.mjs';
 import { createJimmyContext } from './jimmy-context.mjs';
 import { BRAIN_ENTITY_TYPES, brainQueueEntry, describePacificRange, needsJimmyId, normalizeGoogleAccount, parseGmailList, resolveEventTimes, screenBrainFact, senderName } from './voice-extra-tools.mjs';
+import { createQuickLookupRunner, quickLookupConfig, quickLookupEngines } from './voice-quick-lookup.mjs';
+import { DEFAULT_CODING_AGENT, availableCodingAgents, codingAgent, codingAgentLabel, codingAgentRoster, codingAgentSchema, resolveCodingAgent } from './coding-agents.mjs';
 import { ASK_THREAD_AGENT_TOOL, buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools, liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig } from './live-voice.mjs';
 import { buildVoiceAdapterPrompt, spokenAdapterText, voiceAdapterAgent, voiceAdapterSessionKey, voiceAdapterVAD, voiceAssistantMode } from './voice-adapter.mjs';
 import { createLivekitVoiceJoin, livekitAdapterConfig, livekitConfigured, voiceAdapterTransport } from './livekit-voice.mjs';
@@ -915,7 +917,7 @@ export function registerVoiceAssistant(app, ctx) {
     echoMinTokens: cfg('VOICE_ASSISTANT_ECHO_MIN_TOKENS'),
   });
   const VOICE_DIR = join(STATE_DIR, 'voice-assistant');
-  for (const d of [VOICE_DIR, join(VOICE_DIR, 'transcripts'), join(VOICE_DIR, 'diagnostics'), join(VOICE_DIR, 'research'), join(VOICE_DIR, 'notes')]) {
+  for (const d of [VOICE_DIR, join(VOICE_DIR, 'transcripts'), join(VOICE_DIR, 'diagnostics'), join(VOICE_DIR, 'research'), join(VOICE_DIR, 'notes'), join(VOICE_DIR, 'lookups')]) {
     try { mkdirSync(d, { recursive: true }); } catch {}
   }
   const BRIEFING_FILE = join(VOICE_DIR, 'briefing.md');
@@ -1105,12 +1107,19 @@ export function registerVoiceAssistant(app, ctx) {
   // ---- background tasks + proactive updates ---------------------------------
 
   let seq = 1;
-  const EVENTS = [];       // { seq, ts, kind, title, speak, audible } — polled by the client
+  const EVENTS = [];       // { seq, ts, kind, title, speak, audible, vsid? } — polled by the client
   const TASKS = new Map(); // id -> { id, kind, title, status, startedAt, doneAt, summary, file, runId }
   const RECENT_AGENT_STARTS = new Map(); // short idempotency window for frustrated/repeated voice turns
+  const ANNOUNCE_VOICE_TASKS = voiceBool(cfg('VOICE_ANNOUNCE_VOICE_TASKS'), true);
+  const MAX_VOICE_AGENTS = Math.max(1, Math.min(12, voiceNumOr(cfg('VOICE_MAX_BACKGROUND_AGENTS'), 5)));
+  // Live thread-voice calls: vsid → the chat thread it is attached to, so quick_lookup and
+  // background agents started from that call default to the thread's working directory.
+  const LIVE_THREADS = new Map();
 
-  function pushEvent(kind, title, speak, { audible = voiceEventAudible(kind) } = {}) {
-    EVENTS.push({ seq: seq++, ts: Date.now(), kind, title, speak: short(speak, 2400), audible: !!audible });
+  // vsid = the voice call that started this work: its completion is spoken in THAT call
+  // (and only there), so background work the voice kicked off reports back on its own.
+  function pushEvent(kind, title, speak, { audible = voiceEventAudible(kind), vsid = '' } = {}) {
+    EVENTS.push({ seq: seq++, ts: Date.now(), kind, title, speak: short(speak, 2400), audible: !!audible, ...(vsid ? { vsid } : {}) });
     if (EVENTS.length > 200) EVENTS.splice(0, EVENTS.length - 200);
   }
   function saveTasks() {
@@ -1126,7 +1135,9 @@ export function registerVoiceAssistant(app, ctx) {
   }
   function finishTask(t, status, summary, speak) {
     t.status = status; t.doneAt = Date.now(); t.summary = short(summary, 4000); saveTasks();
-    pushEvent('task_' + status, t.title, speak);
+    // Work a live voice call started (t.vsid) is announced back to that call when it lands.
+    const origin = t.vsid && ANNOUNCE_VOICE_TASKS ? { audible: !!speak, vsid: t.vsid } : {};
+    pushEvent('task_' + status, t.title, speak, origin);
   }
 
   // ---- session watcher ------------------------------------------------------
@@ -1383,7 +1394,7 @@ export function registerVoiceAssistant(app, ctx) {
   const PROGRESS_UPDATES = voiceBool(cfg('VOICE_PROGRESS_UPDATES'), true);
   const PROGRESS_MAX = 4; // don't nag the whole drive
 
-  function watchSession(key, label, { speakAs } = {}) {
+  function watchSession(key, label, { speakAs, vsid = '', cwd = '' } = {}) {
     const started = Date.now();
     let sawRunning = false;
     let nextProgress = PROGRESS_MS, progressCount = 0;
@@ -1391,7 +1402,7 @@ export function registerVoiceAssistant(app, ctx) {
     // bare ticket code (INC-1087). Callers with a richer source (a ticket summary) pass
     // speakAs; otherwise we derive it from the session/task title.
     const spoken = speakAs || spokenWorkLabel({ title: label });
-    const task = newTask('agent', label, { key, what: spoken });
+    const task = newTask('agent', label, { key, what: spoken, ...(vsid ? { vsid } : {}), ...(cwd ? { cwd } : {}) });
     const iv = setInterval(() => {
       let s; try { s = rt(key); } catch { clearInterval(iv); finishTask(task, 'failed', 'session state lost', ''); return; }
       const busy = s.running || (s.queue && s.queue.length) || (s.sessionId && RUNNING.has(s.sessionId));
@@ -1576,6 +1587,34 @@ export function registerVoiceAssistant(app, ctx) {
   }
 
   // ---- tools ------------------------------------------------------------------
+
+  // Which coding agents voice can delegate to (server/coding-agents.mjs): installed CLIs,
+  // optionally narrowed by VOICE_CODING_AGENTS. Tool enums + prompts are generated from it.
+  const binOnPath = (bin) => {
+    const PATHS = String((childEnv() || {}).PATH || process.env.PATH || '').split(delimiter).filter(Boolean);
+    return PATHS.some((d) => { try { return statSync(join(d, bin)).isFile(); } catch { return false; } });
+  };
+  const VOICE_AGENTS = availableCodingAgents({ cfg, hasBin: binOnPath, macAvailable });
+  const CODING_ONLY = VOICE_AGENTS.filter((a) => a.kind === 'coding');
+  // quick_lookup runner (server/voice-quick-lookup.mjs): sandboxed read-only fast model.
+  const QUICK = quickLookupConfig(cfg);
+  const QUICK_ENGINES = quickLookupEngines(QUICK, { hasBin: binOnPath });
+  const QUICK_JOB_TASKS = new Map(); // runner job id → TASKS entry, for lookups that went background
+  const quickLookup = createQuickLookupRunner({
+    run, config: QUICK, engines: QUICK_ENGINES,
+    tmpFile: (id) => join(VOICE_DIR, 'lookups', `${String(id).replace(/[^\w-]/g, '')}.txt`),
+    readText: (f) => { try { const t = readFileSync(f, 'utf8'); try { unlinkSync(f); } catch {} return t; } catch { return ''; } },
+    // Same auth as the box's Codex chats (codex-exec-engine): the CLI login, not the API key.
+    codexEnv: () => { const e = { ...childEnv() }; delete e.OPENAI_API_KEY; delete e.CODEX_API_KEY; return e; },
+    redact: (t) => redactSecrets(t).text,
+    onBackgroundDone: (job, result) => {
+      const t = QUICK_JOB_TASKS.get(job.id);
+      QUICK_JOB_TASKS.delete(job.id);
+      if (!t) return;
+      if (result.error) finishTask(t, 'failed', result.error, `The lookup on "${short(job.question, 80)}" failed: ${short(result.error, 200)}`);
+      else finishTask(t, 'done', result.answer, `Answer to the earlier lookup "${short(job.question, 100)}": ${short(result.answer, 1200)}`);
+    },
+  });
 
   const TOOLS = [
     {
@@ -1897,13 +1936,13 @@ export function registerVoiceAssistant(app, ctx) {
     },
     {
       name: 'start_agent',
-      description: 'Start a NEW agent session only when Jimmy asks to do/implement/investigate new work, not when he asks to explain, inspect, review, or check existing work. agent: claude (default, full harness), codex (mechanical coding), or mac (Computer Use). The task is auto-wrapped and runs in the background. Give a descriptive title. Never call this again for a task already started in the current conversation; "keep going" means the existing agent continues.',
+      description: `Start a NEW background agent session only when Jimmy asks to do/implement/investigate new work, not when he asks to explain, inspect, review, or check existing work (a read-only question is quick_lookup). Available agents: ${codingAgentRoster(VOICE_AGENTS)}. The task is auto-wrapped and runs in the background; its result is announced in this call. Several can run in parallel — give each a descriptive title. Never call this again for a task already started in the current conversation; "keep going" means the existing agent continues.`,
       parameters: {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'The work to do, in plain words — context and what to do. It is auto-wrapped into a full brief; you do not need to spell out worktree/PR mechanics.' },
           project: { type: 'string', description: 'Repo/dir name, e.g. mindbill, software-factory, forta. Omit for the default workspace.' },
-          agent: { type: 'string', enum: ['claude', 'codex', 'mac'] },
+          agent: codingAgentSchema(VOICE_AGENTS),
           title: { type: 'string', description: 'Short human title, e.g. "Fix invoice rounding"' },
           deliverable: { type: 'string', description: 'Optional: the concrete artifact to produce, e.g. "a PR", "a CSV of prospects", "a written comparison". Shapes what it reports back.' },
           done_when: { type: 'string', description: 'Optional: the acceptance criteria in one line, e.g. "tests pass and the PR is open".' },
@@ -1911,9 +1950,15 @@ export function registerVoiceAssistant(app, ctx) {
         },
         required: ['task'],
       },
-      handler: async ({ task, project, agent = 'claude', title, deliverable = '', done_when = '', allow_duplicate = false }, { vsid = '' } = {}) => {
+      handler: async ({ task, project, agent: requestedAgent = DEFAULT_CODING_AGENT, title, deliverable = '', done_when = '', allow_duplicate = false }, { vsid = '' } = {}) => {
+        const picked = resolveCodingAgent(requestedAgent, VOICE_AGENTS);
+        if (picked.error) return { started: false, error: picked.error };
+        const agent = picked.agent;
+        const meta = codingAgent(agent);
         if (agent === 'mac' && macAvailable && !macAvailable()) return { error: 'Mac Computer Use bridge is not reachable right now' };
-        const cwd = resolveProjectDir(project);
+        // From thread voice, a background agent works in the thread's directory by default.
+        const thread = vsid ? LIVE_THREADS.get(vsid) : null;
+        const cwd = !project && thread && thread.cwd && existsSync(thread.cwd) ? thread.cwd : resolveProjectDir(project);
         const t = title || short(task, 48);
         const dedupeKey = voiceAgentStartKey({ scope: vsid, agent, project: cwd, title: t, task });
         const dedupeMs = Math.max(10000, Number(cfg('VOICE_AGENT_START_DEDUPE_MS', '120000')) || 120000);
@@ -1925,6 +1970,11 @@ export function registerVoiceAssistant(app, ctx) {
             note: 'Kept the existing agent running; suppressed a duplicate start from the repeated voice turn.',
           };
         }
+        // Parallel background agents are good; an unbounded fan-out from one call is not.
+        const running = [...TASKS.values()].filter((x) => x.kind === 'agent' && x.status === 'running' && x.vsid && x.vsid === vsid).length;
+        if (vsid && running >= MAX_VOICE_AGENTS) {
+          return { started: false, error: `${running} background agents from this call are still running (limit ${MAX_VOICE_AGENTS}); wait for one to finish or check_tasks` };
+        }
         const key = 'new-' + randomBytes(4).toString('hex');
         const rememberStart = () => {
           RECENT_AGENT_STARTS.set(dedupeKey, { at: Date.now(), key, title: t, agent, projectDir: cwd });
@@ -1932,18 +1982,18 @@ export function registerVoiceAssistant(app, ctx) {
             for (const [k, v] of RECENT_AGENT_STARTS) if (Date.now() - v.at >= dedupeMs) RECENT_AGENT_STARTS.delete(k);
           }
         };
-        // mac/Computer-Use runs a browser, not a repo — the code-worktree/PR brief would
-        // just confuse it, so hand it the raw ask. claude/codex get the standard template.
-        const briefed = agent === 'mac' ? task : buildAgentTask(task, { owner: ownerName, deliverable, doneWhen: done_when });
+        // A computer-use agent runs a browser, not a repo — the code-worktree/PR brief would
+        // just confuse it, so hand it the raw ask. Coding agents get the standard template.
+        const briefed = meta && meta.kind === 'computer' ? task : buildAgentTask(task, { owner: ownerName, deliverable, doneWhen: done_when });
         if (DRYRUN) {
           rememberStart();
-          newTask('agent', t, { what: spokenWorkLabel({ title: t }), agent, dryRun: true });
+          newTask('agent', t, { what: spokenWorkLabel({ title: t }), agent, dryRun: true, ...(vsid ? { vsid } : {}) });
           return { started: true, title: t, agent, project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; completion will be announced' };
         }
         enqueue(key, { text: briefed, mode: 'normal', agent, cwd, title: t });
         rememberStart();
-        watchSession(key, t);
-        return { started: true, title: t, agent, project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; completion will be announced' };
+        watchSession(key, t, { vsid, cwd });
+        return { started: true, title: t, agent, agent_name: codingAgentLabel(agent), project_dir: cwd, note: 'running in background with a standard autonomy+deliverable brief; its result will be announced in this call when it finishes' };
       },
     },
     {
@@ -2003,8 +2053,11 @@ export function registerVoiceAssistant(app, ctx) {
     {
       name: 'delegate_ticket',
       description: 'Put a fresh agent on an existing Linear ticket (e.g. "INC-950"): the agent claims it, works it per repo conventions, and posts a PR. Announced when its first pass completes.',
-      parameters: { type: 'object', properties: { ticket: { type: 'string', description: 'Issue id like INC-950' }, extra: { type: 'string', description: 'Optional extra guidance' }, agent: { type: 'string', enum: ['claude', 'codex'] } }, required: ['ticket'] },
-      handler: async ({ ticket, extra = '', agent = 'claude' }) => {
+      parameters: { type: 'object', properties: { ticket: { type: 'string', description: 'Issue id like INC-950' }, extra: { type: 'string', description: 'Optional extra guidance' }, agent: codingAgentSchema(CODING_ONLY, { kinds: ['coding'] }) }, required: ['ticket'] },
+      handler: async ({ ticket, extra = '', agent: requestedAgent = DEFAULT_CODING_AGENT }, { vsid = '' } = {}) => {
+        const picked = resolveCodingAgent(requestedAgent, CODING_ONLY);
+        if (picked.error) return { delegated: false, error: picked.error };
+        const agent = picked.agent;
         const id = String(ticket).toUpperCase().replace(/[^A-Z0-9-]/g, '');
         let detail = null;
         try { detail = await selfFetch(`/api/linear/${id}`); } catch {}
@@ -2017,7 +2070,7 @@ export function registerVoiceAssistant(app, ctx) {
         const task = `Work the Linear issue ${id}: "${detail.title}".\n\nClaim it (move to In Progress), read the full ticket + comments via the Linear API (LINEAR_API_KEY in the env), do the work following the repo's conventions (isolated git worktree, PR, post the PR link as a comment on ${id}), then set it to In Review.\n\nWork autonomously end-to-end — don't stall waiting for clarification; if a decision genuinely needs Jimmy the human, file it to needs-jimmy and keep going on the rest. When done, make your final comment on ${id} self-contained (what changed + the PR URL) so it can be read back or emailed verbatim.${extra ? `\n\nExtra guidance from ${ownerName} (dictated while driving): ${extra}` : ''}`;
         const key = 'new-' + randomBytes(4).toString('hex');
         enqueue(key, { text: task, mode: 'normal', agent, cwd: defaultCwd(), title });
-        watchSession(key, title, { speakAs: what });
+        watchSession(key, title, { speakAs: what, vsid });
         selfFetch(`/api/linear/${id}/delegation`, { method: 'POST', body: { sessionTitle: title, agent, kind: 'new' } }).catch(() => {});
         return { delegated: id, issue_title: detail.title, what, agent };
       },
@@ -2531,6 +2584,34 @@ export function registerVoiceAssistant(app, ctx) {
       },
     },
     {
+      name: 'quick_lookup',
+      description: 'Fast READ-ONLY answer about code or repo state: what a file or function does, where something is implemented, what changed in recent commits or the working tree, a PR\'s status/checks/diff, CI runs. A small sandboxed model reads the repo (Read/Grep/Glob + read-only git/gh) and answers in about 5–20 seconds without touching any chat thread. Use it instead of messaging or starting an agent when the question only needs looking something up. It cannot change files, run builds or tests, or see email/Linear/the brain (use those tools). If it takes longer it returns status "running" and its answer is announced in this call later — say you\'re still looking and carry on.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'The question, complete and self-contained, e.g. "What did the last three commits change in the voice module?"' },
+          project: { type: 'string', description: 'Repo/dir name (mindbill, box-selfhost, qme-companion…) or absolute path. In a chat thread, omit it to use the thread\'s own directory.' },
+          context: { type: 'string', description: 'Optional: facts from the conversation that orient the lookup (names, ticket, what the agent just said).' },
+          ...(QUICK_ENGINES.length > 1 ? { engine: { type: 'string', enum: QUICK_ENGINES, description: `Which read-only lookup model answers (default ${QUICK_ENGINES[0]}). Use another only if Jimmy asks for it.` } } : {}),
+        },
+        required: ['question'],
+      },
+      handler: async ({ question, project = '', context = '', engine = '' }, { vsid = '' } = {}) => {
+        const thread = vsid ? LIVE_THREADS.get(vsid) : null;
+        const cwd = !project && thread && thread.cwd && existsSync(thread.cwd) ? thread.cwd : resolveProjectDir(project);
+        const jobId = 'qlk-' + randomBytes(3).toString('hex');
+        if (DRYRUN) return { answer: `(dry run) would look up: ${short(question, 120)}`, project_dir: cwd, dry_run: true };
+        const r = await quickLookup.lookup({ question, context, cwd, id: jobId, engine });
+        if (r.status === 'running') {
+          const t = newTask('lookup', short(question, 80), { what: `the lookup on ${short(question, 60)}`, cwd, ...(vsid ? { vsid } : {}) });
+          QUICK_JOB_TASKS.set(jobId, t);
+          return { status: 'running', task_id: t.id, project_dir: cwd, note: r.note };
+        }
+        if (r.error) return { error: r.error, project_dir: cwd };
+        return { answer: r.answer, project_dir: cwd, seconds: Math.round((r.ms || 0) / 1000), engine: r.engine };
+      },
+    },
+    {
       name: 'think_hard',
       description: 'Deep reasoning on a hard question — strategy, pricing, prioritization, tradeoffs, planning — via Claude (the heavyweight thinker; takes 15–60 seconds, worth it). Preamble: "Give me a moment to really think that through." Then DISCUSS the analysis conversationally in your own words, a few sentences at a time — never read it verbatim.',
       parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question, sharply stated' }, context: { type: 'string', description: 'Relevant facts/numbers from this conversation worth passing along' } }, required: ['question'] },
@@ -2566,7 +2647,7 @@ export function registerVoiceAssistant(app, ctx) {
   // always/never rules — add rules only for observed failures.
   function staticPersona() {
     return `# Role & Objective
-You are "Box" — ${ownerName}'s realtime voice copilot on his always-on dev server: the voice layer of the app that controls his coding-agent fleet (Claude Code, Codex), the Linear board, research, the company brain, notes, email, and calendar. Success = he gets real work done and real decisions made, hands-free. You ACT through tools; you never pretend to.
+You are "Box" — ${ownerName}'s realtime voice copilot on his always-on dev server: the voice layer of the app that controls his coding-agent fleet (${VOICE_AGENTS.filter((a) => a.kind === 'coding').map((a) => a.label).join(', ')}), the Linear board, research, the company brain, notes, email, and calendar. Success = he gets real work done and real decisions made, hands-free. You ACT through tools; you never pretend to.
 
 # Who you're talking to
 Jimmy Wei — founder/CEO of IncidentFox (YC W26), running solo. The business: MindBill (mindbill.org), a California workers'-comp medical-legal billing SaaS displacing daisyBill. Anchor customer: Spectrum Medical Evaluators (~200 doctors, ~3,000 bills/month, $3 per bill plus a $999 monthly minimum). He often talks to you while driving. A fresher "WHO JIMMY IS RIGHT NOW" block, when present below, overrides this summary.
@@ -2590,7 +2671,7 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF = spell the letters · Jopari
 - Call read tools silently; the UI already shows an activity chip. Never say "checking", "one sec", or another tool preamble before a quick read.
 - For action tools, report the concrete result AFTER the tool succeeds. Do not speak both a before-action preamble and an after-action confirmation for the same action.
 - Narrate before a tool only when it will take noticeable time (deep research, a new background agent, think_hard), using at most five words. Never repeat a preamble after an interruption.
-- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, linear_issue, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, gmail_search, gmail_read, check_tasks, web_search): be proactive, do not ask permission. If Jimmy named one topic, use a targeted tool; never answer it with a broad board/overview dump. For a specific Linear ticket or PR, call linear_issue so you read the actual PR purpose/body/files instead of guessing from its title.
+- Read tools (get_overview, list_sessions, check_session, read_session_output, read_session_history, linear_board, linear_issue, needs_jimmy, slack_recent, slack_search, brain_search, brain_read, get_briefing, read_notes, calendar, gmail_search, gmail_read, check_tasks, web_search, quick_lookup): be proactive, do not ask permission. If Jimmy named one topic, use a targeted tool; never answer it with a broad board/overview dump. For a specific Linear ticket or PR, call linear_issue so you read the actual PR purpose/body/files instead of guessing from its title.
 - Action tools (start_agent, delegate_ticket, send_to_session, archive_session, linear_create, linear_update, email_jimmy, request_full_artifact, take_note, voice_memory, file_access): do not repeat back or ask for confirmation when the intended safe next step is clear.
 - calendar_add is the exception: ALWAYS read the event back (title, day, time, account) and get a clear verbal yes before calling it with confirmed:true.
 - brain_save: when he says "remember that" about a durable business fact or decision, save it to the company brain (take_note is for passing thoughts). It refuses PHI, secrets, and his personal visa/legal/medical matters — say so plainly if it does.
@@ -2598,9 +2679,10 @@ daisyBill = "daisy bill" · QME, MLFS, CCWC, SIBTF = spell the letters · Jopari
 - Email is read-only (gmail_search, gmail_read) except email_jimmy to his own inbox. Never send email to anyone else.
 - Session cleanup: when Jimmy asks to archive, clean up, or hide sessions, call archive_session. It only archives idle or finished sessions and refuses working, live, or needs-input sessions; tell him plainly which sessions were archived and which were left alone. Do not use send_to_session on an archived session unless he explicitly asks to resume that archived chat.
 - Local files: you cannot read arbitrary local files directly from voice, and you must never pretend otherwise. When Jimmy asks you to read/open/parse/import a local file or spreadsheet, use file_access. First explain the limitation in one sentence: "I can't read local files directly in voice, but I can send a scoped agent to ingest it." If file_access says permission_required or needs_permission, ask exactly one permission question with the filename and scope. Only call delegate_ingest after he clearly agrees. For spreadsheets, prefer delegated ingest; it reads only the named file, is audited, and reports back in the background.
-- BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Default codex for mechanical/parallelizable work (fetch, parse, count, scrape, refactor), claude for judgment-heavy work. Several agents in parallel is normal and good.
+- BIAS TO ACTION: when Jimmy describes concrete work an agent could chase — code, data digging, fetching a dataset, drafting, checking something — START the agent immediately (start_agent) and tell him it's running. Do NOT ask "want me to kick that off?" — he can redirect after. Pick the agent by fit — ${codingAgentRoster(VOICE_AGENTS)} — default ${DEFAULT_CODING_AGENT}; if Jimmy names an agent, use it. Several agents in parallel is normal and good.
 - Delegating is one call, not a handoff dance: start_agent auto-wraps your ask in a standard brief (work autonomously, don't stall for clarification, report the deliverable in full), so just describe the work plainly — and pass a deliverable ("a PR", "a CSV of prospects") when it sharpens the ask. You do not need to dictate worktree/PR mechanics.
-- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND. Normal progress/completion events stay silent in the UI; do not switch topics to announce them. Only an explicit watcher or urgent failure is spoken as [TASK UPDATE]. If one arrives, give one self-contained sentence with purpose + impact + next step, then return to the active topic without asking a generic follow-up question.
+- quick_lookup: for questions about code or repo state (what something does, where it lives, what changed, a PR's checks or status, CI) that only need LOOKING UP, call quick_lookup — a fast read-only model answers in seconds without tying up any agent. Use start_agent only when the work needs changes, runs, tests, or a long investigation. Several lookups and agents can run at once.
+- Long work (deep_research, start_agent, delegate_ticket) runs in the BACKGROUND, and so does a quick_lookup that returned status "running". Work started in THIS call reports back on its own as a [TASK UPDATE] when it finishes; other progress/completion events stay silent, and an explicit watcher or urgent failure is also spoken as [TASK UPDATE]. If one arrives, give one self-contained sentence with purpose + impact + next step, then return to the active topic without asking a generic follow-up question.
 - Watchers — when Jimmy says "tell me when that finishes / when the PR is ready / if it needs me", call watch_session. It registers a server-side watcher; status changes arrive later as [TASK UPDATE] system messages through the normal notification queue.
 - Full lists & long outputs — when check_session flags output_truncated, it has already fetched the complete output and included full_summary. Use that summary immediately; do not announce truncation or ask Jimmy whether to fetch more. If his question needs exact wording or every item, call read_session_output mode:full immediately and page through next_page as needed. Never read a long artifact aloud. To put the WHOLE thing in Jimmy's inbox, call request_full_artifact (it emails him the complete artifact with the PR link).
 - Whole conversation, not just the latest reply — read_session_output/check_session only show an agent's LAST message. When Jimmy asks what an agent discussed earlier, what it was told, or for the full thread/context, call read_session_history (include:'full' pages the ordered turns; include:'prompts' recalls just what was asked). It reads the persisted transcript directly — NEVER message the agent to summarize itself, and never guess. Secrets are auto-redacted; it returns a transcript_ref you can cite. If he wants the entire conversation in his inbox, call request_full_artifact with transcript:true.
@@ -3120,6 +3202,10 @@ ${voiceAutonomyPolicy()}
           tools: liveBackendTools(toolSchemas, { extra: [ASK_THREAD_AGENT_TOOL] }),
         });
         meta = { scope, sessionId, agent, historyMessages: input.length, omitted, contextChars: context.length };
+        // Remember which thread this call belongs to (quick_lookup / start_agent default cwd).
+        const threadCwd = String(body.cwd || '').trim();
+        LIVE_THREADS.set(vsid, { sessionId, agent, title, cwd: isAbsolute(threadCwd) && existsSync(threadCwd) ? threadCwd : '', at: Date.now() });
+        if (LIVE_THREADS.size > 50) LIVE_THREADS.delete(LIVE_THREADS.keys().next().value);
       } else {
         let input = [];
         if (reconnectVsid) {

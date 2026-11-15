@@ -29,8 +29,11 @@
 ;(function () {
   const DEFAULT_SETTLE_MS = 1000;
 
-  function shouldSpeakUpdate(event) {
-    return !!(event && event.audible === true);
+  // An event tagged with a vsid belongs to the voice call that started that work (its
+  // background agent / slow lookup finished): only that call speaks it.
+  function shouldSpeakUpdate(event, vsid) {
+    if (!(event && event.audible === true)) return false;
+    return !event.vsid || event.vsid === vsid;
   }
 
   function isEmptyTranscript(text) {

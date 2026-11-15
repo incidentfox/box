@@ -477,7 +477,7 @@
         if (tv !== call) break;
         call.cursor = Math.max(call.cursor, e.seq);
         bubble('notice', '📣 ' + (e.title || e.kind));
-        if (globalThis.VoiceNotify && globalThis.VoiceNotify.shouldSpeakUpdate(e)) {
+        if (globalThis.VoiceNotify && globalThis.VoiceNotify.shouldSpeakUpdate(e, call.vsid)) {
           call.engine.commentary(null, `[TASK UPDATE — a background event, not Jimmy speaking] ${e.speak} Mention it once with purpose, impact, and next step, then return to the topic.`);
         }
       }

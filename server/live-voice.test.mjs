@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {
   ASK_THREAD_AGENT_TOOL, buildLiveSession, createLiveWebrtcSession, liveBackendInstructions, liveBackendTools,
   liveGlobalInstructions, liveInputFromTurns, liveThreadInstructions, liveVoiceConfig, speakableText,
-  LIVE_INPUT_MAX_TOKENS, liveContextSection,
+  LIVE_INPUT_MAX_TOKENS, liveContextSection, liveThreadBackendSection,
 } from './live-voice.mjs';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -73,7 +73,7 @@ const cfgOf = (env) => (k, d = '') => (env[k] == null || env[k] === '' ? d : env
   const tb = liveBackendInstructions('- persona: start_agent for new work', 'snap', 'CTX', { thread: { title: 'Fix voice', agent: 'codex', cwd: '/repo' } });
   assert.ok(tb.includes('ask_thread_agent') && tb.includes('"Fix voice"') && tb.includes('Codex agent, working in /repo'));
   assert.match(tb, /email, calendar, the company brain, Linear tickets/);
-  assert.match(tb, /Do not use start_agent, send_to_session, or delegate_ticket for this thread's own work/);
+  assert.match(tb, /Do not use start_agent, send_to_session, or delegate_ticket to continue this thread's own work/);
   assert.ok(tb.indexOf('- persona') < tb.indexOf('inside one chat thread'), 'thread rules come after (and override) the persona');
   assert.ok(tb.indexOf('inside one chat thread') < tb.indexOf('CTX') && tb.indexOf('CTX') < tb.indexOf('CURRENT CONTEXT SNAPSHOT'));
 }
@@ -240,6 +240,22 @@ const cfgOf = (env) => (k, d = '') => (env[k] == null || env[k] === '' ? d : env
   // fits the 16K-token instructions limit with a max-size block
   const maxCtx = 'y'.repeat(JIMMY_CONTEXT_MAX_CHARS);
   assert.ok(liveGlobalInstructions({ snapshot: 'z'.repeat(4000), context: maxCtx }).length / 3.6 < 16000);
+}
+
+// thread backend routing: quick_lookup for read-only questions, start_agent for parallel
+// independent work, ask_thread_agent only for the thread's own work
+{
+  const sec = liveThreadBackendSection({ title: 'voice', agent: 'claude', cwd: '/repo' });
+  assert.match(sec, /quick_lookup/);
+  assert.match(sec, /does not interrupt or queue behind the thread's agent/);
+  assert.match(sec, /start_agent \(it defaults to this thread's directory/);
+  assert.match(sec, /never use start_agent for a mere question/);
+  assert.ok(sec.indexOf('quick_lookup') < sec.indexOf('ask_thread_agent'));
+  // voice prompts still carry no tool names
+  for (const v of [liveThreadInstructions({ title: 'x' }), liveGlobalInstructions({})]) {
+    assert.ok(!/quick_lookup|start_agent|ask_thread_agent/.test(v));
+    assert.match(v, /background/);
+  }
 }
 
 console.log('live-voice tests ok');

@@ -62,6 +62,7 @@
     voice_memory: 'Updating memory…', file_access: 'Checking file access…',
     brain_save: 'Saving to the brain…', gmail_search: 'Checking email…', gmail_read: 'Opening email…',
     calendar_add: 'Adding to calendar…', needs_jimmy_resolve: 'Recording decision…',
+    quick_lookup: 'Looking it up…', ask_thread_agent: 'Handing to the agent…',
   };
   const toolLabel = (name) => TOOL_LABELS[name] || String(name || 'tool');
   // Past-tense label once a tool finished (the pill resolves to this).
@@ -74,6 +75,7 @@
     read_notes: 'Read notes', email_jimmy: 'Sent email', calendar: 'Checked calendar', think_hard: 'Thought it through',
     voice_memory: 'Updated memory', file_access: 'Checked file access', brain_save: 'Saved to the brain', gmail_search: 'Checked email',
     gmail_read: 'Opened email', calendar_add: 'Calendar updated', needs_jimmy_resolve: 'Recorded decision',
+    quick_lookup: 'Looked it up',
   };
   const toolDoneLabel = (name) => TOOL_DONE[name] || toolLabel(name).replace(/…$/, '');
 

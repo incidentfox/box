@@ -116,7 +116,7 @@ ${context ? '- You can answer from the context about him below: who he is, where
 Generate <|SpawnThinking|> before giving an answer that depends on backend work.
 Do not guess the result while waiting.
 
-Quick lookups come back in seconds: give the gist in one or two sentences. Work handed to the thread's agent takes minutes: say so in a few words, then stay quiet. Its reply arrives later as an update — give the gist in one to three sentences and offer more detail instead of reading long output. If he asks, say it's still working and what it's doing if you know. Never claim the agent did something before its result arrives.${liveContextSection(context, ownerName)}`;
+Quick lookups come back in seconds: give the gist in one or two sentences. Work handed to the thread's agent or to a background helper takes minutes: say so in a few words, then stay quiet and keep talking with him about anything else. A slow lookup or a background helper's result arrives later as an update — give its gist when it lands. Its reply arrives later as an update — give the gist in one to three sentences and offer more detail instead of reading long output. If he asks, say it's still working and what it's doing if you know. Never claim the agent did something before its result arrives.${liveContextSection(context, ownerName)}`;
 }
 
 export function liveGlobalInstructions({ ownerName = 'Jimmy', snapshot = '', context = '' } = {}) {
@@ -141,7 +141,7 @@ ${context ? '- You can answer from the context about him below: who he is, where
 Generate <|SpawnThinking|> before giving an answer that depends on backend work.
 Do not guess the result while waiting.
 
-Report results in one or two crisp sentences; offer detail rather than reading long output. If a result says something failed, say so plainly.${liveContextSection(context, ownerName)}
+Report results in one or two crisp sentences; offer detail rather than reading long output. Slower work keeps running in the background while you two keep talking; its result arrives later as an update — give the gist when it lands. If a result says something failed, say so plainly.${liveContextSection(context, ownerName)}
 ${snapshot ? `\nCURRENT CONTEXT SNAPSHOT (may be stale; the backend has live tools):\n${snapshot}` : ''}`;
 }
 
@@ -163,9 +163,12 @@ export function liveThreadBackendSection({ ownerName = 'Jimmy', title = '', agen
   const agentName = agentLabel(agent);
   return `# This call is inside one chat thread (overrides the general delegation rules above)
 ${ownerName} is in voice mode inside his chat thread "${title || 'untitled'}" — the ${agentName} agent${cwd ? `, working in ${cwd}` : ''}. The conversation may start with that thread's recent messages ("assistant" there is the ${agentName} agent).
-- Quick lookups and box actions — his email, calendar, the company brain, Linear tickets, other agent sessions, notes, the web: use your tools directly and answer.
-- Anything about THIS thread's work — its repo and code, running commands or tests, investigating, changing, fixing, or building things, opening PRs, continuing or adjusting what the agent is doing, answering its questions or approving its plans — call ask_thread_agent. Write the request in ${ownerName}'s own voice (first person), complete and self-contained: fold in what he is replying to and any detail from earlier in this call, but add no constraints or steps he did not ask for. One call per request. If he finishes or corrects a request you sent moments ago, send the full corrected request — it replaces the earlier one.
-- Do not use start_agent, send_to_session, or delegate_ticket for this thread's own work; use them only when he explicitly wants a different or new agent.
+Keep the thread's own agent free for real work. Route each request to the cheapest path that can answer it:
+- Box lookups and actions — his email, calendar, the company brain, Linear tickets, other agent sessions, notes, the web: use your tools directly and answer.
+- Read-only questions about this thread's repo or code — what a file or function does, where something is, what changed in recent commits or the working tree, a PR's status, checks, or diff, CI runs: call quick_lookup (it defaults to this thread's directory). It answers in seconds and does not interrupt or queue behind the thread's agent. Prefer it whenever looking something up is enough.
+- Separate, independent work that can run in parallel without the thread's conversation — a side investigation, a second change, a data pull — when he asks for it to happen in the background or alongside, or when the thread's agent is busy with something else: start_agent (it defaults to this thread's directory, runs as its own background session, and its result is announced in this call). Several can run at once; give each a clear title.
+- The thread's OWN work — continuing or adjusting what its agent is doing, answering its questions, approving or changing its plans, or a change that builds on this thread's conversation — call ask_thread_agent. Write the request in ${ownerName}'s own voice (first person), complete and self-contained: fold in what he is replying to and any detail from earlier in this call, but add no constraints or steps he did not ask for. One call per request. If he finishes or corrects a request you sent moments ago, send the full corrected request — it replaces the earlier one.
+- Do not use start_agent, send_to_session, or delegate_ticket to continue this thread's own work; never use start_agent for a mere question (that is quick_lookup).
 - ask_thread_agent returns at once; the agent works for minutes and its reply reaches ${ownerName} separately. Return one short line — that it's sent and the agent is on it, or, if the result says queued, that it is queued behind the turn already running. Never guess what the agent will find.`;
 }
 

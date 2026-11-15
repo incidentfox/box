@@ -1475,7 +1475,7 @@ async function voPollUpdates() {
     for (const e of (j.events || [])) {
       voCursor = Math.max(voCursor, e.seq);
       voNotice('📣 ' + (e.title || e.kind));
-      if (!(globalThis.VoiceNotify && globalThis.VoiceNotify.shouldSpeakUpdate(e))) {
+      if (!(globalThis.VoiceNotify && globalThis.VoiceNotify.shouldSpeakUpdate(e, voVsid))) {
         voDiag('pipeline', 'notify_silent', { kind: e.kind || '', title: String(e.title || '').slice(0, 80) });
         continue;
       }
