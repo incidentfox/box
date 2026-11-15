@@ -1604,8 +1604,9 @@ export function registerVoiceAssistant(app, ctx) {
     run, config: QUICK, engines: QUICK_ENGINES,
     tmpFile: (id) => join(VOICE_DIR, 'lookups', `${String(id).replace(/[^\w-]/g, '')}.txt`),
     readText: (f) => { try { const t = readFileSync(f, 'utf8'); try { unlinkSync(f); } catch {} return t; } catch { return ''; } },
-    // Same auth as the box's Codex chats (codex-exec-engine): the CLI login, not the API key.
-    codexEnv: () => { const e = { ...childEnv() }; delete e.OPENAI_API_KEY; delete e.CODEX_API_KEY; return e; },
+    // Metered API key (Jimmy OK'd, 2026-11-15): the box's ChatGPT Codex login rejects the
+    // configured models. Falls back to the CLI login when no key is set.
+    codexEnv: () => { const e = { ...childEnv() }; if (OPENAI_KEY) e.CODEX_API_KEY = OPENAI_KEY; delete e.OPENAI_API_KEY; return e; },
     redact: (t) => redactSecrets(t).text,
     onBackgroundDone: (job, result) => {
       const t = QUICK_JOB_TASKS.get(job.id);
