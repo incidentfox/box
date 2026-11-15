@@ -42,6 +42,7 @@ let voDropCurrentResponse = false; // empty/noise turn: cancel and suppress the 
 // Experimental adapter mode: browser VAD records one utterance, server STT routes it
 // through a persistent Claude/Codex session, then HTTP TTS plays the returned text.
 let voLive = null, voLiveBubbles = new Map(), voLiveRaf = 0, voLiveReconnects = 0; // GPT-Live (mode 'live')
+let voResumeCancel = null, voIosNoticeShown = false; // screen-off pause → resume on return (iOS web policy)
 let voMode = 'realtime', voAdapterCfg = null, voAdapterAudioCtx = null, voAdapterAnalyser = null;
 let voAdapterRaf = 0, voAdapterRecorder = null, voAdapterChunks = [], voAdapterSpeechAt = 0;
 let voAdapterSilentAt = 0, voAdapterBusy = false, voAdapterSpeaking = false;
@@ -540,10 +541,11 @@ async function voLiveTool({ name, arguments: args, call_id }) {
 }
 // The orb reads GPT-Live's levels itself (voOrbLevels); nothing to drive per frame here.
 function voLiveAnimate() { voLiveRaf = 0; }
-async function voStartLive(isReconnect) {
+async function voStartLive(isReconnect, { resumed = false } = {}) {
   voSetState(isReconnect ? 'reconnecting' : 'connecting');
   const engine = LiveVoice.create({
     api, audioEl: voAudioEl,
+    onMuteToggle: () => voToggleMute(),
     onCaption: voLiveCaption,
     onDelegation: (d) => { voOrbMode('thinking'); voDiag('live', 'delegation', { target: d.target || '' }); },
     onFunctionCall: voLiveTool,
@@ -556,8 +558,28 @@ async function voStartLive(isReconnect) {
       voDiag('live', 'closed', { reason, usageSeconds });
       voLive = null;
       if (voState === 'ended' || voState === 'off') return;
+      const action = LiveVoice.closeAction({ reason, reconnects: voLiveReconnects, maxReconnects: 6 });
+      // Screen off / app switched: iOS stopped the mic and audio. Keep the call; resume the same
+      // conversation (same vsid, server folds in the transcript) once the page is visible again.
+      // This doesn't use the reconnect budget, and nothing tries to keep audio alive meanwhile.
+      if (action === 'pause') {
+        voSetState('reconnecting');
+        voBanner('Paused — screen off. Resumes when you\'re back.');
+        voNotice('Paused while the screen was off.');
+        if (voResumeCancel) voResumeCancel();
+        voResumeCancel = LiveVoice.whenVisible(document, () => {
+          voResumeCancel = null;
+          if (voState !== 'reconnecting') return;
+          voStartLive(true, { resumed: true }).catch((e) => {
+            voDiag('live', 'resume_failed', { message: String((e && e.message) || e).slice(0, 160) });
+            if (voState !== 'ended' && voState !== 'off') voEnd('ended');
+            voNotice('Voice paused — tap Start to resume.');
+          });
+        });
+        return;
+      }
       // 2-hour cap or a dead zone: resume the same conversation (server folds in the transcript).
-      if ((reason === 'expired' || reason === 'connection_lost') && voLiveReconnects < 6) {
+      if (action === 'reconnect') {
         voLiveReconnects++;
         voSetState('reconnecting');
         voReconnectT = setTimeout(() => voStartLive(true).catch(() => {}), Math.min(8000, 800 * voLiveReconnects));
@@ -577,7 +599,8 @@ async function voStartLive(isReconnect) {
   engine.setMuted(voMuted);
   voSetState('live');
   voBanner('');
-  voNotice(isReconnect ? 'Reconnected.' : `GPT-Live ready (${info.model}, backend ${info.backendModel || 'box'}). Just talk — you can interrupt anytime.`);
+  if (!voIosNoticeShown && LiveVoice.isIosStandalone(navigator, window)) { voIosNoticeShown = true; voNotice(LiveVoice.IOS_BACKGROUND_NOTICE); }
+  voNotice(resumed ? 'Resumed.' : isReconnect ? 'Reconnected.' : `GPT-Live ready (${info.model}, backend ${info.backendModel || 'box'}). Just talk — you can interrupt anytime.`);
   if (voLiveRaf) cancelAnimationFrame(voLiveRaf);
   voLiveRaf = requestAnimationFrame(voLiveAnimate);
 }
@@ -1154,6 +1177,7 @@ function voEnd(finalState) {
   voSetState(finalState || 'ended');
   voBanner('');
   for (const t of [voReconnectT, voRotateT]) if (t) clearTimeout(t);
+  if (voResumeCancel) { voResumeCancel(); voResumeCancel = null; }
   for (const iv of [voClockIv, voPollIv, voFlushIv]) if (iv) clearInterval(iv);
   voReconnectT = voRotateT = voClockIv = voPollIv = voFlushIv = null;
   if (voNotifyQ) voNotifyQ.setChannelOpen(false);
