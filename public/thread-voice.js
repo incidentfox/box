@@ -213,7 +213,8 @@
     const call = tv, st = call.engine.state;
     syncOrbs();
     if (call.failed) return setStatus("Couldn't connect");
-    if (st === 'connecting' || st === 'idle') return setStatus(call.reconnects ? 'Reconnecting…' : 'Connecting…');
+    if (call.paused) return setStatus('Paused — resumes when you\'re back');
+    if (st === 'connecting' || st === 'idle') return setStatus(call.reconnects || call.resuming ? 'Reconnecting…' : 'Connecting…');
     if (st !== 'live') return;
     if (call.engine.muted) return setStatus('Muted');
     const working = workingItems(call);
@@ -230,7 +231,7 @@
   function syncOrbs() {
     if (!tv) return;
     const call = tv, st = call.engine.state;
-    const phase = call.failed ? 'error' : st === 'live' ? (call.engine.muted ? 'muted' : 'live') : (st === 'connecting' || st === 'idle') ? (call.reconnects ? 'reconnecting' : 'connecting') : 'idle';
+    const phase = call.failed ? 'error' : st === 'live' ? (call.engine.muted ? 'muted' : 'live') : (st === 'connecting' || st === 'idle') ? (call.reconnects || call.resuming ? 'reconnecting' : 'connecting') : call.paused ? 'reconnecting' : 'idle';
     const working = workingItems(call).length > 0;
     const s = { phase, thinking: call.backend.size > 0, working };
     orbs((o) => o.set(s));
@@ -500,6 +501,7 @@
       onCaption: (seg) => { if (tv === call) onCaption(call, seg); },
       onDelegation: (d) => { if (tv === call) { call.backend.set(d.id, Date.now()); paintStatus(); } },
       onFunctionCall: (fc) => onFunctionCall(call, fc),
+      onMuteToggle: () => { if (tv === call) toggleMute(); },
       onBackendEvent: (inner, delegationId) => {
         if (tv !== call) return;
         if (inner.type === 'response.completed' || inner.type === 'response.failed' || inner.type === 'response.incomplete') { call.backend.delete(delegationId); paintStatus(); }
@@ -507,8 +509,28 @@
       onError: (err) => { if (err && (err.code || err.message)) console.warn('[thread-voice]', err.code || '', err.message || ''); },
       onClosed: ({ reason }) => {
         if (tv !== call || call.engine !== engine) return;
+        // A failed resume after the screen was off is handled by connect()'s catch ("tap to resume").
+        if (reason === 'start_failed' && call.resuming) return;
+        const action = window.LiveVoice.closeAction({ reason, stopping: call.stopping, reconnects: call.reconnects, maxReconnects: 3 });
+        // Screen off / app switched: iOS stopped the mic and audio. Keep the call and resume the
+        // same conversation when the page is visible again — this doesn't use the reconnect budget.
+        if (action === 'pause') {
+          call.backend.clear();
+          call.paused = true; call.resuming = true;
+          setStatus('Paused — resumes when you\'re back');
+          bubble('notice', 'Paused while the screen was off.');
+          if (call.cancelResume) call.cancelResume();
+          call.cancelResume = window.LiveVoice.whenVisible(document, () => {
+            call.cancelResume = null;
+            if (tv !== call || call.stopping) return;
+            call.paused = false;
+            setStatus('Reconnecting…');
+            call.engine = makeEngine(call); connect(call);
+          });
+          return;
+        }
         // Session cap (2h) or a dropped connection: resume with fresh thread history.
-        if ((reason === 'expired' || reason === 'connection_lost') && call.reconnects < 3 && !call.stopping) {
+        if (action === 'reconnect') {
           call.reconnects++;
           call.backend.clear();
           setStatus('Reconnecting…');
@@ -570,14 +592,28 @@
       if (call.cursor == null && Number.isFinite(Number(info.cursor))) call.cursor = Number(info.cursor);
       call.lastSent = null; call.pendingSend = null;
       const pending = call.awaiting.filter((a) => !a.done).length;
-      call.engine.commentary(null, call.reconnects
+      const restored = call.reconnects || call.resuming;
+      call.engine.commentary(null, restored
         ? `The voice connection was restored. Do not greet again; say "I'm back" and keep listening.${pending ? ' The thread\'s agent is still working on the last request.' : ''}`
         : `Greet Jimmy in a few words — say you are on this chat and ready${agentBusy(call) ? ', and that the agent is still finishing an earlier turn, so new requests will queue behind it' : ''} — then pause and listen.`);
-      if (call.reconnects) { bubble('notice', 'Reconnected.'); if (UI()) UI().haptic('tap'); }
+      if (restored) { bubble('notice', call.resuming ? 'Resumed.' : 'Reconnected.'); if (UI()) UI().haptic('tap'); }
       else if (UI()) UI().haptic('start');
+      call.resuming = false;
+      // Once per call on an iPhone home-screen app: say up front what locking the screen does.
+      if (!call.iosNoticeShown && window.LiveVoice.isIosStandalone(navigator, window)) {
+        call.iosNoticeShown = true; bubble('notice', window.LiveVoice.IOS_BACKGROUND_NOTICE);
+      }
       paintStatus();
     } catch (e) {
       if (tv !== call) return;
+      // Coming back from the background can fail when iOS wants a fresh tap for the mic: end
+      // cleanly and say how to pick it back up instead of retrying in a loop.
+      if (call.resuming) {
+        call.resuming = false;
+        toast('Voice paused — tap the voice button to resume');
+        cleanup('failed');
+        return;
+      }
       toast(String((e && e.message) || e).slice(0, 140));
       // Let the orb show the failure for a beat before the view closes itself.
       call.failed = true; paintStatus();
@@ -598,6 +634,7 @@
     const call = tv;
     if (call.raf) cancelAnimationFrame(call.raf);
     if (call.pollIv) clearInterval(call.pollIv);
+    if (call.cancelResume) { call.cancelResume(); call.cancelResume = null; }
     try { call.wake && call.wake.release(); } catch {}
     // Leaving the chat already moved history; otherwise drop our "expanded" entry.
     if (reason === 'left') call.histPushed = false;
