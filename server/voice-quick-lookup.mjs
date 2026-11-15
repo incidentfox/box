@@ -48,10 +48,11 @@ export function quickLookupConfig(cfg) {
     waitMs: num('VOICE_QUICK_WAIT_MS', 22000, 2000, 60000),     // how long the tool call waits inline
     timeoutMs: num('VOICE_QUICK_TIMEOUT_MS', 150000, 20000, 600000), // hard kill
     maxConcurrent: num('VOICE_QUICK_MAX_CONCURRENT', 3, 1, 8),
-    // Lookup engines, in preference order. Codex is opt-in (VOICE_QUICK_ENGINES=claude,codex):
-    // its read-only sandbox needs bubblewrap user namespaces, which Ubuntu's AppArmor blocks
-    // unless bwrap has a userns profile — without it Codex can't run even read-only git.
-    engines: String(cfg('VOICE_QUICK_ENGINES', 'claude') || 'claude').split(',').map((s) => s.trim().toLowerCase()).filter((e) => e === 'claude' || e === 'codex'),
+    // Lookup engines, in preference order (first = default). Codex's read-only sandbox needs
+    // bubblewrap user namespaces; on Ubuntu 24.04 that takes a per-binary AppArmor userns
+    // profile for /usr/bin/bwrap (installed on the box as /etc/apparmor.d/bwrap). Without it
+    // Codex can't run even read-only git — set VOICE_QUICK_ENGINES=claude on such hosts.
+    engines: String(cfg('VOICE_QUICK_ENGINES', 'claude,codex') || 'claude,codex').split(',').map((s) => s.trim().toLowerCase()).filter((e) => e === 'claude' || e === 'codex'),
     codexModel: cfg('VOICE_QUICK_CODEX_MODEL', 'gpt-6-luna') || 'gpt-6-luna',
   };
 }

@@ -114,9 +114,11 @@ const tick = () => new Promise((r) => setImmediate(r));
   assert.match((await off.lookup({ question: 'q' })).error, /turned off/);
 }
 
-// engines: claude by default; codex only when opted in AND installed; codex runs read-only + ephemeral
+// engines: claude first (default), codex offered when installed; codex runs read-only + ephemeral
 {
-  assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({}))), ['claude']);
+  assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({}))), ['claude', 'codex']);
+  assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({})), { hasBin: (b) => b === 'claude' }), ['claude']);
+  assert.deepEqual(quickLookupEngines(quickLookupConfig(cfgOf({ VOICE_QUICK_ENGINES: 'claude' }))), ['claude']);
   const both = quickLookupConfig(cfgOf({ VOICE_QUICK_ENGINES: 'codex,claude,bogus' }));
   assert.deepEqual(quickLookupEngines(both), ['codex', 'claude']);
   assert.deepEqual(quickLookupEngines(both, { hasBin: (b) => b === 'claude' }), ['claude']);
