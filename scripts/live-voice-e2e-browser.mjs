@@ -21,18 +21,24 @@ import { homedir } from 'node:os';
 const BASE = process.env.VO_BASE || 'http://127.0.0.1:7461';
 const TOKEN = process.env.VO_TOKEN || 'votest';
 const PW_DIR = process.env.PW_DIR || join(homedir(), 'development', 'tools', 'playwright');
-const SCENARIO = process.env.LV_SCENARIO === 'global' ? 'global' : 'thread';
+//   LV_SCENARIO=lookup  a chat thread whose cwd is this repo: a read-only question about the repo
+//                       must go to quick_lookup (fast sandboxed model), NOT into the thread, and
+//                       the answer must be spoken.
+const SCENARIO = ['global', 'lookup'].includes(process.env.LV_SCENARIO) ? process.env.LV_SCENARIO : 'thread';
+const REPO_DIR = process.env.LV_REPO_DIR || process.cwd();
 const WAV = process.env.VO_WAV || `/tmp/lv-question-${SCENARIO}.wav`;
 const SHOT = process.env.VO_SHOT || `/tmp/lv-e2e-${SCENARIO}.png`;
 const shotAs = (tag) => SHOT.replace(/\.png$/, `-${tag}.png`);
 // Thread: a quick lookup first (direct tool), then real work for the thread's agent.
 const QUESTIONS = process.env.VO_QUESTION ? [process.env.VO_QUESTION] : SCENARIO === 'global'
   ? ['Hey, quick check. What agent sessions are active on the box right now?']
+  : SCENARIO === 'lookup'
+  ? ["Quick question about this repo. What's the subject of the most recent git commit?"]
   : ["Quick one first. What's on my calendar tomorrow?", 'Thanks. Now have the agent in this chat run the unit tests for the voice module, and tell me if they pass.'];
 const GAP_S = Number(process.env.VO_GAP_S || 16); // silence between questions (room for the answer)
 const READ_ONLY_TOOLS = new Set(['calendar', 'gmail_search', 'gmail_read', 'list_sessions', 'check_session', 'get_overview',
   'linear_board', 'linear_issue', 'needs_jimmy', 'brain_search', 'brain_read', 'get_briefing', 'read_notes', 'check_tasks',
-  'read_session_output', 'read_session_history', 'slack_recent', 'slack_search']);
+  'read_session_output', 'read_session_history', 'slack_recent', 'slack_search', 'quick_lookup']);
 
 const require_ = createRequire(join(PW_DIR, 'package.json'));
 const { chromium } = require_('@playwright/test');
@@ -124,6 +130,27 @@ if (SCENARIO === 'global') {
     await page.waitForTimeout(400);
   }
   step('assistant spoke an answer', asst.length > 20, `"${asst.slice(-260)}"`);
+} else if (SCENARIO === 'lookup') {
+  await page.evaluate((cwd) => { openChat({ id: null, title: 'Repo questions', agent: 'claude' }); cur.cwd = cwd; }, REPO_DIR);
+  await page.waitForSelector('#threadVoiceBtn:not(.hidden)', { timeout: 10000 });
+  await page.evaluate(() => { window.__sent = []; window.enqueueText = (text, opts) => { window.__sent.push({ text, opts }); }; });
+  await page.click('#threadVoiceBtn');
+  const live = await page.waitForFunction(() => { const s = document.getElementById('tvFullStatus'); return s && /Listening|Sent|working/i.test(s.textContent); }, { timeout: 30000 }).then(() => true).catch(() => false);
+  step('GPT-Live connected in the thread', live);
+  const chip = await page.waitForFunction(() => [...document.querySelectorAll('#tvFeed .voToolChip.ok, #tvFeed .voToolChip.warn')].some((c) => /look/i.test(c.textContent)), { timeout: 75000 }).then(() => true).catch(() => false);
+  const chips = await page.$$eval('#tvFeed .voToolChip', (els) => els.map((e) => e.className.replace('voToolChip', '').trim() + ':' + e.textContent.trim()));
+  step('quick_lookup ran as a direct tool', chip && toolCalls.includes('quick_lookup'), chips.join(' | '));
+  const subject = (await import('node:child_process')).execSync('git log -1 --format=%s', { cwd: REPO_DIR }).toString().trim();
+  const words = subject.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 4);
+  let said = '', t0 = Date.now();
+  while (Date.now() - t0 < 45000) {
+    said = await page.evaluate(() => ThreadVoice.transcript().split('\n').filter((l) => l.startsWith('assistant:')).join(' '));
+    if (words.filter((w) => said.toLowerCase().includes(w)).length >= 2) break;
+    await page.waitForTimeout(400);
+  }
+  step('spoke the real commit subject', words.filter((w) => said.toLowerCase().includes(w)).length >= 2, `"${said.slice(-220)}" vs "${subject}"`);
+  step('the question did not go into the thread', !(await page.evaluate(() => window.__sent.length)));
+  console.log('  transcript:\n    ' + (await page.evaluate(() => ThreadVoice.transcript())).split('\n').join('\n    '));
 } else {
   await page.evaluate(() => openChat({ id: null, title: 'Voice module tests', agent: 'claude' }));
   await page.waitForSelector('#threadVoiceBtn:not(.hidden)', { timeout: 10000 });

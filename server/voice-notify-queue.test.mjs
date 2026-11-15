@@ -212,6 +212,12 @@ function withFailingSend(settleMs = 1000) {
   assert.equal(shouldSpeakUpdate({ kind: 'watch_pr_ready', audible: true }), true);
   assert.equal(shouldSpeakUpdate({ kind: 'task_failed', audible: true }), true);
   assert.equal(shouldSpeakUpdate({}), false);
+  // Work a voice call started is spoken only in THAT call.
+  const mine = { kind: 'task_done', audible: true, vsid: 'call-a' };
+  assert.equal(shouldSpeakUpdate(mine, 'call-a'), true);
+  assert.equal(shouldSpeakUpdate(mine, 'call-b'), false);
+  assert.equal(shouldSpeakUpdate(mine), false);
+  assert.equal(shouldSpeakUpdate({ kind: 'watch_pr_ready', audible: true }, 'call-b'), true); // untagged = everyone
 }
 
 // Empty/noise turns and turn-detected cancellations are the exact double-reply pattern

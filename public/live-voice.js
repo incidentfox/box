@@ -15,6 +15,7 @@
  */
 (function () {
   const GAP_MS = 1400; // a pause longer than this starts a new caption segment
+  const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
   function uid(prefix) {
     try { return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`; } catch { return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`; }
@@ -62,8 +63,12 @@
     voice_memory: 'Updating memory…', file_access: 'Checking file access…',
     brain_save: 'Saving to the brain…', gmail_search: 'Checking email…', gmail_read: 'Opening email…',
     calendar_add: 'Adding to calendar…', needs_jimmy_resolve: 'Recording decision…',
+    quick_lookup: 'Looking it up…', ask_thread_agent: 'Handing to the agent…',
   };
   const toolLabel = (name) => TOOL_LABELS[name] || String(name || 'tool');
+  // Coding-agent display names — mirrors server/coding-agents.mjs (kept in sync by public/live-voice.test.mjs).
+  const AGENT_LABELS = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI', agy: 'Antigravity', deepseek: 'DeepSeek', experiential: 'Experiential', mac: 'Computer Use' };
+  const agentLabel = (id) => AGENT_LABELS[String(id || 'claude').toLowerCase()] || String(id);
   // Past-tense label once a tool finished (the pill resolves to this).
   const TOOL_DONE = {
     get_overview: 'Checked the box', list_sessions: 'Listed sessions', check_session: 'Checked session',
@@ -74,6 +79,7 @@
     read_notes: 'Read notes', email_jimmy: 'Sent email', calendar: 'Checked calendar', think_hard: 'Thought it through',
     voice_memory: 'Updated memory', file_access: 'Checked file access', brain_save: 'Saved to the brain', gmail_search: 'Checked email',
     gmail_read: 'Opened email', calendar_add: 'Calendar updated', needs_jimmy_resolve: 'Recorded decision',
+    quick_lookup: 'Looked it up',
   };
   const toolDoneLabel = (name) => TOOL_DONE[name] || toolLabel(name).replace(/…$/, '');
 
@@ -110,6 +116,66 @@
     return { output, outcome, failedParts, failed: outcome === 'fail', ms: Date.now() - t0 };
   }
 
+  // ---- background / screen-off lifecycle (iOS web policy) ----
+  // iOS does not let a web page keep capturing the mic or playing WebRTC audio while the screen
+  // is locked or the app is in the background (no web API grants that; only a native app with
+  // background-audio/VoIP entitlements can). So instead of fighting it with silent-audio or
+  // keep-alive tricks, a call PAUSES when the page is hidden and RESUMES when it comes back.
+  const HIDDEN_GRACE_MS = 3000; // a drop this soon after the page was hidden is the OS, not the network
+
+  // Why a live connection died: 'backgrounded' (page hidden now or moments ago) or 'connection_lost'.
+  function lostReason({ hidden = false, hiddenAt = 0, now = Date.now(), graceMs = HIDDEN_GRACE_MS } = {}) {
+    if (hidden) return 'backgrounded';
+    if (hiddenAt && now - hiddenAt <= graceMs) return 'backgrounded';
+    return 'connection_lost';
+  }
+
+  // What a caller should do when a call's engine closed:
+  //   'pause'     — backgrounded: keep the call, wait until visible, then resume (no budget used)
+  //   'reconnect' — session cap / network drop with budget left
+  //   'end'       — user stop, safety filter, failures, or budget exhausted
+  function closeAction({ reason = '', stopping = false, reconnects = 0, maxReconnects = 3 } = {}) {
+    if (stopping) return 'end';
+    if (reason === 'backgrounded') return 'pause';
+    if ((reason === 'expired' || reason === 'connection_lost') && reconnects < maxReconnects) return 'reconnect';
+    return 'end';
+  }
+
+  // Run fn once the document is visible (now, or on the next visibilitychange/pageshow).
+  // Returns a cancel function.
+  function whenVisible(doc, fn) {
+    let done = false;
+    const fire = () => {
+      if (done || !doc || doc.visibilityState !== 'visible') return;
+      done = true; off();
+      try { fn(); } catch {}
+    };
+    const off = () => {
+      try { doc.removeEventListener('visibilitychange', fire); } catch {}
+      try { (doc.defaultView || globalThis).removeEventListener('pageshow', fire); } catch {}
+    };
+    if (doc && doc.visibilityState === 'visible') { done = true; Promise.resolve().then(() => { try { fn(); } catch {} }); return () => {}; }
+    try { doc.addEventListener('visibilitychange', fire); } catch {}
+    try { (doc.defaultView || globalThis).addEventListener('pageshow', fire); } catch {}
+    return () => { done = true; off(); };
+  }
+
+  // W3C Audio Session API (Safari 16.4+): 'play-and-record' is the category for a two-way call.
+  // It does NOT enable background capture; it just makes routing/ducking right while visible.
+  function setAudioSession(nav, type) {
+    try { if (nav && nav.audioSession && 'type' in nav.audioSession) { nav.audioSession.type = type; return true; } } catch {}
+    return false;
+  }
+
+  // Installed to the iPhone home screen — where locking/switching apps always stops the mic.
+  function isIosStandalone(nav, win) {
+    const ua = String((nav && nav.userAgent) || '');
+    if (!/iPhone|iPad|iPod/.test(ua)) return false;
+    if (nav && nav.standalone === true) return true;
+    try { return !!(win && win.matchMedia && win.matchMedia('(display-mode: standalone)').matches); } catch { return false; }
+  }
+  const IOS_BACKGROUND_NOTICE = 'On iPhone, locking the screen or switching apps pauses voice; it resumes when you return.';
+
   function create(opts) {
     const o = opts || {};
     const api = o.api || ((path, init) => fetch(path, init));
@@ -120,6 +186,10 @@
 
     let pc = null, dc = null, mic = null, audioEl = null, state = 'idle', muted = false;
     let finalized = false, closeTimer = null, info = null, usageSeconds = 0;
+    let hiddenAt = 0, visHandler = null, sender = null, recoveringMic = false;
+    const doc = o.document || (typeof document !== 'undefined' ? document : null);
+    const nav = o.navigator || (typeof navigator !== 'undefined' ? navigator : null);
+    const dropReason = () => lostReason({ hidden: !!(doc && doc.visibilityState === 'hidden'), hiddenAt });
     let outCtx = null, outAnalyser = null, outBuf = null, inAnalyser = null, inBuf = null;
     const segments = []; // { id, role, text, startMs, endMs, final }
     const callGate = createCallGate({ onContinue: () => send({ type: 'response.create', event_id: uid('evt') }) });
@@ -252,14 +322,17 @@
         pc.addEventListener('connectionstatechange', () => {
           if (!pc) return;
           if (pc.connectionState === 'failed' || (pc.connectionState === 'disconnected' && state === 'live')) {
-            if (!finalized) teardown('connection_lost');
+            if (!finalized) teardown(dropReason());
           }
         });
-        mic = o.micStream || await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-        for (const track of mic.getAudioTracks()) { track.enabled = !muted; pc.addTrack(track, mic); }
+        setAudioSession(nav, 'play-and-record'); // before capture starts
+        mic = o.micStream || await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+        for (const track of mic.getAudioTracks()) { track.enabled = !muted; sender = pc.addTrack(track, mic); }
+        watchVisibility();
+        setupMediaSession();
         dc = pc.createDataChannel('oai-events');
         dc.addEventListener('message', ({ data }) => { let ev; try { ev = JSON.parse(data); } catch { return; } handle(ev); });
-        dc.addEventListener('close', () => { if (!finalized) teardown('connection_lost'); });
+        dc.addEventListener('close', () => { if (!finalized) teardown(dropReason()); });
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         if (pc.iceGatheringState !== 'complete') {
@@ -283,8 +356,62 @@
       }
     }
 
+    // ---- page visibility: remember when we were hidden; on return, recover an ended mic ----
+    function watchVisibility() {
+      if (!doc || visHandler) return;
+      visHandler = () => {
+        if (doc.visibilityState === 'hidden') { hiddenAt = Date.now(); try { onEvent({ type: 'client.page_hidden' }); } catch {} return; }
+        try { onEvent({ type: 'client.page_visible', hidden_ms: hiddenAt ? Date.now() - hiddenAt : 0 }); } catch {}
+        recoverMicIfEnded();
+      };
+      doc.addEventListener('visibilitychange', visHandler);
+    }
+    // iOS may END the capture track while the page is hidden even when the session survives
+    // (Safari tab). Re-acquire it and swap it into the same sender — no new session needed.
+    async function recoverMicIfEnded() {
+      if (o.micStream || !mic || !sender || recoveringMic || (state !== 'live' && state !== 'connecting')) return false;
+      const t = mic.getAudioTracks()[0];
+      if (t && t.readyState !== 'ended') return false;
+      recoveringMic = true;
+      try {
+        const fresh = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+        const nt = fresh.getAudioTracks()[0];
+        if (!pc || !nt) { fresh.getTracks().forEach((x) => x.stop()); return false; }
+        nt.enabled = !muted;
+        await sender.replaceTrack(nt);
+        try { mic.getTracks().forEach((x) => x.stop()); } catch {}
+        mic = fresh; inAnalyser = null; attachAnalysers(null);
+        try { onEvent({ type: 'client.mic_recovered' }); } catch {}
+        return true;
+      } catch (e) {
+        try { onError({ code: 'mic_recover_failed', message: String((e && e.message) || e).slice(0, 160) }); } catch {}
+        return false;
+      } finally { recoveringMic = false; }
+    }
+    // Lock-screen / Control Center metadata, and the mic toggle where Safari supports it (18.4+).
+    function setupMediaSession() {
+      const ms = nav && nav.mediaSession;
+      if (!ms) return;
+      try { if (typeof MediaMetadata !== 'undefined') ms.metadata = new MediaMetadata({ title: 'Box voice', artist: 'Live call' }); } catch {}
+      try {
+        // The page owns mute UI; let it toggle (falls back to the engine's own mute).
+        ms.setActionHandler('togglemicrophone', () => { try { if (o.onMuteToggle) o.onMuteToggle(); else setMuted(!muted); } catch {} });
+        if (typeof ms.setMicrophoneActive === 'function') ms.setMicrophoneActive(!muted);
+      } catch {} // unsupported action → ignore
+    }
+    function clearMediaSession() {
+      const ms = nav && nav.mediaSession;
+      if (!ms) return;
+      try { ms.setActionHandler('togglemicrophone', null); } catch {}
+      try { ms.metadata = null; } catch {}
+    }
+
     function teardown(reason) {
       if (state === 'closed') return;
+      if (visHandler && doc) { try { doc.removeEventListener('visibilitychange', visHandler); } catch {} visHandler = null; }
+      clearMediaSession();
+      setAudioSession(nav, 'auto');
+      sender = null;
       clearTimeout(closeTimer); closeTimer = null;
       if (idleIv) { clearInterval(idleIv); idleIv = null; }
       for (const s of segments) if (!s.final) finalize(s);
@@ -310,6 +437,7 @@
     function setMuted(m) {
       muted = !!m;
       if (mic) mic.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+      try { if (nav && nav.mediaSession && typeof nav.mediaSession.setMicrophoneActive === 'function') nav.mediaSession.setMicrophoneActive(!muted); } catch {}
     }
 
     // Context appends (≤500 tokens each). delegationId null = session-wide.
@@ -319,12 +447,15 @@
     function instructions(content) { return send({ type: 'session.instructions.append', event_id: uid('evt'), delegation_id: null, content: clip(content) }); }
 
     return {
-      start, close, setMuted, commentary, thinking, instructions, send,
+      start, close, setMuted, commentary, thinking, instructions, send, recoverMicIfEnded,
       get state() { return state; }, get muted() { return muted; }, get info() { return info; },
       get usageSeconds() { return usageSeconds; }, get segments() { return segments; },
       outputLevel: () => levelOf(outAnalyser, outBuf), inputLevel: () => (muted ? 0 : levelOf(inAnalyser, inBuf)),
     };
   }
 
-  window.LiveVoice = { create, createCallGate, runBoxTool, toolLabel, toolDoneLabel, toolOutcome, TOOL_LABELS };
+  window.LiveVoice = {
+    create, createCallGate, runBoxTool, toolLabel, toolDoneLabel, toolOutcome, TOOL_LABELS, agentLabel, AGENT_LABELS,
+    lostReason, closeAction, whenVisible, setAudioSession, isIosStandalone, IOS_BACKGROUND_NOTICE, HIDDEN_GRACE_MS,
+  };
 })();
