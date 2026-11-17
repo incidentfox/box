@@ -876,6 +876,9 @@ async function login() {
   if (!r.ok) { $('loginErr').textContent = 'Wrong token'; return; }
   let role = 'owner';
   try { role = (await r.json()).role || 'owner'; } catch {}
+  enterWithToken(token, role);
+}
+function enterWithToken(token, role = 'owner') {
   TOKEN = token; LS.setItem('cc_token', token);
   const initialRoute = role === 'guest'
     ? { view: 'sessions', filter: 'all', workspace: LS.getItem('box_workspace') === 'personal' ? 'personal' : 'team' }
@@ -883,7 +886,45 @@ async function login() {
   navTo(initialRoute, { replace: true });
   loadConfig(); renderRoute(initialRoute);
 }
-function logout() { LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); navTo({ view: 'login' }, { replace: true }); show('login'); }
+/* Google sign-in: the server runs the OAuth flow; Google opens in a separate window (a
+   popup on desktop, Safari's overlay in an installed PWA), and this page polls once a
+   second to claim the session token. The flow id is kept in localStorage so a same-tab
+   redirect (popup blocked) can still finish when the callback sends us back to "/". */
+const GFLOW_KEY = 'box_google_flow';
+let googlePollTimer = null;
+fetch('/api/auth/google/config').then((r) => r.json()).then((j) => {
+  if (!j || !j.enabled) return;
+  $('googleLoginBtn').classList.remove('hidden'); $('loginOr').classList.remove('hidden'); $('loginTokenHint').classList.add('hidden');
+  let pending = null; try { pending = JSON.parse(LS.getItem(GFLOW_KEY) || 'null'); } catch {}
+  if (pending && pending.id && Date.now() - pending.at < 10 * 60_000 && !TOKEN) pollGoogle(pending.id);
+}).catch(() => {});
+$('googleLoginBtn').onclick = async () => {
+  $('loginErr').textContent = '';
+  // Open the window synchronously (inside the tap) so it isn't popup-blocked; point it at Google once we have the URL.
+  const win = window.open('', 'box-google-signin', 'width=480,height=640');
+  let j = {};
+  try { j = await (await fetch('/api/auth/google/start', { method: 'POST' })).json(); } catch {}
+  if (!j.url) { try { win && win.close(); } catch {} $('loginErr').textContent = j.error || 'Google sign-in unavailable'; return; }
+  try { LS.setItem(GFLOW_KEY, JSON.stringify({ id: j.flowId, at: Date.now() })); } catch {}
+  if (win && !win.closed) { win.location.href = j.url; pollGoogle(j.flowId); }
+  else location.href = j.url;
+};
+function pollGoogle(flowId) {
+  clearInterval(googlePollTimer);
+  const btn = $('googleLoginBtn'); btn.disabled = true;
+  const stop = (err) => { clearInterval(googlePollTimer); btn.disabled = false; try { LS.removeItem(GFLOW_KEY); } catch {} if (err) $('loginErr').textContent = err; };
+  const startedAt = Date.now();
+  googlePollTimer = setInterval(async () => {
+    if (Date.now() - startedAt > 10 * 60_000) return stop('Sign-in timed out');
+    let j; try { j = await (await fetch(`/api/auth/google/poll?flow=${encodeURIComponent(flowId)}`)).json(); } catch { return; }
+    if (j.status === 'pending') return;
+    if (j.status === 'ok' && j.token) { stop(); enterWithToken(j.token, 'owner'); return; }
+    stop(j.status === 'expired' ? 'Sign-in expired — try again' : (j.error || 'Sign-in failed'));
+  }, 1000);
+}
+function logout() {
+  if (TOKEN.startsWith('gs_')) fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` } }).catch(() => {});
+  LS.removeItem('cc_token'); TOKEN = ''; if (ws) ws.close(); navTo({ view: 'login' }, { replace: true }); show('login'); }
 
 /* ---------- sessions ---------- */
 let defaultCwd = '';  // filled from /api/sessions (server's CC_WORKSPACE / $HOME)

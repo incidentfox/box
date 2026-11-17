@@ -210,6 +210,8 @@ input, textarea { font: inherit; }
 .logo { width: 88px; height: 88px; border-radius: 21px; box-shadow: 0 6px 20px rgba(180,120,90,.25); }
 h1 { margin: 0; font-size: 26px; font-weight: 700; }
 #tokenInput { width: 100%; max-width: 340px; padding: 14px 16px; font-size: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); outline: none; }
+.googleBtn { width: 100%; max-width: 340px; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 13px 14px; font-size: 16px; font-weight: 600; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 14px; }
+.googleBtn:disabled { opacity: .6; cursor: default; }
 .primary { width: 100%; max-width: 340px; padding: 14px; font-size: 16px; font-weight: 600; background: var(--accent); color: #fff; border-radius: 14px; }
 
 /* top bar */

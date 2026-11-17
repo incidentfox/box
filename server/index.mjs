@@ -23,6 +23,7 @@ import { rescueSessions, systemdUserAvailable } from './session-scope.mjs';
 import { buildChildEnv } from './child-env.mjs';
 import * as accounts from './accounts.mjs';
 import * as providerLogin from './provider-login.mjs';
+import { createGoogleAuth } from './google-auth.mjs';
 import { promptFromBuffer } from './tui-prompt.mjs';
 import { answerAskQuestions } from './ask-answers.mjs';
 import { applySettingsAction } from './dialog-settings.mjs';
@@ -2808,6 +2809,7 @@ app.use('/api', (req, res, next) => {
   };
   next();
 });
+const googleAuth = createGoogleAuth({ cfg, stateFile: join(STATE_DIR, 'google-sessions.json') });
 const bearerOf = (req) => {
   const h = req.headers.authorization || '';
   return (h.startsWith('Bearer ') ? h.slice(7) : null) || req.query.token || '';
@@ -2817,6 +2819,7 @@ const bearerOf = (req) => {
 const principalOf = (token) => {
   const t = String(token || '');
   if (t && t === AUTH_TOKEN) return team.OWNER;
+  if (googleAuth.resolveSession(t)) return team.OWNER;
   return team.resolveGuest(t);
 };
 const authOk = (req) => !!principalOf(bearerOf(req));
@@ -2918,6 +2921,36 @@ app.post('/api/login', (req, res) => {
   const guest = team.resolveGuest(tok);
   if (guest) return res.json({ ok: true, role: 'guest', member: { id: guest.id, name: guest.name, color: guest.color } });
   return res.status(401).json({ error: 'bad token' });
+});
+
+// ---- Google sign-in (owner) — see server/google-auth.mjs --------------------
+// Public: the login screen asks whether to show the button. Leaks nothing but on/off.
+app.get('/api/auth/google/config', (req, res) => res.json({ enabled: googleAuth.enabled() }));
+const googleRedirectUri = (req) => cfg('BOX_GOOGLE_REDIRECT_URI')
+  || `${String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0]}://${req.headers['x-forwarded-host'] || req.headers.host}/api/auth/google/callback`;
+app.post('/api/auth/google/start', (req, res) => {
+  if (tooManyGuesses(req)) return res.status(429).json({ error: 'too many attempts' });
+  const out = googleAuth.start(googleRedirectUri(req));
+  if (out.error) return res.status(404).json(out);
+  res.json(out);
+});
+app.get('/api/auth/google/callback', async (req, res) => {
+  const out = await googleAuth.callback({ state: req.query.state, code: req.query.code, error: req.query.error });
+  const esc = (v) => String(v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  const msg = out.ok ? 'Signed in. Returning to Box…' : `Sign-in failed: ${esc(out.error)}`;
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(out.ok ? 200 : 400).send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Box sign-in</title><body style="font:16px system-ui;padding:40px 16px;text-align:center;color:#333;background:#faf7f4">
+<p>${msg}</p><p><a href="/">Open Box</a></p>
+<script>setTimeout(function(){try{if(window.opener){window.close();return}}catch(e){}location.replace('/')},${out.ok ? 600 : 4000});</script>`);
+});
+app.get('/api/auth/google/poll', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(googleAuth.poll(req.query.flow));
+});
+app.post('/api/auth/logout', (req, res) => {
+  const t = bearerOf(req);
+  res.json({ ok: t.startsWith('gs_') ? googleAuth.revokeSession(t) : false });
 });
 
 // ---- team / shared workspace ----------------------------------------------
