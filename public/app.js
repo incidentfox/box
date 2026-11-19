@@ -79,7 +79,7 @@ const AGENT_LABEL = Object.fromEntries(Object.entries(AGENT_META).map(([k, v]) =
 const DEFAULT_CONTEXT_WINDOW = { codex: 258400, claude: 1000000, gemini: 1000000, experiential: 1050000, deepseek: 65536, agy: 1000000, mac: 258400 };
 function defaultContextWindow(agent) {
   const model = String(((cur.settings || {})[agent] || {}).model || '').toLowerCase();
-  if ((agent === 'codex' || agent === 'experiential' || agent === 'mac') && (!model || model === 'gpt-6-astra' || model === 'gpt-6.1-sol' || model === 'gpt-6-sol' || model.startsWith('gpt-5.6'))) return 1050000;
+  if ((agent === 'codex' || agent === 'experiential' || agent === 'mac') && (!model || model === 'gpt-6-astra' || /^gpt-6\.[12]-(?:sol|astra|terra)$/.test(model) || model === 'gpt-6-sol' || model.startsWith('gpt-5.6'))) return 1050000;
   if (agent === 'claude') return (model === 'claude-opus-5-5' || /\[1m\]$/.test(model)) ? 1000000 : 200000;
   return DEFAULT_CONTEXT_WINDOW[agent];
 }
@@ -3747,7 +3747,7 @@ function normalizeSettings(settings) {
   return {
     codex: { ...DEFAULT_SETTINGS.codex, ...((settings && settings.codex) || {}) },
     gemini: { ...DEFAULT_SETTINGS.gemini, ...((settings && settings.gemini) || {}) },
-    experiential: { model: 'gpt-6-astra', reasoningEffort: clampCodexEffort('gpt-6-astra', settings?.experiential?.reasoningEffort || 'high') },
+    experiential: { model: 'gpt-6-astra', reasoningEffort: clampCodexEffort('gpt-6-astra', settings?.experiential?.reasoningEffort || 'high', false) },
     deepseek: { ...DEFAULT_SETTINGS.deepseek, ...deepseek, model: DEFAULT_SETTINGS.deepseek.model, reasoningEffort: deepseekEffort },
     agy: { ...DEFAULT_SETTINGS.agy, ...((settings && settings.agy) || {}) },
     mac: { ...DEFAULT_SETTINGS.mac, ...((settings && settings.mac) || {}) },
@@ -4760,7 +4760,42 @@ function renderSuggest(items) {
   s.classList.remove('hidden'); suggestOpen = true;
 }
 
+// Each endpoint owns its catalog: a remote box may have different CLI access.
+const modelCatalogs = new Map();
+function activeCatalog(provider, all = false) {
+  const catalog = modelCatalogs.get(epUrl(cur.ep || LOCAL_EP, '/api/models'))?.data?.[provider];
+  return (all ? catalog?.allModels || catalog?.models : catalog?.models) || [];
+}
+function modelChoices(provider, fallback, selected) {
+  const discovered = activeCatalog(provider);
+  const choices = discovered.length ? [...discovered] : [...fallback];
+  if (selected && !choices.some((m) => m.id === selected)) choices.push(activeCatalog(provider, true).find((m) => m.id === selected) || { id: selected, label: selected, desc: 'Current selection · retained for this chat' });
+  return choices;
+}
+async function loadModelCatalog(ep) {
+  const key = epUrl(ep, '/api/models'), cached = modelCatalogs.get(key);
+  if (cached && Date.now() - cached.at < 60000) return;
+  if (cached?.pending) return cached.pending;
+  const entry = cached || {};
+  entry.pending = (async () => {
+    try {
+      const response = await api('/api/models', { ep, signal: AbortSignal.timeout(25000) });
+      if (!response.ok) throw new Error('Catalog unavailable');
+      const data = await response.json();
+      for (const provider of ['codex', 'claude']) {
+        if (!Array.isArray(data[provider]?.models)) throw new Error('Invalid catalog');
+      }
+      entry.data = data;
+    } catch { /* Keep cached metadata or the bundled fallback when offline. */ }
+    finally { entry.at = Date.now(); delete entry.pending; }
+  })();
+  modelCatalogs.set(key, entry);
+  return entry.pending;
+}
 const CODEX_MODELS = [
+  { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol', desc: 'Latest · coding and everyday work' },
+  { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra', desc: 'Latest · complex coding and professional work' },
+  { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', desc: 'Efficient visual and computer work' },
   { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', desc: 'Default · complex coding and agentic work' },
   { id: 'gpt-6-sol', label: 'GPT-6 Sol', desc: 'Previous Sol model' },
   { id: 'gpt-6-astra', label: 'GPT-6 Astra', desc: 'Most capable GPT-6 model' },
@@ -4802,27 +4837,25 @@ const CODEX_EFFORTS = [
   { id: 'max', label: 'Max', desc: 'Maximum reasoning depth' },
   { id: 'ultra', label: 'Ultra', desc: 'Maximum reasoning + automatic task delegation' },
 ];
-// Mirrors the model capabilities Codex accepts: Astra supports through Max, while the
-// GPT-5.6 family goes past xhigh and `ultra` is Sol/Terra only. This used to be inverted —
-// it hid Max on 5.6 (where it works) and offered it on 5.5/5.4 (where it does not), so a
-// chat on Max showed NO effort selected and older models could be sent an effort they
-// reject. Codex takes whatever we pass, so the picker has to match the model.
-const codexEffortsForModel = (model) => {
+// Live CLI metadata takes precedence over the offline compatibility table.
+const codexEffortsForModel = (model, live = true) => {
+  const discovered = live && typeof activeCatalog === 'function' ? activeCatalog('codex', true).find((m) => m.id === model) : null;
+  if (discovered) return discovered.efforts;
   const m = String(model || '');
-  const deepest = (m === 'gpt-6-astra' || m === 'gpt-6.1-sol' || m === 'gpt-6-sol') ? 'max' : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
+  const deepest = (/^gpt-6(?:\.[12])?-(?:sol|astra|terra)$/.test(m)) ? (live ? 'ultra' : 'max') : (!m.startsWith('gpt-5.6') ? 'xhigh' : (/^gpt-5\.6-(sol|terra)/.test(m) ? 'ultra' : 'max'));
   return CODEX_EFFORTS.slice(0, CODEX_EFFORTS.findIndex((e) => e.id === deepest) + 1);
 };
 // Switching models can strand an effort the new model doesn't take (Sol on Ultra → 5.5).
 // Fall back to the deepest that model does support rather than silently sending a bad value.
-const clampCodexEffort = (model, effort) => {
-  const allowed = codexEffortsForModel(model);
-  return allowed.some((e) => e.id === effort) ? effort : allowed[allowed.length - 1].id;
+const clampCodexEffort = (model, effort, live = true) => {
+  const allowed = codexEffortsForModel(model, live);
+  return allowed.some((e) => e.id === effort) ? effort : (allowed[allowed.length - 1]?.id || '');
 };
 const CLAUDE_MODELS = [
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', desc: 'Default · long-running coding and knowledge work' },
-  { id: 'opus', label: 'Opus 4.8', desc: 'Previous Opus' },
-  { id: 'sonnet', label: 'Sonnet', desc: 'Faster, lower cost' },
-  { id: 'fable', label: 'Fable 5.1', desc: 'Fast, fewer check-ins (heavier usage)' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', desc: 'Faster, lower cost' },
+  { id: 'claude-fable-5-1[1m]', label: 'Claude Fable 5.1 (1M)', desc: 'Fast, fewer check-ins' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', desc: 'Fast lightweight tasks' },
 ];
 const CLAUDE_EFFORTS = [
   { id: 'low', label: 'Low' },
@@ -4834,14 +4867,21 @@ const CLAUDE_EFFORTS = [
 function settingRow(item, selected, fn) {
   return { ic: selected ? '✓' : '', label: item.label, desc: item.desc || item.id, sel: selected, fn };
 }
-function openModelSheet() {
+async function openModelSheet() {
+  // This replaces the agent sheet; keep its history entry across async discovery.
+  pendingSheetHistory = null;
+  const chat = cur, endpoint = cur.ep || LOCAL_EP;
+  if (['codex', 'claude'].includes(agentType(cur.agent))) {
+    await loadModelCatalog(endpoint);
+    if (cur !== chat || (cur.ep || LOCAL_EP) !== endpoint) return;
+  }
   cur.settings = normalizeSettings(cur.settings);
   const agent = agentType(cur.agent);
   const cfg = cur.settings[agent];
   const rows = [];
   if (agent === 'codex') {
     rows.push({ ic: '', label: 'Model', desc: 'Applies to the next Codex turn in this Box chat', fn: () => openModelSheet() });
-    for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
+    for (const m of modelChoices('codex', CODEX_MODELS, cfg.model)) rows.push(settingRow(m, cfg.model === m.id, () => {
       cur.settings.codex.model = m.id;
       cur.settings.codex.reasoningEffort = clampCodexEffort(m.id, cur.settings.codex.reasoningEffort);
       sendSettings(); toast(`Codex model: ${m.label}`); openModelSheet();
@@ -4859,7 +4899,7 @@ function openModelSheet() {
   if (agent === 'experiential') {
     rows.push(settingRow({ id: 'gpt-6-astra', label: 'GPT-6 Astra', desc: 'Through Experiential Labs' }, true, () => {}));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Applies to the next Experiential turn', fn: openModelSheet });
-    for (const e of codexEffortsForModel(cfg.model)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => {
+    for (const e of codexEffortsForModel(cfg.model, false)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => {
       cur.settings.experiential.reasoningEffort = e.id;
       sendSettings(); openModelSheet();
     }));
@@ -4886,17 +4926,17 @@ function openModelSheet() {
     rows.push({ ic: '', label: 'Model', desc: 'Codex model used on the next Computer Use turn (runs on your Mac)', fn: () => openModelSheet() });
     for (const m of CODEX_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => {
       cur.settings.mac.model = m.id;
-      cur.settings.mac.reasoningEffort = clampCodexEffort(m.id, cur.settings.mac.reasoningEffort);
+      cur.settings.mac.reasoningEffort = clampCodexEffort(m.id, cur.settings.mac.reasoningEffort, false);
       sendSettings(); toast(`Computer Use model: ${m.label}`); openModelSheet();
     }));
     rows.push({ ic: '', label: 'Reasoning effort', desc: 'Higher is slower but more thorough', fn: () => openModelSheet() });
-    for (const e of codexEffortsForModel(cfg.model)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.mac.reasoningEffort = e.id; sendSettings(); toast(`Computer Use effort: ${e.label}`); openModelSheet(); }));
+    for (const e of codexEffortsForModel(cfg.model, false)) rows.push(settingRow(e, cfg.reasoningEffort === e.id, () => { cur.settings.mac.reasoningEffort = e.id; sendSettings(); toast(`Computer Use effort: ${e.label}`); openModelSheet(); }));
     return openSheet('Computer Use model', rows);
   }
   rows.push({ ic: '', label: 'Model', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
-  for (const m of CLAUDE_MODELS) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.claude.model = m.id; sendSettings(); toast(`Claude model: ${m.label}`); openModelSheet(); }));
+  for (const m of modelChoices('claude', CLAUDE_MODELS, cfg.model)) rows.push(settingRow(m, cfg.model === m.id, () => { cur.settings.claude.model = m.id; const efforts = m.efforts || CLAUDE_EFFORTS; if (!efforts.some((e) => e.id === cfg.effort)) cur.settings.claude.effort = m.defaultEffort || efforts.at(-1)?.id || ''; sendSettings(); toast(`Claude model: ${m.label}`); openModelSheet(); }));
   rows.push({ ic: '', label: 'Effort', desc: 'Used when Box starts or reopens the Claude bridge', fn: () => openModelSheet() });
-  for (const e of CLAUDE_EFFORTS) rows.push(settingRow(e, cfg.effort === e.id, () => { cur.settings.claude.effort = e.id; sendSettings(); toast(`Claude effort: ${e.label}`); openModelSheet(); }));
+  for (const e of (activeCatalog('claude', true).find((m) => m.id === cfg.model)?.efforts || CLAUDE_EFFORTS)) rows.push(settingRow(e, cfg.effort === e.id, () => { cur.settings.claude.effort = e.id; sendSettings(); toast(`Claude effort: ${e.label}`); openModelSheet(); }));
   openSheet('Claude model', rows);
 }
 function openApprovalsSheet() {

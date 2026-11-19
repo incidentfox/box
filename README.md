@@ -455,3 +455,17 @@ remote-control bridge and Codex over `codex exec`, and serves the plain-JS front
 ## License
 
 [GPL-3.0-or-later](LICENSE). Built on top of [Claude Code](https://claude.com/claude-code).
+
+### Model menus
+
+Box discovers Codex models through its app-server catalog and Claude Code models through
+its initialization catalog, without starting a model turn. It refreshes hourly and when
+an expired catalog is requested. Menus show the latest three available generations
+(per Claude family), including the reasoning levels each CLI advertises. An older
+model already selected in a chat remains available for that chat. Models with an
+unrecognized version format remain visible so new naming schemes are not hidden.
+
+The last successful catalog is stored privately in `~/.cc-mobile/model-catalog.json`;
+temporary CLI or network failures preserve it. A bundled menu is available before
+the first successful discovery. Update the installed CLIs to discover newly supported
+models; CLI installation and scheduling remain host administration responsibilities.
