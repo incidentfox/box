@@ -88,8 +88,8 @@ try {
   if (await page.locator('.sheetRow').filter({ hasText: 'Maximum reasoning depth' }).count() !== 1) {
     throw new Error('GPT-6.1 Sol Max effort option was not rendered exactly once');
   }
-  if (await page.locator('.sheetRow').filter({ hasText: 'Ultra' }).count() !== 0) {
-    throw new Error('GPT-6.1 Sol must not render the unsupported Ultra effort');
+  if (await page.locator('.sheetRow').filter({ hasText: 'Ultra' }).count() !== 1) {
+    throw new Error('GPT-6.1 Sol must render the supported Ultra effort');
   }
 
   const contextTitle = await page.locator('#contextMeter').getAttribute('title');

@@ -16,12 +16,11 @@ vm.runInNewContext(`${app.slice(start, end)}\nefforts = codexEffortsForModel; cl
 // instead of failing the cross-realm prototype check.
 const ids = (model) => Array.from(ctx.efforts(model), (e) => e.id);
 
-// Expected values are Codex's own `supported_reasoning_levels` (~/.codex/models_cache.json).
-// If Codex adds a level or a model, update BOTH this table and codexEffortsForModel.
+// Bundled offline snapshot; live discovery overrides it without a frontend release.
 test('effort list matches what each model actually supports', () => {
-  assert.deepEqual(ids('gpt-6-astra'), ['low', 'medium', 'high', 'xhigh', 'max']);
-  assert.deepEqual(ids('gpt-6.1-sol'), ['low', 'medium', 'high', 'xhigh', 'max']);
-  assert.deepEqual(ids('gpt-6-sol'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(ids('gpt-6-astra'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  assert.deepEqual(ids('gpt-6.1-sol'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  assert.deepEqual(ids('gpt-6-sol'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   assert.deepEqual(ids('gpt-5.6-sol'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   assert.deepEqual(ids('gpt-5.6-terra'), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   assert.deepEqual(ids('gpt-5.6-luna'), ['low', 'medium', 'high', 'xhigh', 'max']);
@@ -44,9 +43,9 @@ test('an unknown or empty model falls back to the universally-safe list', () => 
 });
 
 test('switching models clamps a stranded effort to the deepest supported', () => {
-  assert.equal(ctx.clamp('gpt-6-astra', 'ultra'), 'max');
-  assert.equal(ctx.clamp('gpt-6.1-sol', 'ultra'), 'max');
-  assert.equal(ctx.clamp('gpt-6-sol', 'ultra'), 'max');
+  assert.equal(ctx.clamp('gpt-6-astra', 'ultra'), 'ultra');
+  assert.equal(ctx.clamp('gpt-6.1-sol', 'ultra'), 'ultra');
+  assert.equal(ctx.clamp('gpt-6-sol', 'ultra'), 'ultra');
   assert.equal(ctx.clamp('gpt-5.5', 'ultra'), 'xhigh');
   assert.equal(ctx.clamp('gpt-5.5', 'max'), 'xhigh');
   assert.equal(ctx.clamp('gpt-5.6-luna', 'ultra'), 'max');
@@ -63,4 +62,13 @@ test('GPT-6.1 Sol at medium is the default Codex setting', () => {
   assert.ok(app.includes("{ id: 'gpt-6.1-sol'"));
   assert.ok(app.includes("{ id: 'gpt-6-sol'"));
   assert.ok(app.includes("{ id: 'claude-opus-5-5'"));
+});
+
+test('live capabilities support future models and unsupported effort is cleared', () => {
+  ctx.activeCatalog = () => [{ id: 'future', efforts: [{ id: 'adaptive', label: 'Adaptive' }] }, { id: 'simple', efforts: [] }];
+  assert.deepEqual(ids('future'), ['adaptive']);
+  assert.equal(ctx.clamp('future', 'ultra'), 'adaptive');
+  assert.deepEqual(ids('simple'), []);
+  assert.equal(ctx.clamp('simple', 'high'), '');
+  delete ctx.activeCatalog;
 });

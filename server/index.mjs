@@ -34,6 +34,7 @@ import { codexResumeThreadActive, terminateCodexThreadProcesses } from './codex-
 import { terminateProcessWithEscalation } from './process-termination.mjs';
 import { procTableSnapshot, procLinesFor } from './proc-table.mjs';
 import { codexRpc } from './codex-app-server-client.mjs';
+import { createModelCatalog } from './model-catalog.mjs';
 import { CODEX_TUI_COMMANDS } from './codex-slash-commands.mjs';
 import {
   armTaskFinisher, clearTaskFinisherFailureCount, codexCreditExhausted, DEFAULT_CONTINUE_MESSAGE, dueWakeups, normalizeAutoContinue,
@@ -1449,7 +1450,7 @@ const DEFAULT_CONTEXT_WINDOWS = {
 function modelContextWindow(agent, model) {
   const m = String(model || '').toLowerCase();
   if (agent === 'codex' || agent === 'mac' || agent === 'experiential') {
-    if (!m || m === 'gpt-6-astra' || m === 'gpt-6.1-sol' || m === 'gpt-6-sol' || m.startsWith('gpt-5.6')) return 1050000;
+    if (!m || m === 'gpt-6-astra' || /^gpt-6\.[12]-(?:sol|astra|terra)$/.test(m) || m === 'gpt-6-sol' || m.startsWith('gpt-5.6')) return 1050000;
     return DEFAULT_CONTEXT_WINDOWS.codex;
   }
   if (agent === 'gemini') return DEFAULT_CONTEXT_WINDOWS.gemini;
@@ -3992,6 +3993,15 @@ function agyAvailable() {
 // the owner name, and which optional integrations are wired so it can hide the Board /
 // brain UI when they aren't configured. Safe to expose (no secrets).
 const LINEAR_ENABLED = !!((LINEAR_KEY_RAW || linearLite) && LINEAR_TEAM_ID);
+const modelCatalog = createModelCatalog({ stateDir: STATE_DIR, disabled: process.env.BOX_SKIP_META_PROBE === '1' });
+if (process.env.BOX_SKIP_META_PROBE !== '1') {
+  setTimeout(() => modelCatalog.get().catch(() => {}), 5000).unref();
+  setInterval(() => modelCatalog.get().catch(() => {}), 3600000).unref();
+}
+app.get('/api/models', requireAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(await modelCatalog.get());
+});
 app.get('/api/config', requireAuth, (req, res) => {
   // A guest gets a deliberately small config: the shared workspace instead of the box's
   // real home/cwd, no feature flags that would render owner-only UI, no overlay labels.

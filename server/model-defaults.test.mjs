@@ -19,6 +19,8 @@ test('server reports GPT-6.1 Sol, GPT-6 Sol and Astra full context for Codex and
   const ctx = {};
   vm.runInNewContext(`${server.slice(start, end)}\ncontextWindow = modelContextWindow;`, ctx);
   assert.equal(ctx.contextWindow('codex', 'gpt-6.1-sol'), 1050000);
+  assert.equal(ctx.contextWindow('codex', 'gpt-6.2-sol'), 1050000);
+  assert.equal(ctx.contextWindow('codex', 'gpt-6.2-astra'), 1050000);
   assert.equal(ctx.contextWindow('codex', 'gpt-6-sol'), 1050000);
   assert.equal(ctx.contextWindow('codex', 'gpt-6-astra'), 1050000);
   assert.equal(ctx.contextWindow('mac', 'gpt-6-astra'), 1050000);
