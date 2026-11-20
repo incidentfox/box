@@ -640,6 +640,15 @@ export class RCEngine extends EventEmitter {
       s.pty.write('\r');
       return true;
     }
+    if (sel.text != null && sel.dismiss) {
+      // A menu with NO free-text row (multi-question AskUserQuestion, its "Submit answers" review
+      // screen, plan menus): Escape declines the menu and returns to the normal composer, then the
+      // typed reply goes in as an ordinary message so Claude reads it as the answer. Never blocks.
+      s.pty.write('\x1b'); await sleep(700);
+      s.pty.write(bracketedPaste(String(sel.text))); await sleep(150);
+      s.pty.write('\r');
+      return true;
+    }
     if (Number.isInteger(sel.index) && sel.index >= 1) {
       await down(sel.index);
       s.pty.write('\r');
