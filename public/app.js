@@ -3859,12 +3859,22 @@ async function submit() {
     // "Claude is waiting for your input" prompt has NO menu (hasOptions=false); there the typed
     // reply IS the answer and must go straight through. (This case used to be wrongly blocked,
     // so you could never answer a permission prompt from the phone.)
-    if (waitingState.hasOptions && !(waitingState.freeTextIndex >= 1)) {
-      toast('Tap an option above, or answer on desktop'); return;
-    }
-    const ft = waitingState.freeTextIndex; const hadMenu = waitingState.hasOptions; waitingState = null;   // optimistic
+    // A menu with no free-text row (multi-question asks, the "Submit answers" review screen) used
+    // to block typing here. Now: a bare option number picks that option; any other text dismisses
+    // the menu and is sent to Claude as a normal message — typing is never blocked.
+    const ft = waitingState.freeTextIndex; const hadMenu = waitingState.hasOptions;
+    const nums = waitingState.optionNumbers || [];
+    const picked = hadMenu && /^\d{1,2}$/.test(text) && nums.includes(Number(text)) ? Number(text) : null;
+    waitingState = null;   // optimistic
     $('input').value = ''; saveDraft(cur.key, ''); autoGrow(); sendTyping(false); addUser(text, [], cur.shared ? cur.me : null);
-    const sel = (hadMenu && ft >= 1) ? { text, freeTextIndex: ft } : { text };
+    // An unparsed AskUserQuestion menu (card still pending) can't take plain typed chars either.
+    const askOpen = [...document.querySelectorAll('.askUserCard')].some((c) => !c.dataset.sent && c.querySelector('.askUserOpt:not(.askUserOther)'));
+    const sel = picked ? { index: picked }
+      : !hadMenu ? (askOpen ? { text, dismiss: true } : { text })
+      : ft >= 1 ? { text, freeTextIndex: ft }
+      : { text, dismiss: true };
+    // The tappable AskUserQuestion card is superseded by the typed reply.
+    document.querySelectorAll('.askUserCard:not([data-sent])').forEach((c) => { c.dataset.sent = '1'; c.querySelectorAll('.askUserOpt').forEach((b) => { b.disabled = true; }); });
     try {
     if (index?.dialog && typeof ws?.readyState === 'number' && ws.readyState !== WebSocket.OPEN) throw new Error('Disconnected');
     ws.send(JSON.stringify({ type: 'answer_waiting', key: cur.key, sel })); } catch {}
@@ -3991,6 +4001,7 @@ function renderWaiting(o) {
     q.textContent = p.title || (p.kind === 'plan' ? 'Review the plan and choose how to proceed' : 'Claude is asking a question');
     card.appendChild(q);
     const ft = p.options.find((x) => x.freeText); if (ft) waitingState.freeTextIndex = ft.n;
+    waitingState.optionNumbers = p.options.filter((x) => !x.freeText).map((x) => x.n);
     for (const opt of p.options) {
       if (opt.freeText) continue;                          // the composer is the free-text path
       if (/^chat about this$/i.test(opt.label)) continue;  // TUI escape, not a real answer
@@ -4009,7 +4020,7 @@ function renderWaiting(o) {
     const hint = document.createElement('div'); hint.className = 'waitHint';
     const askPending = [...document.querySelectorAll('.askUserCard')].some((c) => !c.dataset.sent && c.querySelector('.askUserOpt:not(.askUserOther)'));
     hint.textContent = o.answerable
-      ? (askPending ? 'Tap your answer(s) on the question card above.' : 'Type a reply below to continue — for a yes/no or numbered menu, type the option number (e.g. 1).')
+      ? (askPending ? 'Tap your answer(s) on the question card above, or type a reply below.' : 'Type a reply below to continue — for a yes/no or numbered menu, type the option number (e.g. 1).')
       : 'Open this chat on desktop to answer.';
     card.appendChild(hint);
   }

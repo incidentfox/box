@@ -151,3 +151,12 @@ test('a compaction summary row is a compacted marker, never a user turn', () => 
   assert.deepEqual(kinds(real), ['user']);
   assert.equal(isCompactSummaryEntry({ type: 'assistant', isCompactSummary: true, message: { content: [] } }), false);
 });
+
+test('typed reply to a menu with no free-text row dismisses it and sends the text', async () => {
+  const engine = new RCEngine(); const writes = [];
+  engine.sessions.set('menu', { booted_p: Promise.resolve(), pty: { write: k => writes.push(k) } });
+  assert.equal(await engine.answerWaiting('menu', { text: 'build and ship, draft the email', dismiss: true }), true);
+  assert.equal(writes[0], '\x1b');
+  assert.ok(writes[1].includes('build and ship, draft the email'));
+  assert.equal(writes.at(-1), '\r');
+});
